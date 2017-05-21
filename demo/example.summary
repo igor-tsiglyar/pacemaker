@@ -1,0 +1,21 @@
+
+Current cluster status:
+Online: [ node1 node2 ]
+
+ test	(ocf::pacemaker:Dummy):	Stopped
+
+Transition Summary:
+ * Start   test	(node1)
+
+Executing cluster transition:
+ * Resource action: test            meta-data on node2
+ * Resource action: test            meta-data on node1
+ * Resource action: test            monitor on node2
+ * Resource action: test            monitor on node1
+ * Resource action: test            start on node1
+
+Revised cluster status:
+Online: [ node1 node2 ]
+
+ test	(ocf::pacemaker:Dummy):	Started node1
+

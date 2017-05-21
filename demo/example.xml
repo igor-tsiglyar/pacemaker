@@ -1,0 +1,50 @@
+<cib crm_feature_set="3.0.13" validate-with="pacemaker-2.9" epoch="29" num_updates="3" admin_epoch="0" cib-last-written="Sun May 21 16:32:52 2017" update-origin="node1" update-client="cibadmin" update-user="root" have-quorum="1" dc-uuid="1">
+  <configuration>
+    <crm_config>
+      <cluster_property_set id="id0">
+        <nvpair id="id1" name="have-watchdog" value="false"/>
+        <nvpair id="id2" name="dc-version" value="1.1.17-c49e541"/>
+        <nvpair id="id3" name="cluster-infrastructure" value="corosync"/>
+        <nvpair id="id4" name="cluster-name" value="lbcluster"/>
+        <nvpair name="stonith-enabled" value="false" id="id5"/>
+        <nvpair name="no-quorum-policy" value="ignore" id="id6"/>
+      </cluster_property_set>
+    </crm_config>
+    <nodes>
+      <node id="1" uname="node1"/>
+      <node id="2" uname="node2"/>
+    </nodes>
+    <resources>
+      <primitive id="test" class="ocf" provider="pacemaker" type="Dummy">
+        <instance_attributes score="2" id="id7">
+          <rule score="INFINITY" id="id8">
+            <expression attribute="#ra-version" operation="gt" value="1.0" type="version" id="id9"/>
+          </rule>
+          <nvpair name="fake" value="real" id="id10"/>
+        </instance_attributes>
+        <instance_attributes score="1" id="id11">
+          <nvpair name="fake" value="fake" id="id12"/>
+	  <nvpair name="envfile" value="/tmp/test.env" id="id13"/>
+        </instance_attributes>
+        <operations>
+          <op name="start" interval="0" id="id14">
+            <meta_attributes score="2" id="id15">
+              <rule score="INFINITY" id="id16">
+                <expression attribute="#ra-version" operation="gt" value="1.0" type="version" id="id17"/>
+              </rule>
+              <nvpair name="timeout" value="120s" id="id18"/>
+            </meta_attributes>
+            <meta_attributes score="1" id="id19">
+              <nvpair name="timeout" value="60s" id="id20"/>
+            </meta_attributes>
+          </op>
+        </operations>
+      </primitive>
+    </resources>
+    <constraints/>
+  </configuration>
+  <status>
+    <node_state id="21" uname="node1" in_ccm="true" crmd="online" crm-debug-origin="do_update_resource" join="member" expected="member"/>
+    <node_state id="22" uname="node2" in_ccm="true" crmd="online" join="member" crm-debug-origin="do_update_resource" expected="member"/>
+  </status>
+</cib>

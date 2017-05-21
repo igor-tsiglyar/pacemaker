@@ -1,0 +1,7 @@
+digraph "g" {
+"test_monitor_0 node1" -> "test_start_0 node1" [ style = bold]
+"test_monitor_0 node1" [ style=bold color="green" fontcolor="black"]
+"test_monitor_0 node2" -> "test_start_0 node1" [ style = bold]
+"test_monitor_0 node2" [ style=bold color="green" fontcolor="black"]
+"test_start_0 node1" [ style=bold color="green" fontcolor="black"]
+}

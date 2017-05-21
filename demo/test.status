@@ -1,0 +1,13 @@
+Stack: corosync
+Current DC: node1 (version 1.1.17-c49e541) - partition with quorum
+Last updated: Sun May 21 17:32:52 2017
+Last change: Sun May 21 17:28:49 2017 by root via cibadmin on node1
+
+2 nodes configured
+1 resource configured
+
+Online: [ node1 node2 ]
+
+Active resources:
+
+ test	(ocf::pacemaker:Dummy):	Started node1

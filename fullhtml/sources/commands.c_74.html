@@ -1,0 +1,2739 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2009 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;sys/types.h&gt;</a>
+<a name="ln28">#include &lt;sys/wait.h&gt;</a>
+<a name="ln29">#include &lt;sys/stat.h&gt;</a>
+<a name="ln30">#include &lt;unistd.h&gt;</a>
+<a name="ln31">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;stdlib.h&gt;</a>
+<a name="ln34">#include &lt;errno.h&gt;</a>
+<a name="ln35">#include &lt;fcntl.h&gt;</a>
+<a name="ln36">#include &lt;ctype.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;crm/crm.h&gt;</a>
+<a name="ln39">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln41">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln42">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln43">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">#include &lt;crm/stonith-ng.h&gt;</a>
+<a name="ln46">#include &lt;crm/fencing/internal.h&gt;</a>
+<a name="ln47">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln48"> </a>
+<a name="ln49">#if SUPPORT_CIBSECRETS</a>
+<a name="ln50">#  include &lt;crm/common/cib_secrets.h&gt;</a>
+<a name="ln51">#endif</a>
+<a name="ln52"> </a>
+<a name="ln53">#include &lt;internal.h&gt;</a>
+<a name="ln54"> </a>
+<a name="ln55">GHashTable *device_list = NULL;</a>
+<a name="ln56">GHashTable *topology = NULL;</a>
+<a name="ln57">GList *cmd_list = NULL;</a>
+<a name="ln58"> </a>
+<a name="ln59">struct device_search_s {</a>
+<a name="ln60">    /* target of fence action */</a>
+<a name="ln61">    char *host;</a>
+<a name="ln62">    /* requested fence action */</a>
+<a name="ln63">    char *action;</a>
+<a name="ln64">    /* timeout to use if a device is queried dynamically for possible targets */</a>
+<a name="ln65">    int per_device_timeout;</a>
+<a name="ln66">    /* number of registered fencing devices at time of request */</a>
+<a name="ln67">    int replies_needed;</a>
+<a name="ln68">    /* number of device replies received so far */</a>
+<a name="ln69">    int replies_received;</a>
+<a name="ln70">    /* whether the target is eligible to perform requested action (or off) */</a>
+<a name="ln71">    bool allow_suicide;</a>
+<a name="ln72"> </a>
+<a name="ln73">    /* private data to pass to search callback function */</a>
+<a name="ln74">    void *user_data;</a>
+<a name="ln75">    /* function to call when all replies have been received */</a>
+<a name="ln76">    void (*callback) (GList * devices, void *user_data);</a>
+<a name="ln77">    /* devices capable of performing requested action (or off if remapping) */</a>
+<a name="ln78">    GListPtr capable;</a>
+<a name="ln79">};</a>
+<a name="ln80"> </a>
+<a name="ln81">static gboolean stonith_device_dispatch(gpointer user_data);</a>
+<a name="ln82">static void st_child_done(GPid pid, int rc, const char *output, gpointer user_data);</a>
+<a name="ln83">static void stonith_send_reply(xmlNode * reply, int call_options, const char *remote_peer,</a>
+<a name="ln84">                               const char *client_id);</a>
+<a name="ln85"> </a>
+<a name="ln86">static void search_devices_record_result(struct device_search_s *search, const char *device,</a>
+<a name="ln87">                                         gboolean can_fence);</a>
+<a name="ln88"> </a>
+<a name="ln89">typedef struct async_command_s {</a>
+<a name="ln90"> </a>
+<a name="ln91">    int id;</a>
+<a name="ln92">    int pid;</a>
+<a name="ln93">    int fd_stdout;</a>
+<a name="ln94">    int options;</a>
+<a name="ln95">    int default_timeout; /* seconds */</a>
+<a name="ln96">    int timeout; /* seconds */</a>
+<a name="ln97"> </a>
+<a name="ln98">    int start_delay; /* milliseconds */</a>
+<a name="ln99">    int delay_id;</a>
+<a name="ln100"> </a>
+<a name="ln101">    char *op;</a>
+<a name="ln102">    char *origin;</a>
+<a name="ln103">    char *client;</a>
+<a name="ln104">    char *client_name;</a>
+<a name="ln105">    char *remote_op_id;</a>
+<a name="ln106"> </a>
+<a name="ln107">    char *victim;</a>
+<a name="ln108">    uint32_t victim_nodeid;</a>
+<a name="ln109">    char *action;</a>
+<a name="ln110">    char *device;</a>
+<a name="ln111">    char *mode;</a>
+<a name="ln112"> </a>
+<a name="ln113">    GListPtr device_list;</a>
+<a name="ln114">    GListPtr device_next;</a>
+<a name="ln115"> </a>
+<a name="ln116">    void *internal_user_data;</a>
+<a name="ln117">    void (*done_cb) (GPid pid, int rc, const char *output, gpointer user_data);</a>
+<a name="ln118">    guint timer_sigterm;</a>
+<a name="ln119">    guint timer_sigkill;</a>
+<a name="ln120">    /*! If the operation timed out, this is the last signal</a>
+<a name="ln121">     *  we sent to the process to get it to terminate */</a>
+<a name="ln122">    int last_timeout_signo;</a>
+<a name="ln123"> </a>
+<a name="ln124">    stonith_device_t *active_on;</a>
+<a name="ln125">} async_command_t;</a>
+<a name="ln126"> </a>
+<a name="ln127">static xmlNode *stonith_construct_async_reply(async_command_t * cmd, const char *output,</a>
+<a name="ln128">                                              xmlNode * data, int rc);</a>
+<a name="ln129"> </a>
+<a name="ln130">static gboolean</a>
+<a name="ln131">is_action_required(const char *action, stonith_device_t *device)</a>
+<a name="ln132">{</a>
+<a name="ln133">    return device &amp;&amp; device-&gt;automatic_unfencing &amp;&amp; safe_str_eq(action, &quot;on&quot;);</a>
+<a name="ln134">}</a>
+<a name="ln135"> </a>
+<a name="ln136">static int</a>
+<a name="ln137">get_action_delay_max(stonith_device_t * device, const char * action)</a>
+<a name="ln138">{</a>
+<a name="ln139">    const char *value = NULL;</a>
+<a name="ln140">    int delay_max_ms = 0;</a>
+<a name="ln141"> </a>
+<a name="ln142">    if (safe_str_neq(action, &quot;off&quot;) &amp;&amp; safe_str_neq(action, &quot;reboot&quot;)) {</a>
+<a name="ln143">        return 0;</a>
+<a name="ln144">    }</a>
+<a name="ln145"> </a>
+<a name="ln146">    value = g_hash_table_lookup(device-&gt;params, STONITH_ATTR_DELAY_MAX);</a>
+<a name="ln147">    if (value) {</a>
+<a name="ln148">       delay_max_ms = crm_get_msec(value);</a>
+<a name="ln149">    }</a>
+<a name="ln150"> </a>
+<a name="ln151">    return delay_max_ms;</a>
+<a name="ln152">}</a>
+<a name="ln153"> </a>
+<a name="ln154">/*!</a>
+<a name="ln155"> * \internal</a>
+<a name="ln156"> * \brief Override STONITH timeout with pcmk_*_timeout if available</a>
+<a name="ln157"> *</a>
+<a name="ln158"> * \param[in] device           STONITH device to use</a>
+<a name="ln159"> * \param[in] action           STONITH action name</a>
+<a name="ln160"> * \param[in] default_timeout  Timeout to use if device does not have</a>
+<a name="ln161"> *                             a pcmk_*_timeout parameter for action</a>
+<a name="ln162"> *</a>
+<a name="ln163"> * \return Value of pcmk_(action)_timeout if available, otherwise default_timeout</a>
+<a name="ln164"> * \note For consistency, it would be nice if reboot/off/on timeouts could be</a>
+<a name="ln165"> *       set the same way as start/stop/monitor timeouts, i.e. with an</a>
+<a name="ln166"> *       &lt;operation&gt; entry in the fencing resource configuration. However that</a>
+<a name="ln167"> *       is insufficient because fencing devices may be registered directly via</a>
+<a name="ln168"> *       the STONITH register_device() API instead of going through the CIB</a>
+<a name="ln169"> *       (e.g. stonith_admin uses it for its -R option, and the LRMD uses it to</a>
+<a name="ln170"> *       ensure a device is registered when a command is issued). As device</a>
+<a name="ln171"> *       properties, pcmk_*_timeout parameters can be grabbed by stonithd when</a>
+<a name="ln172"> *       the device is registered, whether by CIB change or API call.</a>
+<a name="ln173"> */</a>
+<a name="ln174">static int</a>
+<a name="ln175">get_action_timeout(stonith_device_t * device, const char *action, int default_timeout)</a>
+<a name="ln176">{</a>
+<a name="ln177">    if (action &amp;&amp; device &amp;&amp; device-&gt;params) {</a>
+<a name="ln178">        char buffer[64] = { 0, };</a>
+<a name="ln179">        const char *value = NULL;</a>
+<a name="ln180"> </a>
+<a name="ln181">        /* If &quot;reboot&quot; was requested but the device does not support it,</a>
+<a name="ln182">         * we will remap to &quot;off&quot;, so check timeout for &quot;off&quot; instead</a>
+<a name="ln183">         */</a>
+<a name="ln184">        if (safe_str_eq(action, &quot;reboot&quot;)</a>
+<a name="ln185">            &amp;&amp; is_not_set(device-&gt;flags, st_device_supports_reboot)) {</a>
+<a name="ln186">            crm_trace(&quot;%s doesn't support reboot, using timeout for off instead&quot;,</a>
+<a name="ln187">                      device-&gt;id);</a>
+<a name="ln188">            action = &quot;off&quot;;</a>
+<a name="ln189">        }</a>
+<a name="ln190"> </a>
+<a name="ln191">        /* If the device config specified an action-specific timeout, use it */</a>
+<a name="ln192">        snprintf(buffer, sizeof(buffer) - 1, &quot;pcmk_%s_timeout&quot;, action);</a>
+<a name="ln193">        value = g_hash_table_lookup(device-&gt;params, buffer);</a>
+<a name="ln194">        if (value) {</a>
+<a name="ln195">            return atoi(value);</a>
+<a name="ln196">        }</a>
+<a name="ln197">    }</a>
+<a name="ln198">    return default_timeout;</a>
+<a name="ln199">}</a>
+<a name="ln200"> </a>
+<a name="ln201">static void</a>
+<a name="ln202">free_async_command(async_command_t * cmd)</a>
+<a name="ln203">{</a>
+<a name="ln204">    if (!cmd) {</a>
+<a name="ln205">        return;</a>
+<a name="ln206">    }</a>
+<a name="ln207"> </a>
+<a name="ln208">    if (cmd-&gt;delay_id) {</a>
+<a name="ln209">        g_source_remove(cmd-&gt;delay_id);</a>
+<a name="ln210">    }</a>
+<a name="ln211"> </a>
+<a name="ln212">    cmd_list = g_list_remove(cmd_list, cmd);</a>
+<a name="ln213"> </a>
+<a name="ln214">    g_list_free_full(cmd-&gt;device_list, free);</a>
+<a name="ln215">    free(cmd-&gt;device);</a>
+<a name="ln216">    free(cmd-&gt;action);</a>
+<a name="ln217">    free(cmd-&gt;victim);</a>
+<a name="ln218">    free(cmd-&gt;remote_op_id);</a>
+<a name="ln219">    free(cmd-&gt;client);</a>
+<a name="ln220">    free(cmd-&gt;client_name);</a>
+<a name="ln221">    free(cmd-&gt;origin);</a>
+<a name="ln222">    free(cmd-&gt;mode);</a>
+<a name="ln223">    free(cmd-&gt;op);</a>
+<a name="ln224">    free(cmd);</a>
+<a name="ln225">}</a>
+<a name="ln226"> </a>
+<a name="ln227">static async_command_t *</a>
+<a name="ln228">create_async_command(xmlNode * msg)</a>
+<a name="ln229">{</a>
+<a name="ln230">    async_command_t *cmd = NULL;</a>
+<a name="ln231">    xmlNode *op = get_xpath_object(&quot;//@&quot; F_STONITH_ACTION, msg, LOG_ERR);</a>
+<a name="ln232">    const char *action = crm_element_value(op, F_STONITH_ACTION);</a>
+<a name="ln233"> </a>
+<a name="ln234">    CRM_CHECK(action != NULL, crm_log_xml_warn(msg, &quot;NoAction&quot;); return NULL);</a>
+<a name="ln235"> </a>
+<a name="ln236">    crm_log_xml_trace(msg, &quot;Command&quot;);</a>
+<a name="ln237">    cmd = calloc(1, sizeof(async_command_t));</a>
+<a name="ln238">    crm_element_value_int(msg, F_STONITH_CALLID, &amp;(cmd-&gt;id));</a>
+<a name="ln239">    crm_element_value_int(msg, F_STONITH_CALLOPTS, &amp;(cmd-&gt;options));</a>
+<a name="ln240">    crm_element_value_int(msg, F_STONITH_TIMEOUT, &amp;(cmd-&gt;default_timeout));</a>
+<a name="ln241">    cmd-&gt;timeout = cmd-&gt;default_timeout;</a>
+<a name="ln242"> </a>
+<a name="ln243">    cmd-&gt;origin = crm_element_value_copy(msg, F_ORIG);</a>
+<a name="ln244">    cmd-&gt;remote_op_id = crm_element_value_copy(msg, F_STONITH_REMOTE_OP_ID);</a>
+<a name="ln245">    cmd-&gt;client = crm_element_value_copy(msg, F_STONITH_CLIENTID);</a>
+<a name="ln246">    cmd-&gt;client_name = crm_element_value_copy(msg, F_STONITH_CLIENTNAME);</a>
+<a name="ln247">    cmd-&gt;op = crm_element_value_copy(msg, F_STONITH_OPERATION);</a>
+<a name="ln248">    cmd-&gt;action = strdup(action);</a>
+<a name="ln249">    cmd-&gt;victim = crm_element_value_copy(op, F_STONITH_TARGET);</a>
+<a name="ln250">    cmd-&gt;mode = crm_element_value_copy(op, F_STONITH_MODE);</a>
+<a name="ln251">    cmd-&gt;device = crm_element_value_copy(op, F_STONITH_DEVICE);</a>
+<a name="ln252"> </a>
+<a name="ln253">    CRM_CHECK(cmd-&gt;op != NULL, crm_log_xml_warn(msg, &quot;NoOp&quot;); free_async_command(cmd); return NULL);</a>
+<a name="ln254">    CRM_CHECK(cmd-&gt;client != NULL, crm_log_xml_warn(msg, &quot;NoClient&quot;));</a>
+<a name="ln255"> </a>
+<a name="ln256">    cmd-&gt;done_cb = st_child_done;</a>
+<a name="ln257">    cmd_list = g_list_append(cmd_list, cmd);</a>
+<a name="ln258">    return cmd;</a>
+<a name="ln259">}</a>
+<a name="ln260"> </a>
+<a name="ln261">static int</a>
+<a name="ln262">get_action_limit(stonith_device_t * device)</a>
+<a name="ln263">{</a>
+<a name="ln264">    const char *value = NULL;</a>
+<a name="ln265">    int action_limit = 1;</a>
+<a name="ln266"> </a>
+<a name="ln267">    value = g_hash_table_lookup(device-&gt;params, STONITH_ATTR_ACTION_LIMIT);</a>
+<a name="ln268">    if (value) {</a>
+<a name="ln269">       action_limit = crm_parse_int(value, &quot;1&quot;);</a>
+<a name="ln270">       if (action_limit == 0) {</a>
+<a name="ln271">           /* pcmk_action_limit should not be 0. Enforce it to be 1. */</a>
+<a name="ln272">           action_limit = 1;</a>
+<a name="ln273">       }</a>
+<a name="ln274">    }</a>
+<a name="ln275"> </a>
+<a name="ln276">    return action_limit;</a>
+<a name="ln277">}</a>
+<a name="ln278"> </a>
+<a name="ln279">static int</a>
+<a name="ln280">get_active_cmds(stonith_device_t * device)</a>
+<a name="ln281">{</a>
+<a name="ln282">    int counter = 0;</a>
+<a name="ln283">    GListPtr gIter = NULL;</a>
+<a name="ln284">    GListPtr gIterNext = NULL;</a>
+<a name="ln285"> </a>
+<a name="ln286">    CRM_CHECK(device != NULL, return 0);</a>
+<a name="ln287"> </a>
+<a name="ln288">    for (gIter = cmd_list; gIter != NULL; gIter = gIterNext) {</a>
+<a name="ln289">        async_command_t *cmd = gIter-&gt;data;</a>
+<a name="ln290"> </a>
+<a name="ln291">        gIterNext = gIter-&gt;next;</a>
+<a name="ln292"> </a>
+<a name="ln293">        if (cmd-&gt;active_on == device) {</a>
+<a name="ln294">            counter++;</a>
+<a name="ln295">        }</a>
+<a name="ln296">    }</a>
+<a name="ln297"> </a>
+<a name="ln298">    return counter;</a>
+<a name="ln299">}</a>
+<a name="ln300"> </a>
+<a name="ln301">static gboolean</a>
+<a name="ln302">stonith_device_execute(stonith_device_t * device)</a>
+<a name="ln303">{</a>
+<a name="ln304">    int exec_rc = 0;</a>
+<a name="ln305">    const char *action_str = NULL;</a>
+<a name="ln306">    async_command_t *cmd = NULL;</a>
+<a name="ln307">    stonith_action_t *action = NULL;</a>
+<a name="ln308">    int active_cmds = 0;</a>
+<a name="ln309">    int action_limit = 0;</a>
+<a name="ln310"> </a>
+<a name="ln311">    CRM_CHECK(device != NULL, return FALSE);</a>
+<a name="ln312"> </a>
+<a name="ln313">    active_cmds = get_active_cmds(device);</a>
+<a name="ln314">    action_limit = get_action_limit(device);</a>
+<a name="ln315">    if (action_limit &gt; -1 &amp;&amp; active_cmds &gt;= action_limit) {</a>
+<a name="ln316">        crm_trace(&quot;%s is over its action limit of %d (%u active action%s)&quot;,</a>
+<a name="ln317">                  device-&gt;id, action_limit, active_cmds, active_cmds &gt; 1 ? &quot;s&quot; : &quot;&quot;);</a>
+<a name="ln318">        return TRUE;</a>
+<a name="ln319">    }</a>
+<a name="ln320"> </a>
+<a name="ln321">    if (device-&gt;pending_ops) {</a>
+<a name="ln322">        GList *first = device-&gt;pending_ops;</a>
+<a name="ln323"> </a>
+<a name="ln324">        cmd = first-&gt;data;</a>
+<a name="ln325">        if (cmd &amp;&amp; cmd-&gt;delay_id) {</a>
+<a name="ln326">            crm_trace</a>
+<a name="ln327">                (&quot;Operation %s%s%s on %s was asked to run too early, waiting for start_delay timeout of %dms&quot;,</a>
+<a name="ln328">                 cmd-&gt;action, cmd-&gt;victim ? &quot; for node &quot; : &quot;&quot;, cmd-&gt;victim ? cmd-&gt;victim : &quot;&quot;,</a>
+<a name="ln329">                 device-&gt;id, cmd-&gt;start_delay);</a>
+<a name="ln330">            return TRUE;</a>
+<a name="ln331">        }</a>
+<a name="ln332"> </a>
+<a name="ln333">        device-&gt;pending_ops = g_list_remove_link(device-&gt;pending_ops, first);</a>
+<a name="ln334">        g_list_free_1(first);</a>
+<a name="ln335">    }</a>
+<a name="ln336"> </a>
+<a name="ln337">    if (cmd == NULL) {</a>
+<a name="ln338">        crm_trace(&quot;Nothing further to do for %s&quot;, device-&gt;id);</a>
+<a name="ln339">        return TRUE;</a>
+<a name="ln340">    }</a>
+<a name="ln341"> </a>
+<a name="ln342">    if(safe_str_eq(device-&gt;agent, STONITH_WATCHDOG_AGENT)) {</a>
+<a name="ln343">        if(safe_str_eq(cmd-&gt;action, &quot;reboot&quot;)) {</a>
+<a name="ln344">            pcmk_panic(__FUNCTION__);</a>
+<a name="ln345">            return TRUE;</a>
+<a name="ln346"> </a>
+<a name="ln347">        } else if(safe_str_eq(cmd-&gt;action, &quot;off&quot;)) {</a>
+<a name="ln348">            pcmk_panic(__FUNCTION__);</a>
+<a name="ln349">            return TRUE;</a>
+<a name="ln350"> </a>
+<a name="ln351">        } else {</a>
+<a name="ln352">            crm_info(&quot;Faking success for %s watchdog operation&quot;, cmd-&gt;action);</a>
+<a name="ln353">            cmd-&gt;done_cb(0, 0, NULL, cmd);</a>
+<a name="ln354">            return TRUE;</a>
+<a name="ln355">        }</a>
+<a name="ln356">    }</a>
+<a name="ln357"> </a>
+<a name="ln358">#if SUPPORT_CIBSECRETS</a>
+<a name="ln359">    if (replace_secret_params(device-&gt;id, device-&gt;params) &lt; 0) {</a>
+<a name="ln360">        /* replacing secrets failed! */</a>
+<a name="ln361">        if (safe_str_eq(cmd-&gt;action,&quot;stop&quot;)) {</a>
+<a name="ln362">            /* don't fail on stop! */</a>
+<a name="ln363">            crm_info(&quot;proceeding with the stop operation for %s&quot;, device-&gt;id);</a>
+<a name="ln364"> </a>
+<a name="ln365">        } else {</a>
+<a name="ln366">            crm_err(&quot;failed to get secrets for %s, &quot;</a>
+<a name="ln367">                    &quot;considering resource not configured&quot;, device-&gt;id);</a>
+<a name="ln368">            exec_rc = PCMK_OCF_NOT_CONFIGURED;</a>
+<a name="ln369">            cmd-&gt;done_cb(0, exec_rc, NULL, cmd);</a>
+<a name="ln370">            return TRUE;</a>
+<a name="ln371">        }</a>
+<a name="ln372">    }</a>
+<a name="ln373">#endif</a>
+<a name="ln374"> </a>
+<a name="ln375">    action_str = cmd-&gt;action;</a>
+<a name="ln376">    if (safe_str_eq(cmd-&gt;action, &quot;reboot&quot;) &amp;&amp; is_not_set(device-&gt;flags, st_device_supports_reboot)) {</a>
+<a name="ln377">        crm_warn(&quot;Agent '%s' does not advertise support for 'reboot', performing 'off' action instead&quot;, device-&gt;agent);</a>
+<a name="ln378">        action_str = &quot;off&quot;;</a>
+<a name="ln379">    }</a>
+<a name="ln380"> </a>
+<a name="ln381">    action = stonith_action_create(device-&gt;agent,</a>
+<a name="ln382">                                   action_str,</a>
+<a name="ln383">                                   cmd-&gt;victim,</a>
+<a name="ln384">                                   cmd-&gt;victim_nodeid,</a>
+<a name="ln385">                                   cmd-&gt;timeout, device-&gt;params, device-&gt;aliases);</a>
+<a name="ln386"> </a>
+<a name="ln387">    /* for async exec, exec_rc is pid if positive and error code if negative/zero */</a>
+<a name="ln388">    exec_rc = stonith_action_execute_async(action, (void *)cmd, cmd-&gt;done_cb);</a>
+<a name="ln389"> </a>
+<a name="ln390">    if (exec_rc &gt; 0) {</a>
+<a name="ln391">        crm_debug(&quot;Operation %s%s%s on %s now running with pid=%d, timeout=%ds&quot;,</a>
+<a name="ln392">                  cmd-&gt;action, cmd-&gt;victim ? &quot; for node &quot; : &quot;&quot;, cmd-&gt;victim ? cmd-&gt;victim : &quot;&quot;,</a>
+<a name="ln393">                  device-&gt;id, exec_rc, cmd-&gt;timeout);</a>
+<a name="ln394">        cmd-&gt;active_on = device;</a>
+<a name="ln395"> </a>
+<a name="ln396">    } else {</a>
+<a name="ln397">        crm_warn(&quot;Operation %s%s%s on %s failed: %s (%d)&quot;,</a>
+<a name="ln398">                 cmd-&gt;action, cmd-&gt;victim ? &quot; for node &quot; : &quot;&quot;, cmd-&gt;victim ? cmd-&gt;victim : &quot;&quot;,</a>
+<a name="ln399">                 device-&gt;id, pcmk_strerror(exec_rc), exec_rc);</a>
+<a name="ln400">        cmd-&gt;done_cb(0, exec_rc, NULL, cmd);</a>
+<a name="ln401">    }</a>
+<a name="ln402">    return TRUE;</a>
+<a name="ln403">}</a>
+<a name="ln404"> </a>
+<a name="ln405">static gboolean</a>
+<a name="ln406">stonith_device_dispatch(gpointer user_data)</a>
+<a name="ln407">{</a>
+<a name="ln408">    return stonith_device_execute(user_data);</a>
+<a name="ln409">}</a>
+<a name="ln410"> </a>
+<a name="ln411">static gboolean</a>
+<a name="ln412">start_delay_helper(gpointer data)</a>
+<a name="ln413">{</a>
+<a name="ln414">    async_command_t *cmd = data;</a>
+<a name="ln415">    stonith_device_t *device = NULL;</a>
+<a name="ln416"> </a>
+<a name="ln417">    cmd-&gt;delay_id = 0;</a>
+<a name="ln418">    device = cmd-&gt;device ? g_hash_table_lookup(device_list, cmd-&gt;device) : NULL;</a>
+<a name="ln419"> </a>
+<a name="ln420">    if (device) {</a>
+<a name="ln421">        mainloop_set_trigger(device-&gt;work);</a>
+<a name="ln422">    }</a>
+<a name="ln423"> </a>
+<a name="ln424">    return FALSE;</a>
+<a name="ln425">}</a>
+<a name="ln426"> </a>
+<a name="ln427">static void</a>
+<a name="ln428">schedule_stonith_command(async_command_t * cmd, stonith_device_t * device)</a>
+<a name="ln429">{</a>
+<a name="ln430">    int delay_max = 0;</a>
+<a name="ln431"> </a>
+<a name="ln432">    CRM_CHECK(cmd != NULL, return);</a>
+<a name="ln433">    CRM_CHECK(device != NULL, return);</a>
+<a name="ln434"> </a>
+<a name="ln435">    if (cmd-&gt;device) {</a>
+<a name="ln436">        free(cmd-&gt;device);</a>
+<a name="ln437">    }</a>
+<a name="ln438"> </a>
+<a name="ln439">    if (device-&gt;include_nodeid &amp;&amp; cmd-&gt;victim) {</a>
+<a name="ln440">        crm_node_t *node = crm_get_peer(0, cmd-&gt;victim);</a>
+<a name="ln441"> </a>
+<a name="ln442">        cmd-&gt;victim_nodeid = node-&gt;id;</a>
+<a name="ln443">    }</a>
+<a name="ln444"> </a>
+<a name="ln445">    cmd-&gt;device = strdup(device-&gt;id);</a>
+<a name="ln446">    cmd-&gt;timeout = get_action_timeout(device, cmd-&gt;action, cmd-&gt;default_timeout);</a>
+<a name="ln447"> </a>
+<a name="ln448">    if (cmd-&gt;remote_op_id) {</a>
+<a name="ln449">        crm_debug(&quot;Scheduling %s on %s for remote peer %s with op id (%s) (timeout=%ds)&quot;,</a>
+<a name="ln450">                  cmd-&gt;action, device-&gt;id, cmd-&gt;origin, cmd-&gt;remote_op_id, cmd-&gt;timeout);</a>
+<a name="ln451">    } else {</a>
+<a name="ln452">        crm_debug(&quot;Scheduling %s on %s for %s (timeout=%ds)&quot;,</a>
+<a name="ln453">                  cmd-&gt;action, device-&gt;id, cmd-&gt;client, cmd-&gt;timeout);</a>
+<a name="ln454">    }</a>
+<a name="ln455"> </a>
+<a name="ln456">    device-&gt;pending_ops = g_list_append(device-&gt;pending_ops, cmd);</a>
+<a name="ln457">    mainloop_set_trigger(device-&gt;work);</a>
+<a name="ln458"> </a>
+<a name="ln459">    delay_max = get_action_delay_max(device, cmd-&gt;action);</a>
+<a name="ln460">    if (delay_max &gt; 0) {</a>
+<a name="ln461">        cmd-&gt;start_delay = rand() % delay_max;</a>
+<a name="ln462">        crm_notice(&quot;Delaying %s on %s for %lldms (timeout=%ds)&quot;,</a>
+<a name="ln463">                    cmd-&gt;action, device-&gt;id, cmd-&gt;start_delay, cmd-&gt;timeout);</a>
+<a name="ln464">        cmd-&gt;delay_id = g_timeout_add(cmd-&gt;start_delay, start_delay_helper, cmd);</a>
+<a name="ln465">    }</a>
+<a name="ln466">}</a>
+<a name="ln467"> </a>
+<a name="ln468">void</a>
+<a name="ln469">free_device(gpointer data)</a>
+<a name="ln470">{</a>
+<a name="ln471">    GListPtr gIter = NULL;</a>
+<a name="ln472">    stonith_device_t *device = data;</a>
+<a name="ln473"> </a>
+<a name="ln474">    g_hash_table_destroy(device-&gt;params);</a>
+<a name="ln475">    g_hash_table_destroy(device-&gt;aliases);</a>
+<a name="ln476"> </a>
+<a name="ln477">    for (gIter = device-&gt;pending_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln478">        async_command_t *cmd = gIter-&gt;data;</a>
+<a name="ln479"> </a>
+<a name="ln480">        crm_warn(&quot;Removal of device '%s' purged operation %s&quot;, device-&gt;id, cmd-&gt;action);</a>
+<a name="ln481">        cmd-&gt;done_cb(0, -ENODEV, NULL, cmd);</a>
+<a name="ln482">        free_async_command(cmd);</a>
+<a name="ln483">    }</a>
+<a name="ln484">    g_list_free(device-&gt;pending_ops);</a>
+<a name="ln485"> </a>
+<a name="ln486">    g_list_free_full(device-&gt;targets, free);</a>
+<a name="ln487"> </a>
+<a name="ln488">    mainloop_destroy_trigger(device-&gt;work);</a>
+<a name="ln489"> </a>
+<a name="ln490">    free_xml(device-&gt;agent_metadata);</a>
+<a name="ln491">    free(device-&gt;namespace);</a>
+<a name="ln492">    free(device-&gt;on_target_actions);</a>
+<a name="ln493">    free(device-&gt;agent);</a>
+<a name="ln494">    free(device-&gt;id);</a>
+<a name="ln495">    free(device);</a>
+<a name="ln496">}</a>
+<a name="ln497"> </a>
+<a name="ln498">static GHashTable *</a>
+<a name="ln499">build_port_aliases(const char *hostmap, GListPtr * targets)</a>
+<a name="ln500">{</a>
+<a name="ln501">    char *name = NULL;</a>
+<a name="ln502">    int last = 0, lpc = 0, max = 0, added = 0;</a>
+<a name="ln503">    GHashTable *aliases =</a>
+<a name="ln504">        g_hash_table_new_full(crm_strcase_hash, crm_strcase_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln505"> </a>
+<a name="ln506">    if (hostmap == NULL) {</a>
+<a name="ln507">        return aliases;</a>
+<a name="ln508">    }</a>
+<a name="ln509"> </a>
+<a name="ln510">    max = strlen(hostmap);</a>
+<a name="ln511">    for (; lpc &lt;= max; lpc++) {</a>
+<a name="ln512">        switch (hostmap[lpc]) {</a>
+<a name="ln513">                /* Assignment chars */</a>
+<a name="ln514">            case '=':</a>
+<a name="ln515">            case ':':</a>
+<a name="ln516">                if (lpc &gt; last) {</a>
+<a name="ln517">                    free(name);</a>
+<a name="ln518">                    name = calloc(1, 1 + lpc - last);</a>
+<a name="ln519">                    memcpy(name, hostmap + last, lpc - last);</a>
+<a name="ln520">                }</a>
+<a name="ln521">                last = lpc + 1;</a>
+<a name="ln522">                break;</a>
+<a name="ln523"> </a>
+<a name="ln524">                /* Delimeter chars */</a>
+<a name="ln525">                /* case ',': Potentially used to specify multiple ports */</a>
+<a name="ln526">            case 0:</a>
+<a name="ln527">            case ';':</a>
+<a name="ln528">            case ' ':</a>
+<a name="ln529">            case '\t':</a>
+<a name="ln530">                if (name) {</a>
+<a name="ln531">                    char *value = NULL;</a>
+<a name="ln532"> </a>
+<a name="ln533">                    value = calloc(1, 1 + lpc - last);</a>
+<a name="ln534">                    memcpy(value, hostmap + last, lpc - last);</a>
+<a name="ln535"> </a>
+<a name="ln536">                    crm_debug(&quot;Adding alias '%s'='%s'&quot;, name, value);</a>
+<a name="ln537">                    g_hash_table_replace(aliases, name, value);</a>
+<a name="ln538">                    if (targets) {</a>
+<a name="ln539">                        *targets = g_list_append(*targets, strdup(value));</a>
+<a name="ln540">                    }</a>
+<a name="ln541">                    value = NULL;</a>
+<a name="ln542">                    name = NULL;</a>
+<a name="ln543">                    added++;</a>
+<a name="ln544"> </a>
+<a name="ln545">                } else if (lpc &gt; last) {</a>
+<a name="ln546">                    crm_debug(&quot;Parse error at offset %d near '%s'&quot;, lpc - last, hostmap + last);</a>
+<a name="ln547">                }</a>
+<a name="ln548"> </a>
+<a name="ln549">                last = lpc + 1;</a>
+<a name="ln550">                break;</a>
+<a name="ln551">        }</a>
+<a name="ln552"> </a>
+<a name="ln553">        if (hostmap[lpc] == 0) {</a>
+<a name="ln554">            break;</a>
+<a name="ln555">        }</a>
+<a name="ln556">    }</a>
+<a name="ln557"> </a>
+<a name="ln558">    if (added == 0) {</a>
+<a name="ln559">        crm_info(&quot;No host mappings detected in '%s'&quot;, hostmap);</a>
+<a name="ln560">    }</a>
+<a name="ln561"> </a>
+<a name="ln562">    free(name);</a>
+<a name="ln563">    return aliases;</a>
+<a name="ln564">}</a>
+<a name="ln565"> </a>
+<a name="ln566">static void</a>
+<a name="ln567">parse_host_line(const char *line, int max, GListPtr * output)</a>
+<a name="ln568">{</a>
+<a name="ln569">    int lpc = 0;</a>
+<a name="ln570">    int last = 0;</a>
+<a name="ln571"> </a>
+<a name="ln572">    if (max &lt;= 0) {</a>
+<a name="ln573">        return;</a>
+<a name="ln574">    }</a>
+<a name="ln575"> </a>
+<a name="ln576">    /* Check for any complaints about additional parameters that the device doesn't understand */</a>
+<a name="ln577">    if (strstr(line, &quot;invalid&quot;) || strstr(line, &quot;variable&quot;)) {</a>
+<a name="ln578">        crm_debug(&quot;Skipping: %s&quot;, line);</a>
+<a name="ln579">        return;</a>
+<a name="ln580">    }</a>
+<a name="ln581"> </a>
+<a name="ln582">    crm_trace(&quot;Processing %d bytes: [%s]&quot;, max, line);</a>
+<a name="ln583">    /* Skip initial whitespace */</a>
+<a name="ln584">    for (lpc = 0; lpc &lt;= max &amp;&amp; isspace(line[lpc]); lpc++) {</a>
+<a name="ln585">        last = lpc + 1;</a>
+<a name="ln586">    }</a>
+<a name="ln587"> </a>
+<a name="ln588">    /* Now the actual content */</a>
+<a name="ln589">    for (lpc = 0; lpc &lt;= max; lpc++) {</a>
+<a name="ln590">        gboolean a_space = isspace(line[lpc]);</a>
+<a name="ln591"> </a>
+<a name="ln592">        if (a_space &amp;&amp; lpc &lt; max &amp;&amp; isspace(line[lpc + 1])) {</a>
+<a name="ln593">            /* fast-forward to the end of the spaces */</a>
+<a name="ln594"> </a>
+<a name="ln595">        } else if (a_space || line[lpc] == ',' || line[lpc] == ';' || line[lpc] == 0) {</a>
+<a name="ln596">            int rc = 1;</a>
+<a name="ln597">            char *entry = NULL;</a>
+<a name="ln598"> </a>
+<a name="ln599">            if (lpc != last) {</a>
+<a name="ln600">                entry = calloc(1, 1 + lpc - last);</a>
+<a name="ln601">                rc = sscanf(line + last, &quot;%[a-zA-Z0-9_-.]&quot;, entry);</a>
+<a name="ln602">            }</a>
+<a name="ln603"> </a>
+<a name="ln604">            if (entry == NULL) {</a>
+<a name="ln605">                /* Skip */</a>
+<a name="ln606">            } else if (rc != 1) {</a>
+<a name="ln607">                crm_warn(&quot;Could not parse (%d %d): %s&quot;, last, lpc, line + last);</a>
+<a name="ln608">            } else if (safe_str_neq(entry, &quot;on&quot;) &amp;&amp; safe_str_neq(entry, &quot;off&quot;)) {</a>
+<a name="ln609">                crm_trace(&quot;Adding '%s'&quot;, entry);</a>
+<a name="ln610">                *output = g_list_append(*output, entry);</a>
+<a name="ln611">                entry = NULL;</a>
+<a name="ln612">            }</a>
+<a name="ln613"> </a>
+<a name="ln614">            free(entry);</a>
+<a name="ln615">            last = lpc + 1;</a>
+<a name="ln616">        }</a>
+<a name="ln617">    }</a>
+<a name="ln618">}</a>
+<a name="ln619"> </a>
+<a name="ln620">static GListPtr</a>
+<a name="ln621">parse_host_list(const char *hosts)</a>
+<a name="ln622">{</a>
+<a name="ln623">    int lpc = 0;</a>
+<a name="ln624">    int max = 0;</a>
+<a name="ln625">    int last = 0;</a>
+<a name="ln626">    GListPtr output = NULL;</a>
+<a name="ln627"> </a>
+<a name="ln628">    if (hosts == NULL) {</a>
+<a name="ln629">        return output;</a>
+<a name="ln630">    }</a>
+<a name="ln631"> </a>
+<a name="ln632">    max = strlen(hosts);</a>
+<a name="ln633">    for (lpc = 0; lpc &lt;= max; lpc++) {</a>
+<a name="ln634">        if (hosts[lpc] == '\n' || hosts[lpc] == 0) {</a>
+<a name="ln635">            char *line = NULL;</a>
+<a name="ln636">            int len = lpc - last;</a>
+<a name="ln637"> </a>
+<a name="ln638">            if(len &gt; 1) {</a>
+<a name="ln639">                line = malloc(1 + len);</a>
+<a name="ln640">            }</a>
+<a name="ln641"> </a>
+<a name="ln642">            if(line) {</a>
+<a name="ln643">                snprintf(line, 1 + len, &quot;%s&quot;, hosts + last);</a>
+<a name="ln644">                line[len] = 0; /* Because it might be '\n' */</a>
+<a name="ln645">                parse_host_line(line, len, &amp;output);</a>
+<a name="ln646">                free(line);</a>
+<a name="ln647">            }</a>
+<a name="ln648"> </a>
+<a name="ln649">            last = lpc + 1;</a>
+<a name="ln650">        }</a>
+<a name="ln651">    }</a>
+<a name="ln652"> </a>
+<a name="ln653">    crm_trace(&quot;Parsed %d entries from '%s'&quot;, g_list_length(output), hosts);</a>
+<a name="ln654">    return output;</a>
+<a name="ln655">}</a>
+<a name="ln656"> </a>
+<a name="ln657">GHashTable *metadata_cache = NULL;</a>
+<a name="ln658"> </a>
+<a name="ln659">static xmlNode *</a>
+<a name="ln660">get_agent_metadata(const char *agent)</a>
+<a name="ln661">{</a>
+<a name="ln662">    xmlNode *xml = NULL;</a>
+<a name="ln663">    char *buffer = NULL;</a>
+<a name="ln664"> </a>
+<a name="ln665">    if(metadata_cache == NULL) {</a>
+<a name="ln666">        metadata_cache = g_hash_table_new_full(</a>
+<a name="ln667">            crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln668">    }</a>
+<a name="ln669"> </a>
+<a name="ln670">    buffer = g_hash_table_lookup(metadata_cache, agent);</a>
+<a name="ln671">    if(safe_str_eq(agent, STONITH_WATCHDOG_AGENT)) {</a>
+<a name="ln672">        return NULL;</a>
+<a name="ln673"> </a>
+<a name="ln674">    } else if(buffer == NULL) {</a>
+<a name="ln675">        stonith_t *st = stonith_api_new();</a>
+<a name="ln676">        int rc = st-&gt;cmds-&gt;metadata(st, st_opt_sync_call, agent, NULL, &amp;buffer, 10);</a>
+<a name="ln677"> </a>
+<a name="ln678">        stonith_api_delete(st);</a>
+<a name="ln679">        if (rc || !buffer) {</a>
+<a name="ln680">            crm_err(&quot;Could not retrieve metadata for fencing agent %s&quot;, agent);</a>
+<a name="ln681">            return NULL;</a>
+<a name="ln682">        }</a>
+<a name="ln683">        g_hash_table_replace(metadata_cache, strdup(agent), buffer);</a>
+<a name="ln684">    }</a>
+<a name="ln685"> </a>
+<a name="ln686">    xml = string2xml(buffer);</a>
+<a name="ln687"> </a>
+<a name="ln688">    return xml;</a>
+<a name="ln689">}</a>
+<a name="ln690"> </a>
+<a name="ln691">static gboolean</a>
+<a name="ln692">is_nodeid_required(xmlNode * xml)</a>
+<a name="ln693">{</a>
+<a name="ln694">    xmlXPathObjectPtr xpath = NULL;</a>
+<a name="ln695"> </a>
+<a name="ln696">    if (stand_alone) {</a>
+<a name="ln697">        return FALSE;</a>
+<a name="ln698">    }</a>
+<a name="ln699"> </a>
+<a name="ln700">    if (!xml) {</a>
+<a name="ln701">        return FALSE;</a>
+<a name="ln702">    }</a>
+<a name="ln703"> </a>
+<a name="ln704">    xpath = xpath_search(xml, &quot;//parameter[@name='nodeid']&quot;);</a>
+<a name="ln705">    if (numXpathResults(xpath)  &lt;= 0) {</a>
+<a name="ln706">        freeXpathObject(xpath);</a>
+<a name="ln707">        return FALSE;</a>
+<a name="ln708">    }</a>
+<a name="ln709"> </a>
+<a name="ln710">    freeXpathObject(xpath);</a>
+<a name="ln711">    return TRUE;</a>
+<a name="ln712">}</a>
+<a name="ln713"> </a>
+<a name="ln714">static char *</a>
+<a name="ln715">add_action(char *actions, const char *action)</a>
+<a name="ln716">{</a>
+<a name="ln717">    static size_t len = 256;</a>
+<a name="ln718">    int offset = 0;</a>
+<a name="ln719"> </a>
+<a name="ln720">    if (actions == NULL) {</a>
+<a name="ln721">        actions = calloc(1, len);</a>
+<a name="ln722">    } else {</a>
+<a name="ln723">        offset = strlen(actions);</a>
+<a name="ln724">    }</a>
+<a name="ln725"> </a>
+<a name="ln726">    if (offset &gt; 0) {</a>
+<a name="ln727">        offset += snprintf(actions+offset, len-offset, &quot; &quot;);</a>
+<a name="ln728">    }</a>
+<a name="ln729">    offset += snprintf(actions+offset, len-offset, &quot;%s&quot;, action);</a>
+<a name="ln730"> </a>
+<a name="ln731">    return actions;</a>
+<a name="ln732">}</a>
+<a name="ln733"> </a>
+<a name="ln734">static void</a>
+<a name="ln735">read_action_metadata(stonith_device_t *device)</a>
+<a name="ln736">{</a>
+<a name="ln737">    xmlXPathObjectPtr xpath = NULL;</a>
+<a name="ln738">    int max = 0;</a>
+<a name="ln739">    int lpc = 0;</a>
+<a name="ln740"> </a>
+<a name="ln741">    if (device-&gt;agent_metadata == NULL) {</a>
+<a name="ln742">        return;</a>
+<a name="ln743">    }</a>
+<a name="ln744"> </a>
+<a name="ln745">    xpath = xpath_search(device-&gt;agent_metadata, &quot;//action&quot;);</a>
+<a name="ln746">    max = numXpathResults(xpath);</a>
+<a name="ln747"> </a>
+<a name="ln748">    if (max &lt;= 0) {</a>
+<a name="ln749">        freeXpathObject(xpath);</a>
+<a name="ln750">        return;</a>
+<a name="ln751">    }</a>
+<a name="ln752"> </a>
+<a name="ln753">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln754">        const char *on_target = NULL;</a>
+<a name="ln755">        const char *action = NULL;</a>
+<a name="ln756">        xmlNode *match = getXpathResult(xpath, lpc);</a>
+<a name="ln757"> </a>
+<a name="ln758">        CRM_LOG_ASSERT(match != NULL);</a>
+<a name="ln759">        if(match == NULL) { continue; };</a>
+<a name="ln760"> </a>
+<a name="ln761">        on_target = crm_element_value(match, &quot;on_target&quot;);</a>
+<a name="ln762">        action = crm_element_value(match, &quot;name&quot;);</a>
+<a name="ln763"> </a>
+<a name="ln764">        if(safe_str_eq(action, &quot;list&quot;)) {</a>
+<a name="ln765">            set_bit(device-&gt;flags, st_device_supports_list);</a>
+<a name="ln766">        } else if(safe_str_eq(action, &quot;status&quot;)) {</a>
+<a name="ln767">            set_bit(device-&gt;flags, st_device_supports_status);</a>
+<a name="ln768">        } else if(safe_str_eq(action, &quot;reboot&quot;)) {</a>
+<a name="ln769">            set_bit(device-&gt;flags, st_device_supports_reboot);</a>
+<a name="ln770">        } else if (safe_str_eq(action, &quot;on&quot;)) {</a>
+<a name="ln771">            /* &quot;automatic&quot; means the cluster will unfence node when it joins */</a>
+<a name="ln772">            const char *automatic = crm_element_value(match, &quot;automatic&quot;);</a>
+<a name="ln773"> </a>
+<a name="ln774">            /* &quot;required&quot; is a deprecated synonym for &quot;automatic&quot; */</a>
+<a name="ln775">            const char *required = crm_element_value(match, &quot;required&quot;);</a>
+<a name="ln776"> </a>
+<a name="ln777">            if (crm_is_true(automatic) || crm_is_true(required)) {</a>
+<a name="ln778">                device-&gt;automatic_unfencing = TRUE;</a>
+<a name="ln779">            }</a>
+<a name="ln780">        }</a>
+<a name="ln781"> </a>
+<a name="ln782">        if (action &amp;&amp; crm_is_true(on_target)) {</a>
+<a name="ln783">            device-&gt;on_target_actions = add_action(device-&gt;on_target_actions, action);</a>
+<a name="ln784">        }</a>
+<a name="ln785">    }</a>
+<a name="ln786"> </a>
+<a name="ln787">    freeXpathObject(xpath);</a>
+<a name="ln788">}</a>
+<a name="ln789"> </a>
+<a name="ln790">/*!</a>
+<a name="ln791"> * \internal</a>
+<a name="ln792"> * \brief Set a pcmk_*_action parameter if not already set</a>
+<a name="ln793"> *</a>
+<a name="ln794"> * \param[in,out] params  Device parameters</a>
+<a name="ln795"> * \param[in]     action  Name of action</a>
+<a name="ln796"> * \param[in]     value   Value to use if action is not already set</a>
+<a name="ln797"> */</a>
+<a name="ln798">static void</a>
+<a name="ln799">map_action(GHashTable *params, const char *action, const char *value)</a>
+<a name="ln800">{</a>
+<a name="ln801">    char *key = crm_strdup_printf(&quot;pcmk_%s_action&quot;, action);</a>
+<a name="ln802"> </a>
+<a name="ln803">    if (g_hash_table_lookup(params, key)) {</a>
+<a name="ln804">        crm_warn(&quot;Ignoring %s='%s', see %s instead&quot;,</a>
+<a name="ln805">                 STONITH_ATTR_ACTION_OP, value, key);</a>
+<a name="ln806">        free(key);</a>
+<a name="ln807">    } else {</a>
+<a name="ln808">        crm_warn(&quot;Mapping %s='%s' to %s='%s'&quot;,</a>
+<a name="ln809">                 STONITH_ATTR_ACTION_OP, value, key, value);</a>
+<a name="ln810">        g_hash_table_insert(params, key, strdup(value));</a>
+<a name="ln811">    }</a>
+<a name="ln812">}</a>
+<a name="ln813"> </a>
+<a name="ln814">/*!</a>
+<a name="ln815"> * \internal</a>
+<a name="ln816"> * \brief Create device parameter table from XML</a>
+<a name="ln817"> *</a>
+<a name="ln818"> * \param[in]     name    Device name (used for logging only)</a>
+<a name="ln819"> * \param[in,out] params  Device parameters</a>
+<a name="ln820"> */</a>
+<a name="ln821">static GHashTable *</a>
+<a name="ln822">xml2device_params(const char *name, xmlNode *dev)</a>
+<a name="ln823">{</a>
+<a name="ln824">    GHashTable *params = xml2list(dev);</a>
+<a name="ln825">    const char *value;</a>
+<a name="ln826"> </a>
+<a name="ln827">    /* Action should never be specified in the device configuration,</a>
+<a name="ln828">     * but we support it for users who are familiar with other software</a>
+<a name="ln829">     * that worked that way.</a>
+<a name="ln830">     */</a>
+<a name="ln831">    value = g_hash_table_lookup(params, STONITH_ATTR_ACTION_OP);</a>
+<a name="ln832">    if (value != NULL) {</a>
+<a name="ln833">        crm_warn(&quot;%s has '%s' parameter, which should never be specified in configuration&quot;,</a>
+<a name="ln834">                 name, STONITH_ATTR_ACTION_OP);</a>
+<a name="ln835"> </a>
+<a name="ln836">        if (*value == '\0') {</a>
+<a name="ln837">            crm_warn(&quot;Ignoring empty '%s' parameter&quot;, STONITH_ATTR_ACTION_OP);</a>
+<a name="ln838"> </a>
+<a name="ln839">        } else if (strcmp(value, &quot;reboot&quot;) == 0) {</a>
+<a name="ln840">            crm_warn(&quot;Ignoring %s='reboot' (see stonith-action cluster property instead)&quot;,</a>
+<a name="ln841">                     STONITH_ATTR_ACTION_OP);</a>
+<a name="ln842"> </a>
+<a name="ln843">        } else if (strcmp(value, &quot;off&quot;) == 0) {</a>
+<a name="ln844">            map_action(params, &quot;reboot&quot;, value);</a>
+<a name="ln845"> </a>
+<a name="ln846">        } else {</a>
+<a name="ln847">            map_action(params, &quot;off&quot;, value);</a>
+<a name="ln848">            map_action(params, &quot;reboot&quot;, value);</a>
+<a name="ln849">        }</a>
+<a name="ln850"> </a>
+<a name="ln851">        g_hash_table_remove(params, STONITH_ATTR_ACTION_OP);</a>
+<a name="ln852">    }</a>
+<a name="ln853"> </a>
+<a name="ln854">    return params;</a>
+<a name="ln855">}</a>
+<a name="ln856"> </a>
+<a name="ln857">static stonith_device_t *</a>
+<a name="ln858">build_device_from_xml(xmlNode * msg)</a>
+<a name="ln859">{</a>
+<a name="ln860">    const char *value = NULL;</a>
+<a name="ln861">    xmlNode *dev = get_xpath_object(&quot;//&quot; F_STONITH_DEVICE, msg, LOG_ERR);</a>
+<a name="ln862">    stonith_device_t *device = NULL;</a>
+<a name="ln863"> </a>
+<a name="ln864">    device = calloc(1, sizeof(stonith_device_t));</a>
+<a name="ln865">    device-&gt;id = crm_element_value_copy(dev, XML_ATTR_ID);</a>
+<a name="ln866">    device-&gt;agent = crm_element_value_copy(dev, &quot;agent&quot;);</a>
+<a name="ln867">    device-&gt;namespace = crm_element_value_copy(dev, &quot;namespace&quot;);</a>
+<a name="ln868">    device-&gt;params = xml2device_params(device-&gt;id, dev);</a>
+<a name="ln869"> </a>
+<a name="ln870">    value = g_hash_table_lookup(device-&gt;params, STONITH_ATTR_HOSTLIST);</a>
+<a name="ln871">    if (value) {</a>
+<a name="ln872">        device-&gt;targets = parse_host_list(value);</a>
+<a name="ln873">    }</a>
+<a name="ln874"> </a>
+<a name="ln875">    value = g_hash_table_lookup(device-&gt;params, STONITH_ATTR_HOSTMAP);</a>
+<a name="ln876">    device-&gt;aliases = build_port_aliases(value, &amp;(device-&gt;targets));</a>
+<a name="ln877"> </a>
+<a name="ln878">    device-&gt;agent_metadata = get_agent_metadata(device-&gt;agent);</a>
+<a name="ln879">    read_action_metadata(device);</a>
+<a name="ln880"> </a>
+<a name="ln881">    value = g_hash_table_lookup(device-&gt;params, &quot;nodeid&quot;);</a>
+<a name="ln882">    if (!value) {</a>
+<a name="ln883">        device-&gt;include_nodeid = is_nodeid_required(device-&gt;agent_metadata);</a>
+<a name="ln884">    }</a>
+<a name="ln885"> </a>
+<a name="ln886">    value = crm_element_value(dev, &quot;rsc_provides&quot;);</a>
+<a name="ln887">    if (safe_str_eq(value, &quot;unfencing&quot;)) {</a>
+<a name="ln888">        device-&gt;automatic_unfencing = TRUE;</a>
+<a name="ln889">    }</a>
+<a name="ln890"> </a>
+<a name="ln891">    if (is_action_required(&quot;on&quot;, device)) {</a>
+<a name="ln892">        crm_info(&quot;The fencing device '%s' requires unfencing&quot;, device-&gt;id);</a>
+<a name="ln893">    }</a>
+<a name="ln894"> </a>
+<a name="ln895">    if (device-&gt;on_target_actions) {</a>
+<a name="ln896">        crm_info(&quot;The fencing device '%s' requires actions (%s) to be executed on the target node&quot;,</a>
+<a name="ln897">                 device-&gt;id, device-&gt;on_target_actions);</a>
+<a name="ln898">    }</a>
+<a name="ln899"> </a>
+<a name="ln900">    device-&gt;work = mainloop_add_trigger(G_PRIORITY_HIGH, stonith_device_dispatch, device);</a>
+<a name="ln901">    /* TODO: Hook up priority */</a>
+<a name="ln902"> </a>
+<a name="ln903">    return device;</a>
+<a name="ln904">}</a>
+<a name="ln905"> </a>
+<a name="ln906">static const char *</a>
+<a name="ln907">target_list_type(stonith_device_t * dev)</a>
+<a name="ln908">{</a>
+<a name="ln909">    const char *check_type = NULL;</a>
+<a name="ln910"> </a>
+<a name="ln911">    check_type = g_hash_table_lookup(dev-&gt;params, STONITH_ATTR_HOSTCHECK);</a>
+<a name="ln912"> </a>
+<a name="ln913">    if (check_type == NULL) {</a>
+<a name="ln914"> </a>
+<a name="ln915">        if (g_hash_table_lookup(dev-&gt;params, STONITH_ATTR_HOSTLIST)) {</a>
+<a name="ln916">            check_type = &quot;static-list&quot;;</a>
+<a name="ln917">        } else if (g_hash_table_lookup(dev-&gt;params, STONITH_ATTR_HOSTMAP)) {</a>
+<a name="ln918">            check_type = &quot;static-list&quot;;</a>
+<a name="ln919">        } else if(is_set(dev-&gt;flags, st_device_supports_list)){</a>
+<a name="ln920">            check_type = &quot;dynamic-list&quot;;</a>
+<a name="ln921">        } else if(is_set(dev-&gt;flags, st_device_supports_status)){</a>
+<a name="ln922">            check_type = &quot;status&quot;;</a>
+<a name="ln923">        } else {</a>
+<a name="ln924">            check_type = &quot;none&quot;;</a>
+<a name="ln925">        }</a>
+<a name="ln926">    }</a>
+<a name="ln927"> </a>
+<a name="ln928">    return check_type;</a>
+<a name="ln929">}</a>
+<a name="ln930"> </a>
+<a name="ln931">void</a>
+<a name="ln932">schedule_internal_command(const char *origin,</a>
+<a name="ln933">                          stonith_device_t * device,</a>
+<a name="ln934">                          const char *action,</a>
+<a name="ln935">                          const char *victim,</a>
+<a name="ln936">                          int timeout,</a>
+<a name="ln937">                          void *internal_user_data,</a>
+<a name="ln938">                          void (*done_cb) (GPid pid, int rc, const char *output,</a>
+<a name="ln939">                                           gpointer user_data))</a>
+<a name="ln940">{</a>
+<a name="ln941">    async_command_t *cmd = NULL;</a>
+<a name="ln942"> </a>
+<a name="ln943">    cmd = calloc(1, sizeof(async_command_t));</a>
+<a name="ln944"> </a>
+<a name="ln945">    cmd-&gt;id = -1;</a>
+<a name="ln946">    cmd-&gt;default_timeout = timeout ? timeout : 60;</a>
+<a name="ln947">    cmd-&gt;timeout = cmd-&gt;default_timeout;</a>
+<a name="ln948">    cmd-&gt;action = strdup(action);</a>
+<a name="ln949">    cmd-&gt;victim = victim ? strdup(victim) : NULL;</a>
+<a name="ln950">    cmd-&gt;device = strdup(device-&gt;id);</a>
+<a name="ln951">    cmd-&gt;origin = strdup(origin);</a>
+<a name="ln952">    cmd-&gt;client = strdup(crm_system_name);</a>
+<a name="ln953">    cmd-&gt;client_name = strdup(crm_system_name);</a>
+<a name="ln954"> </a>
+<a name="ln955">    cmd-&gt;internal_user_data = internal_user_data;</a>
+<a name="ln956">    cmd-&gt;done_cb = done_cb; /* cmd, not internal_user_data, is passed to 'done_cb' as the userdata */</a>
+<a name="ln957"> </a>
+<a name="ln958">    schedule_stonith_command(cmd, device);</a>
+<a name="ln959">}</a>
+<a name="ln960"> </a>
+<a name="ln961">gboolean</a>
+<a name="ln962">string_in_list(GListPtr list, const char *item)</a>
+<a name="ln963">{</a>
+<a name="ln964">    int lpc = 0;</a>
+<a name="ln965">    int max = g_list_length(list);</a>
+<a name="ln966"> </a>
+<a name="ln967">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln968">        const char *value = g_list_nth_data(list, lpc);</a>
+<a name="ln969"> </a>
+<a name="ln970">        if (safe_str_eq(item, value)) {</a>
+<a name="ln971">            return TRUE;</a>
+<a name="ln972">        } else {</a>
+<a name="ln973">            crm_trace(&quot;%d: '%s' != '%s'&quot;, lpc, item, value);</a>
+<a name="ln974">        }</a>
+<a name="ln975">    }</a>
+<a name="ln976">    return FALSE;</a>
+<a name="ln977">}</a>
+<a name="ln978"> </a>
+<a name="ln979">static void</a>
+<a name="ln980">status_search_cb(GPid pid, int rc, const char *output, gpointer user_data)</a>
+<a name="ln981">{</a>
+<a name="ln982">    async_command_t *cmd = user_data;</a>
+<a name="ln983">    struct device_search_s *search = cmd-&gt;internal_user_data;</a>
+<a name="ln984">    stonith_device_t *dev = cmd-&gt;device ? g_hash_table_lookup(device_list, cmd-&gt;device) : NULL;</a>
+<a name="ln985">    gboolean can = FALSE;</a>
+<a name="ln986"> </a>
+<a name="ln987">    free_async_command(cmd);</a>
+<a name="ln988"> </a>
+<a name="ln989">    if (!dev) {</a>
+<a name="ln990">        search_devices_record_result(search, NULL, FALSE);</a>
+<a name="ln991">        return;</a>
+<a name="ln992">    }</a>
+<a name="ln993"> </a>
+<a name="ln994">    mainloop_set_trigger(dev-&gt;work);</a>
+<a name="ln995"> </a>
+<a name="ln996">    if (rc == 1 /* unknown */ ) {</a>
+<a name="ln997">        crm_trace(&quot;Host %s is not known by %s&quot;, search-&gt;host, dev-&gt;id);</a>
+<a name="ln998"> </a>
+<a name="ln999">    } else if (rc == 0 /* active */  || rc == 2 /* inactive */ ) {</a>
+<a name="ln1000">        crm_trace(&quot;Host %s is known by %s&quot;, search-&gt;host, dev-&gt;id);</a>
+<a name="ln1001">        can = TRUE;</a>
+<a name="ln1002"> </a>
+<a name="ln1003">    } else {</a>
+<a name="ln1004">        crm_notice(&quot;Unknown result when testing if %s can fence %s: rc=%d&quot;, dev-&gt;id, search-&gt;host,</a>
+<a name="ln1005">                   rc);</a>
+<a name="ln1006">    }</a>
+<a name="ln1007">    search_devices_record_result(search, dev-&gt;id, can);</a>
+<a name="ln1008">}</a>
+<a name="ln1009"> </a>
+<a name="ln1010">static void</a>
+<a name="ln1011">dynamic_list_search_cb(GPid pid, int rc, const char *output, gpointer user_data)</a>
+<a name="ln1012">{</a>
+<a name="ln1013">    async_command_t *cmd = user_data;</a>
+<a name="ln1014">    struct device_search_s *search = cmd-&gt;internal_user_data;</a>
+<a name="ln1015">    stonith_device_t *dev = cmd-&gt;device ? g_hash_table_lookup(device_list, cmd-&gt;device) : NULL;</a>
+<a name="ln1016">    gboolean can_fence = FALSE;</a>
+<a name="ln1017"> </a>
+<a name="ln1018">    free_async_command(cmd);</a>
+<a name="ln1019"> </a>
+<a name="ln1020">    /* Host/alias must be in the list output to be eligible to be fenced</a>
+<a name="ln1021">     *</a>
+<a name="ln1022">     * Will cause problems if down'd nodes aren't listed or (for virtual nodes)</a>
+<a name="ln1023">     *  if the guest is still listed despite being moved to another machine</a>
+<a name="ln1024">     */</a>
+<a name="ln1025">    if (!dev) {</a>
+<a name="ln1026">        search_devices_record_result(search, NULL, FALSE);</a>
+<a name="ln1027">        return;</a>
+<a name="ln1028">    }</a>
+<a name="ln1029"> </a>
+<a name="ln1030">    mainloop_set_trigger(dev-&gt;work);</a>
+<a name="ln1031"> </a>
+<a name="ln1032">    /* If we successfully got the targets earlier, don't disable. */</a>
+<a name="ln1033">    if (rc != 0 &amp;&amp; !dev-&gt;targets) {</a>
+<a name="ln1034">        crm_notice(&quot;Disabling port list queries for %s (%d): %s&quot;, dev-&gt;id, rc, output);</a>
+<a name="ln1035">        /* Fall back to status */</a>
+<a name="ln1036">        g_hash_table_replace(dev-&gt;params, strdup(STONITH_ATTR_HOSTCHECK), strdup(&quot;status&quot;));</a>
+<a name="ln1037"> </a>
+<a name="ln1038">        g_list_free_full(dev-&gt;targets, free);</a>
+<a name="ln1039">        dev-&gt;targets = NULL;</a>
+<a name="ln1040">    } else if (!rc) {</a>
+<a name="ln1041">        crm_info(&quot;Refreshing port list for %s&quot;, dev-&gt;id);</a>
+<a name="ln1042">        g_list_free_full(dev-&gt;targets, free);</a>
+<a name="ln1043">        dev-&gt;targets = parse_host_list(output);</a>
+<a name="ln1044">        dev-&gt;targets_age = time(NULL);</a>
+<a name="ln1045">    }</a>
+<a name="ln1046"> </a>
+<a name="ln1047">    if (dev-&gt;targets) {</a>
+<a name="ln1048">        const char *alias = g_hash_table_lookup(dev-&gt;aliases, search-&gt;host);</a>
+<a name="ln1049"> </a>
+<a name="ln1050">        if (!alias) {</a>
+<a name="ln1051">            alias = search-&gt;host;</a>
+<a name="ln1052">        }</a>
+<a name="ln1053">        if (string_in_list(dev-&gt;targets, alias)) {</a>
+<a name="ln1054">            can_fence = TRUE;</a>
+<a name="ln1055">        }</a>
+<a name="ln1056">    }</a>
+<a name="ln1057">    search_devices_record_result(search, dev-&gt;id, can_fence);</a>
+<a name="ln1058">}</a>
+<a name="ln1059"> </a>
+<a name="ln1060">/*!</a>
+<a name="ln1061"> * \internal</a>
+<a name="ln1062"> * \brief Returns true if any key in first is not in second or second has a different value for key</a>
+<a name="ln1063"> */</a>
+<a name="ln1064">static int</a>
+<a name="ln1065">device_params_diff(GHashTable *first, GHashTable *second) {</a>
+<a name="ln1066">    char *key = NULL;</a>
+<a name="ln1067">    char *value = NULL;</a>
+<a name="ln1068">    GHashTableIter gIter;</a>
+<a name="ln1069"> </a>
+<a name="ln1070">    g_hash_table_iter_init(&amp;gIter, first);</a>
+<a name="ln1071">    while (g_hash_table_iter_next(&amp;gIter, (void **)&amp;key, (void **)&amp;value)) {</a>
+<a name="ln1072"> </a>
+<a name="ln1073">        if(strstr(key, &quot;CRM_meta&quot;) == key) {</a>
+<a name="ln1074">            continue;</a>
+<a name="ln1075">        } else if(strcmp(key, &quot;crm_feature_set&quot;) == 0) {</a>
+<a name="ln1076">            continue;</a>
+<a name="ln1077">        } else {</a>
+<a name="ln1078">            char *other_value = g_hash_table_lookup(second, key);</a>
+<a name="ln1079"> </a>
+<a name="ln1080">            if (!other_value || safe_str_neq(other_value, value)) {</a>
+<a name="ln1081">                crm_trace(&quot;Different value for %s: %s != %s&quot;, key, other_value, value);</a>
+<a name="ln1082">                return 1;</a>
+<a name="ln1083">            }</a>
+<a name="ln1084">        }</a>
+<a name="ln1085">    }</a>
+<a name="ln1086"> </a>
+<a name="ln1087">    return 0;</a>
+<a name="ln1088">}</a>
+<a name="ln1089"> </a>
+<a name="ln1090">/*!</a>
+<a name="ln1091"> * \internal</a>
+<a name="ln1092"> * \brief Checks to see if an identical device already exists in the device_list</a>
+<a name="ln1093"> */</a>
+<a name="ln1094">static stonith_device_t *</a>
+<a name="ln1095">device_has_duplicate(stonith_device_t * device)</a>
+<a name="ln1096">{</a>
+<a name="ln1097">    stonith_device_t *dup = g_hash_table_lookup(device_list, device-&gt;id);</a>
+<a name="ln1098"> </a>
+<a name="ln1099">    if (!dup) {</a>
+<a name="ln1100">        crm_trace(&quot;No match for %s&quot;, device-&gt;id);</a>
+<a name="ln1101">        return NULL;</a>
+<a name="ln1102"> </a>
+<a name="ln1103">    } else if (safe_str_neq(dup-&gt;agent, device-&gt;agent)) {</a>
+<a name="ln1104">        crm_trace(&quot;Different agent: %s != %s&quot;, dup-&gt;agent, device-&gt;agent);</a>
+<a name="ln1105">        return NULL;</a>
+<a name="ln1106">    }</a>
+<a name="ln1107"> </a>
+<a name="ln1108">    /* Use calculate_operation_digest() here? */</a>
+<a name="ln1109">    if (device_params_diff(device-&gt;params, dup-&gt;params) ||</a>
+<a name="ln1110">        device_params_diff(dup-&gt;params, device-&gt;params)) {</a>
+<a name="ln1111">        return NULL;</a>
+<a name="ln1112">    }</a>
+<a name="ln1113"> </a>
+<a name="ln1114">    crm_trace(&quot;Match&quot;);</a>
+<a name="ln1115">    return dup;</a>
+<a name="ln1116">}</a>
+<a name="ln1117"> </a>
+<a name="ln1118">int</a>
+<a name="ln1119">stonith_device_register(xmlNode * msg, const char **desc, gboolean from_cib)</a>
+<a name="ln1120">{</a>
+<a name="ln1121">    stonith_device_t *dup = NULL;</a>
+<a name="ln1122">    stonith_device_t *device = build_device_from_xml(msg);</a>
+<a name="ln1123"> </a>
+<a name="ln1124">    dup = device_has_duplicate(device);</a>
+<a name="ln1125">    if (dup) {</a>
+<a name="ln1126">        crm_debug(&quot;Device '%s' already existed in device list (%d active devices)&quot;, device-&gt;id,</a>
+<a name="ln1127">                   g_hash_table_size(device_list));</a>
+<a name="ln1128">        free_device(device);</a>
+<a name="ln1129">        device = dup;</a>
+<a name="ln1130"> </a>
+<a name="ln1131">    } else {</a>
+<a name="ln1132">        stonith_device_t *old = g_hash_table_lookup(device_list, device-&gt;id);</a>
+<a name="ln1133"> </a>
+<a name="ln1134">        if (from_cib &amp;&amp; old &amp;&amp; old-&gt;api_registered) {</a>
+<a name="ln1135">            /* If the cib is writing over an entry that is shared with a stonith client,</a>
+<a name="ln1136">             * copy any pending ops that currently exist on the old entry to the new one.</a>
+<a name="ln1137">             * Otherwise the pending ops will be reported as failures</a>
+<a name="ln1138">             */</a>
+<a name="ln1139">            crm_info(&quot;Overwriting an existing entry for %s from the cib&quot;, device-&gt;id);</a>
+<a name="ln1140">            device-&gt;pending_ops = old-&gt;pending_ops;</a>
+<a name="ln1141">            device-&gt;api_registered = TRUE;</a>
+<a name="ln1142">            old-&gt;pending_ops = NULL;</a>
+<a name="ln1143">            if (device-&gt;pending_ops) {</a>
+<a name="ln1144">                mainloop_set_trigger(device-&gt;work);</a>
+<a name="ln1145">            }</a>
+<a name="ln1146">        }</a>
+<a name="ln1147">        g_hash_table_replace(device_list, device-&gt;id, device);</a>
+<a name="ln1148"> </a>
+<a name="ln1149">        crm_notice(&quot;Added '%s' to the device list (%d active devices)&quot;, device-&gt;id,</a>
+<a name="ln1150">                   g_hash_table_size(device_list));</a>
+<a name="ln1151">    }</a>
+<a name="ln1152">    if (desc) {</a>
+<a name="ln1153">        *desc = device-&gt;id;</a>
+<a name="ln1154">    }</a>
+<a name="ln1155"> </a>
+<a name="ln1156">    if (from_cib) {</a>
+<a name="ln1157">        device-&gt;cib_registered = TRUE;</a>
+<a name="ln1158">    } else {</a>
+<a name="ln1159">        device-&gt;api_registered = TRUE;</a>
+<a name="ln1160">    }</a>
+<a name="ln1161"> </a>
+<a name="ln1162">    return pcmk_ok;</a>
+<a name="ln1163">}</a>
+<a name="ln1164"> </a>
+<a name="ln1165">int</a>
+<a name="ln1166">stonith_device_remove(const char *id, gboolean from_cib)</a>
+<a name="ln1167">{</a>
+<a name="ln1168">    stonith_device_t *device = g_hash_table_lookup(device_list, id);</a>
+<a name="ln1169"> </a>
+<a name="ln1170">    if (!device) {</a>
+<a name="ln1171">        crm_info(&quot;Device '%s' not found (%d active devices)&quot;, id, g_hash_table_size(device_list));</a>
+<a name="ln1172">        return pcmk_ok;</a>
+<a name="ln1173">    }</a>
+<a name="ln1174"> </a>
+<a name="ln1175">    if (from_cib) {</a>
+<a name="ln1176">        device-&gt;cib_registered = FALSE;</a>
+<a name="ln1177">    } else {</a>
+<a name="ln1178">        device-&gt;verified = FALSE;</a>
+<a name="ln1179">        device-&gt;api_registered = FALSE;</a>
+<a name="ln1180">    }</a>
+<a name="ln1181"> </a>
+<a name="ln1182">    if (!device-&gt;cib_registered &amp;&amp; !device-&gt;api_registered) {</a>
+<a name="ln1183">        g_hash_table_remove(device_list, id);</a>
+<a name="ln1184">        crm_info(&quot;Removed '%s' from the device list (%d active devices)&quot;,</a>
+<a name="ln1185">                 id, g_hash_table_size(device_list));</a>
+<a name="ln1186">    }</a>
+<a name="ln1187">    return pcmk_ok;</a>
+<a name="ln1188">}</a>
+<a name="ln1189"> </a>
+<a name="ln1190">/*!</a>
+<a name="ln1191"> * \internal</a>
+<a name="ln1192"> * \brief Return the number of stonith levels registered for a node</a>
+<a name="ln1193"> *</a>
+<a name="ln1194"> * \param[in] tp  Node's topology table entry</a>
+<a name="ln1195"> *</a>
+<a name="ln1196"> * \return Number of non-NULL levels in topology entry</a>
+<a name="ln1197"> * \note This function is used only for log messages.</a>
+<a name="ln1198"> */</a>
+<a name="ln1199">static int</a>
+<a name="ln1200">count_active_levels(stonith_topology_t * tp)</a>
+<a name="ln1201">{</a>
+<a name="ln1202">    int lpc = 0;</a>
+<a name="ln1203">    int count = 0;</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    for (lpc = 0; lpc &lt; ST_LEVEL_MAX; lpc++) {</a>
+<a name="ln1206">        if (tp-&gt;levels[lpc] != NULL) {</a>
+<a name="ln1207">            count++;</a>
+<a name="ln1208">        }</a>
+<a name="ln1209">    }</a>
+<a name="ln1210">    return count;</a>
+<a name="ln1211">}</a>
+<a name="ln1212"> </a>
+<a name="ln1213">void</a>
+<a name="ln1214">free_topology_entry(gpointer data)</a>
+<a name="ln1215">{</a>
+<a name="ln1216">    stonith_topology_t *tp = data;</a>
+<a name="ln1217"> </a>
+<a name="ln1218">    int lpc = 0;</a>
+<a name="ln1219"> </a>
+<a name="ln1220">    for (lpc = 0; lpc &lt; ST_LEVEL_MAX; lpc++) {</a>
+<a name="ln1221">        if (tp-&gt;levels[lpc] != NULL) {</a>
+<a name="ln1222">            g_list_free_full(tp-&gt;levels[lpc], free);</a>
+<a name="ln1223">        }</a>
+<a name="ln1224">    }</a>
+<a name="ln1225">    free(tp-&gt;target);</a>
+<a name="ln1226">    free(tp-&gt;target_value);</a>
+<a name="ln1227">    free(tp-&gt;target_pattern);</a>
+<a name="ln1228">    free(tp-&gt;target_attribute);</a>
+<a name="ln1229">    free(tp);</a>
+<a name="ln1230">}</a>
+<a name="ln1231"> </a>
+<a name="ln1232">char *stonith_level_key(xmlNode *level, int mode)</a>
+<a name="ln1233">{</a>
+<a name="ln1234">    if(mode == -1) {</a>
+<a name="ln1235">        mode = stonith_level_kind(level);</a>
+<a name="ln1236">    }</a>
+<a name="ln1237"> </a>
+<a name="ln1238">    switch(mode) {</a>
+<a name="ln1239">        case 0:</a>
+<a name="ln1240">            return crm_element_value_copy(level, XML_ATTR_STONITH_TARGET);</a>
+<a name="ln1241">        case 1:</a>
+<a name="ln1242">            return crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_PATTERN);</a>
+<a name="ln1243">        case 2:</a>
+<a name="ln1244">            {</a>
+<a name="ln1245">                const char *name = crm_element_value(level, XML_ATTR_STONITH_TARGET_ATTRIBUTE);</a>
+<a name="ln1246">                const char *value = crm_element_value(level, XML_ATTR_STONITH_TARGET_VALUE);</a>
+<a name="ln1247"> </a>
+<a name="ln1248">                if(name &amp;&amp; value) {</a>
+<a name="ln1249">                    return crm_strdup_printf(&quot;%s=%s&quot;, name, value);</a>
+<a name="ln1250">                }</a>
+<a name="ln1251">            }</a>
+<a name="ln1252">        default:</a>
+<a name="ln1253">            return crm_strdup_printf(&quot;Unknown-%d-%s&quot;, mode, ID(level));</a>
+<a name="ln1254">    }</a>
+<a name="ln1255">}</a>
+<a name="ln1256"> </a>
+<a name="ln1257">int stonith_level_kind(xmlNode * level)</a>
+<a name="ln1258">{</a>
+<a name="ln1259">    int mode = 0;</a>
+<a name="ln1260">    const char *target = crm_element_value(level, XML_ATTR_STONITH_TARGET);</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    if(target == NULL) {</a>
+<a name="ln1263">        mode++;</a>
+<a name="ln1264">        target = crm_element_value(level, XML_ATTR_STONITH_TARGET_PATTERN);</a>
+<a name="ln1265">    }</a>
+<a name="ln1266"> </a>
+<a name="ln1267">    if(stand_alone == FALSE &amp;&amp; target == NULL) {</a>
+<a name="ln1268"> </a>
+<a name="ln1269">        mode++;</a>
+<a name="ln1270"> </a>
+<a name="ln1271">        if(crm_element_value(level, XML_ATTR_STONITH_TARGET_ATTRIBUTE) == NULL) {</a>
+<a name="ln1272">            mode++;</a>
+<a name="ln1273"> </a>
+<a name="ln1274">        } else if(crm_element_value(level, XML_ATTR_STONITH_TARGET_VALUE) == NULL) {</a>
+<a name="ln1275">            mode++;</a>
+<a name="ln1276">        }</a>
+<a name="ln1277">    }</a>
+<a name="ln1278"> </a>
+<a name="ln1279">    return mode;</a>
+<a name="ln1280">}</a>
+<a name="ln1281"> </a>
+<a name="ln1282">static stonith_key_value_t *</a>
+<a name="ln1283">parse_device_list(const char *devices)</a>
+<a name="ln1284">{</a>
+<a name="ln1285">    int lpc = 0;</a>
+<a name="ln1286">    int max = 0;</a>
+<a name="ln1287">    int last = 0;</a>
+<a name="ln1288">    stonith_key_value_t *output = NULL;</a>
+<a name="ln1289"> </a>
+<a name="ln1290">    if (devices == NULL) {</a>
+<a name="ln1291">        return output;</a>
+<a name="ln1292">    }</a>
+<a name="ln1293"> </a>
+<a name="ln1294">    max = strlen(devices);</a>
+<a name="ln1295">    for (lpc = 0; lpc &lt;= max; lpc++) {</a>
+<a name="ln1296">        if (devices[lpc] == ',' || devices[lpc] == 0) {</a>
+<a name="ln1297">            char *line = NULL;</a>
+<a name="ln1298"> </a>
+<a name="ln1299">            line = calloc(1, 2 + lpc - last);</a>
+<a name="ln1300">            snprintf(line, 1 + lpc - last, &quot;%s&quot;, devices + last);</a>
+<a name="ln1301">            output = stonith_key_value_add(output, NULL, line);</a>
+<a name="ln1302">            free(line);</a>
+<a name="ln1303"> </a>
+<a name="ln1304">            last = lpc + 1;</a>
+<a name="ln1305">        }</a>
+<a name="ln1306">    }</a>
+<a name="ln1307"> </a>
+<a name="ln1308">    return output;</a>
+<a name="ln1309">}</a>
+<a name="ln1310"> </a>
+<a name="ln1311">/*!</a>
+<a name="ln1312"> * \internal</a>
+<a name="ln1313"> * \brief Register a STONITH level for a target</a>
+<a name="ln1314"> *</a>
+<a name="ln1315"> * Given an XML request specifying the target name, level index, and device IDs</a>
+<a name="ln1316"> * for the level, this will create an entry for the target in the global topology</a>
+<a name="ln1317"> * table if one does not already exist, then append the specified device IDs to</a>
+<a name="ln1318"> * the entry's device list for the specified level.</a>
+<a name="ln1319"> *</a>
+<a name="ln1320"> * \param[in]  msg   XML request for STONITH level registration</a>
+<a name="ln1321"> * \param[out] desc  If not NULL, will be set to string representation (&quot;TARGET[LEVEL]&quot;)</a>
+<a name="ln1322"> *</a>
+<a name="ln1323"> * \return pcmk_ok on success, -EINVAL if XML does not specify valid level index</a>
+<a name="ln1324"> */</a>
+<a name="ln1325">int</a>
+<a name="ln1326">stonith_level_register(xmlNode *msg, char **desc)</a>
+<a name="ln1327">{</a>
+<a name="ln1328">    int id = 0;</a>
+<a name="ln1329">    xmlNode *level;</a>
+<a name="ln1330">    int mode;</a>
+<a name="ln1331">    char *target;</a>
+<a name="ln1332"> </a>
+<a name="ln1333">    stonith_topology_t *tp;</a>
+<a name="ln1334">    stonith_key_value_t *dIter = NULL;</a>
+<a name="ln1335">    stonith_key_value_t *devices = NULL;</a>
+<a name="ln1336"> </a>
+<a name="ln1337">    /* Allow the XML here to point to the level tag directly, or wrapped in</a>
+<a name="ln1338">     * another tag. If directly, don't search by xpath, because it might give</a>
+<a name="ln1339">     * multiple hits (e.g. if the XML is the CIB).</a>
+<a name="ln1340">     */</a>
+<a name="ln1341">    if (safe_str_eq(TYPE(msg), XML_TAG_FENCING_LEVEL)) {</a>
+<a name="ln1342">        level = msg;</a>
+<a name="ln1343">    } else {</a>
+<a name="ln1344">        level = get_xpath_object(&quot;//&quot; XML_TAG_FENCING_LEVEL, msg, LOG_ERR);</a>
+<a name="ln1345">    }</a>
+<a name="ln1346">    CRM_CHECK(level != NULL, return -EINVAL);</a>
+<a name="ln1347"> </a>
+<a name="ln1348">    mode = stonith_level_kind(level);</a>
+<a name="ln1349">    target = stonith_level_key(level, mode);</a>
+<a name="ln1350">    crm_element_value_int(level, XML_ATTR_STONITH_INDEX, &amp;id);</a>
+<a name="ln1351"> </a>
+<a name="ln1352">    if (desc) {</a>
+<a name="ln1353">        *desc = crm_strdup_printf(&quot;%s[%d]&quot;, target, id);</a>
+<a name="ln1354">    }</a>
+<a name="ln1355"> </a>
+<a name="ln1356">    /* Sanity-check arguments */</a>
+<a name="ln1357">    if (mode &gt;= 3 || (id &lt;= 0) || (id &gt;= ST_LEVEL_MAX)) {</a>
+<a name="ln1358">        crm_trace(&quot;Could not add %s[%d] (%d) to the topology (%d active entries)&quot;, target, id, mode, g_hash_table_size(topology));</a>
+<a name="ln1359">        free(target);</a>
+<a name="ln1360">        crm_log_xml_err(level, &quot;Bad topology&quot;);</a>
+<a name="ln1361">        return -EINVAL;</a>
+<a name="ln1362">    }</a>
+<a name="ln1363"> </a>
+<a name="ln1364">    /* Find or create topology table entry */</a>
+<a name="ln1365">    tp = g_hash_table_lookup(topology, target);</a>
+<a name="ln1366">    if (tp == NULL) {</a>
+<a name="ln1367">        tp = calloc(1, sizeof(stonith_topology_t));</a>
+<a name="ln1368">        tp-&gt;kind = mode;</a>
+<a name="ln1369">        tp-&gt;target = target;</a>
+<a name="ln1370">        tp-&gt;target_value = crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_VALUE);</a>
+<a name="ln1371">        tp-&gt;target_pattern = crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_PATTERN);</a>
+<a name="ln1372">        tp-&gt;target_attribute = crm_element_value_copy(level, XML_ATTR_STONITH_TARGET_ATTRIBUTE);</a>
+<a name="ln1373"> </a>
+<a name="ln1374">        g_hash_table_replace(topology, tp-&gt;target, tp);</a>
+<a name="ln1375">        crm_trace(&quot;Added %s (%d) to the topology (%d active entries)&quot;,</a>
+<a name="ln1376">                  target, mode, g_hash_table_size(topology));</a>
+<a name="ln1377">    } else {</a>
+<a name="ln1378">        free(target);</a>
+<a name="ln1379">    }</a>
+<a name="ln1380"> </a>
+<a name="ln1381">    if (tp-&gt;levels[id] != NULL) {</a>
+<a name="ln1382">        crm_info(&quot;Adding to the existing %s[%d] topology entry&quot;,</a>
+<a name="ln1383">                 tp-&gt;target, id);</a>
+<a name="ln1384">    }</a>
+<a name="ln1385"> </a>
+<a name="ln1386">    devices = parse_device_list(crm_element_value(level, XML_ATTR_STONITH_DEVICES));</a>
+<a name="ln1387">    for (dIter = devices; dIter; dIter = dIter-&gt;next) {</a>
+<a name="ln1388">        const char *device = dIter-&gt;value;</a>
+<a name="ln1389"> </a>
+<a name="ln1390">        crm_trace(&quot;Adding device '%s' for %s[%d]&quot;, device, tp-&gt;target, id);</a>
+<a name="ln1391">        tp-&gt;levels[id] = g_list_append(tp-&gt;levels[id], strdup(device));</a>
+<a name="ln1392">    }</a>
+<a name="ln1393">    stonith_key_value_freeall(devices, 1, 1);</a>
+<a name="ln1394"> </a>
+<a name="ln1395">    crm_info(&quot;Target %s has %d active fencing levels&quot;,</a>
+<a name="ln1396">             tp-&gt;target, count_active_levels(tp));</a>
+<a name="ln1397">    return pcmk_ok;</a>
+<a name="ln1398">}</a>
+<a name="ln1399"> </a>
+<a name="ln1400">int</a>
+<a name="ln1401">stonith_level_remove(xmlNode *msg, char **desc)</a>
+<a name="ln1402">{</a>
+<a name="ln1403">    int id = 0;</a>
+<a name="ln1404">    stonith_topology_t *tp;</a>
+<a name="ln1405">    char *target;</a>
+<a name="ln1406"> </a>
+<a name="ln1407">    /* Unlike additions, removal requests should always have one level tag */</a>
+<a name="ln1408">    xmlNode *level = get_xpath_object(&quot;//&quot; XML_TAG_FENCING_LEVEL, msg, LOG_ERR);</a>
+<a name="ln1409"> </a>
+<a name="ln1410">    CRM_CHECK(level != NULL, return -EINVAL);</a>
+<a name="ln1411"> </a>
+<a name="ln1412">    target = stonith_level_key(level, -1);</a>
+<a name="ln1413">    crm_element_value_int(level, XML_ATTR_STONITH_INDEX, &amp;id);</a>
+<a name="ln1414">    if (desc) {</a>
+<a name="ln1415">        *desc = crm_strdup_printf(&quot;%s[%d]&quot;, target, id);</a>
+<a name="ln1416">    }</a>
+<a name="ln1417"> </a>
+<a name="ln1418">    /* Sanity-check arguments */</a>
+<a name="ln1419">    if (id &gt;= ST_LEVEL_MAX) {</a>
+<a name="ln1420">        free(target);</a>
+<a name="ln1421">        return -EINVAL;</a>
+<a name="ln1422">    }</a>
+<a name="ln1423"> </a>
+<a name="ln1424">    tp = g_hash_table_lookup(topology, target);</a>
+<a name="ln1425">    if (tp == NULL) {</a>
+<a name="ln1426">        crm_info(&quot;Topology for %s not found (%d active entries)&quot;,</a>
+<a name="ln1427">                 target, g_hash_table_size(topology));</a>
+<a name="ln1428"> </a>
+<a name="ln1429">    } else if (id == 0 &amp;&amp; g_hash_table_remove(topology, target)) {</a>
+<a name="ln1430">        crm_info(&quot;Removed all %s related entries from the topology (%d active entries)&quot;,</a>
+<a name="ln1431">                 target, g_hash_table_size(topology));</a>
+<a name="ln1432"> </a>
+<a name="ln1433">    } else if (id &gt; 0 &amp;&amp; tp-&gt;levels[id] != NULL) {</a>
+<a name="ln1434">        g_list_free_full(tp-&gt;levels[id], free);</a>
+<a name="ln1435">        tp-&gt;levels[id] = NULL;</a>
+<a name="ln1436"> </a>
+<a name="ln1437">        crm_info(&quot;Removed level '%d' from topology for %s (%d active levels remaining)&quot;,</a>
+<a name="ln1438">                 id, target, count_active_levels(tp));</a>
+<a name="ln1439">    }</a>
+<a name="ln1440"> </a>
+<a name="ln1441">    free(target);</a>
+<a name="ln1442">    return pcmk_ok;</a>
+<a name="ln1443">}</a>
+<a name="ln1444"> </a>
+<a name="ln1445">static int</a>
+<a name="ln1446">stonith_device_action(xmlNode * msg, char **output)</a>
+<a name="ln1447">{</a>
+<a name="ln1448">    int rc = pcmk_ok;</a>
+<a name="ln1449">    xmlNode *dev = get_xpath_object(&quot;//&quot; F_STONITH_DEVICE, msg, LOG_ERR);</a>
+<a name="ln1450">    const char *id = crm_element_value(dev, F_STONITH_DEVICE);</a>
+<a name="ln1451"> </a>
+<a name="ln1452">    async_command_t *cmd = NULL;</a>
+<a name="ln1453">    stonith_device_t *device = NULL;</a>
+<a name="ln1454"> </a>
+<a name="ln1455">    if (id) {</a>
+<a name="ln1456">        crm_trace(&quot;Looking for '%s'&quot;, id);</a>
+<a name="ln1457">        device = g_hash_table_lookup(device_list, id);</a>
+<a name="ln1458">    }</a>
+<a name="ln1459"> </a>
+<a name="ln1460">    if (device &amp;&amp; device-&gt;api_registered == FALSE) {</a>
+<a name="ln1461">        rc = -ENODEV;</a>
+<a name="ln1462"> </a>
+<a name="ln1463">    } else if (device) {</a>
+<a name="ln1464">        cmd = create_async_command(msg);</a>
+<a name="ln1465">        if (cmd == NULL) {</a>
+<a name="ln1466">            return -EPROTO;</a>
+<a name="ln1467">        }</a>
+<a name="ln1468"> </a>
+<a name="ln1469">        schedule_stonith_command(cmd, device);</a>
+<a name="ln1470">        rc = -EINPROGRESS;</a>
+<a name="ln1471"> </a>
+<a name="ln1472">    } else {</a>
+<a name="ln1473">        crm_info(&quot;Device %s not found&quot;, id ? id : &quot;&lt;none&gt;&quot;);</a>
+<a name="ln1474">        rc = -ENODEV;</a>
+<a name="ln1475">    }</a>
+<a name="ln1476">    return rc;</a>
+<a name="ln1477">}</a>
+<a name="ln1478"> </a>
+<a name="ln1479">static void</a>
+<a name="ln1480">search_devices_record_result(struct device_search_s *search, const char *device, gboolean can_fence)</a>
+<a name="ln1481">{</a>
+<a name="ln1482">    search-&gt;replies_received++;</a>
+<a name="ln1483"> </a>
+<a name="ln1484">    if (can_fence &amp;&amp; device) {</a>
+<a name="ln1485">        search-&gt;capable = g_list_append(search-&gt;capable, strdup(device));</a>
+<a name="ln1486">    }</a>
+<a name="ln1487"> </a>
+<a name="ln1488">    if (search-&gt;replies_needed == search-&gt;replies_received) {</a>
+<a name="ln1489"> </a>
+<a name="ln1490">        crm_debug(&quot;Finished Search. %d devices can perform action (%s) on node %s&quot;,</a>
+<a name="ln1491">                  g_list_length(search-&gt;capable),</a>
+<a name="ln1492">                  search-&gt;action ? search-&gt;action : &quot;&lt;unknown&gt;&quot;,</a>
+<a name="ln1493">                  search-&gt;host ? search-&gt;host : &quot;&lt;anyone&gt;&quot;);</a>
+<a name="ln1494"> </a>
+<a name="ln1495">        search-&gt;callback(search-&gt;capable, search-&gt;user_data);</a>
+<a name="ln1496">        free(search-&gt;host);</a>
+<a name="ln1497">        free(search-&gt;action);</a>
+<a name="ln1498">        free(search);</a>
+<a name="ln1499">    }</a>
+<a name="ln1500">}</a>
+<a name="ln1501"> </a>
+<a name="ln1502">/*!</a>
+<a name="ln1503"> * \internal</a>
+<a name="ln1504"> * \brief Check whether the local host is allowed to execute a fencing action</a>
+<a name="ln1505"> *</a>
+<a name="ln1506"> * \param[in] device         Fence device to check</a>
+<a name="ln1507"> * \param[in] action         Fence action to check</a>
+<a name="ln1508"> * \param[in] target         Hostname of fence target</a>
+<a name="ln1509"> * \param[in] allow_suicide  Whether self-fencing is allowed for this operation</a>
+<a name="ln1510"> *</a>
+<a name="ln1511"> * \return TRUE if local host is allowed to execute action, FALSE otherwise</a>
+<a name="ln1512"> */</a>
+<a name="ln1513">static gboolean</a>
+<a name="ln1514">localhost_is_eligible(const stonith_device_t *device, const char *action,</a>
+<a name="ln1515">                      const char *target, gboolean allow_suicide)</a>
+<a name="ln1516">{</a>
+<a name="ln1517">    gboolean localhost_is_target = safe_str_eq(target, stonith_our_uname);</a>
+<a name="ln1518"> </a>
+<a name="ln1519">    if (device &amp;&amp; action &amp;&amp; device-&gt;on_target_actions</a>
+<a name="ln1520">        &amp;&amp; strstr(device-&gt;on_target_actions, action)) {</a>
+<a name="ln1521">        if (!localhost_is_target) {</a>
+<a name="ln1522">            crm_trace(&quot;%s operation with %s can only be executed for localhost not %s&quot;,</a>
+<a name="ln1523">                      action, device-&gt;id, target);</a>
+<a name="ln1524">            return FALSE;</a>
+<a name="ln1525">        }</a>
+<a name="ln1526"> </a>
+<a name="ln1527">    } else if (localhost_is_target &amp;&amp; !allow_suicide) {</a>
+<a name="ln1528">        crm_trace(&quot;%s operation does not support self-fencing&quot;, action);</a>
+<a name="ln1529">        return FALSE;</a>
+<a name="ln1530">    }</a>
+<a name="ln1531">    return TRUE;</a>
+<a name="ln1532">}</a>
+<a name="ln1533"> </a>
+<a name="ln1534">static void</a>
+<a name="ln1535">can_fence_host_with_device(stonith_device_t * dev, struct device_search_s *search)</a>
+<a name="ln1536">{</a>
+<a name="ln1537">    gboolean can = FALSE;</a>
+<a name="ln1538">    const char *check_type = NULL;</a>
+<a name="ln1539">    const char *host = search-&gt;host;</a>
+<a name="ln1540">    const char *alias = NULL;</a>
+<a name="ln1541"> </a>
+<a name="ln1542">    CRM_LOG_ASSERT(dev != NULL);</a>
+<a name="ln1543"> </a>
+<a name="ln1544">    if (dev == NULL) {</a>
+<a name="ln1545">        goto search_report_results;</a>
+<a name="ln1546">    } else if (host == NULL) {</a>
+<a name="ln1547">        can = TRUE;</a>
+<a name="ln1548">        goto search_report_results;</a>
+<a name="ln1549">    }</a>
+<a name="ln1550"> </a>
+<a name="ln1551">    /* Short-circuit query if this host is not allowed to perform the action */</a>
+<a name="ln1552">    if (safe_str_eq(search-&gt;action, &quot;reboot&quot;)) {</a>
+<a name="ln1553">        /* A &quot;reboot&quot; *might* get remapped to &quot;off&quot; then &quot;on&quot;, so short-circuit</a>
+<a name="ln1554">         * only if all three are disallowed. If only one or two are disallowed,</a>
+<a name="ln1555">         * we'll report that with the results. We never allow suicide for</a>
+<a name="ln1556">         * remapped &quot;on&quot; operations because the host is off at that point.</a>
+<a name="ln1557">         */</a>
+<a name="ln1558">        if (!localhost_is_eligible(dev, &quot;reboot&quot;, host, search-&gt;allow_suicide)</a>
+<a name="ln1559">            &amp;&amp; !localhost_is_eligible(dev, &quot;off&quot;, host, search-&gt;allow_suicide)</a>
+<a name="ln1560">            &amp;&amp; !localhost_is_eligible(dev, &quot;on&quot;, host, FALSE)) {</a>
+<a name="ln1561">            goto search_report_results;</a>
+<a name="ln1562">        }</a>
+<a name="ln1563">    } else if (!localhost_is_eligible(dev, search-&gt;action, host,</a>
+<a name="ln1564">                                      search-&gt;allow_suicide)) {</a>
+<a name="ln1565">        goto search_report_results;</a>
+<a name="ln1566">    }</a>
+<a name="ln1567"> </a>
+<a name="ln1568">    alias = g_hash_table_lookup(dev-&gt;aliases, host);</a>
+<a name="ln1569">    if (alias == NULL) {</a>
+<a name="ln1570">        alias = host;</a>
+<a name="ln1571">    }</a>
+<a name="ln1572"> </a>
+<a name="ln1573">    check_type = target_list_type(dev);</a>
+<a name="ln1574"> </a>
+<a name="ln1575">    if (safe_str_eq(check_type, &quot;none&quot;)) {</a>
+<a name="ln1576">        can = TRUE;</a>
+<a name="ln1577"> </a>
+<a name="ln1578">    } else if (safe_str_eq(check_type, &quot;static-list&quot;)) {</a>
+<a name="ln1579"> </a>
+<a name="ln1580">        /* Presence in the hostmap is sufficient</a>
+<a name="ln1581">         * Only use if all hosts on which the device can be active can always fence all listed hosts</a>
+<a name="ln1582">         */</a>
+<a name="ln1583"> </a>
+<a name="ln1584">        if (string_in_list(dev-&gt;targets, host)) {</a>
+<a name="ln1585">            can = TRUE;</a>
+<a name="ln1586">        } else if (g_hash_table_lookup(dev-&gt;params, STONITH_ATTR_HOSTMAP)</a>
+<a name="ln1587">                   &amp;&amp; g_hash_table_lookup(dev-&gt;aliases, host)) {</a>
+<a name="ln1588">            can = TRUE;</a>
+<a name="ln1589">        }</a>
+<a name="ln1590"> </a>
+<a name="ln1591">    } else if (safe_str_eq(check_type, &quot;dynamic-list&quot;)) {</a>
+<a name="ln1592">        time_t now = time(NULL);</a>
+<a name="ln1593"> </a>
+<a name="ln1594">        if (dev-&gt;targets == NULL || dev-&gt;targets_age + 60 &lt; now) {</a>
+<a name="ln1595">            crm_trace(&quot;Running %s command to see if %s can fence %s (%s)&quot;,</a>
+<a name="ln1596">                      check_type, dev?dev-&gt;id:&quot;N/A&quot;, search-&gt;host, search-&gt;action);</a>
+<a name="ln1597"> </a>
+<a name="ln1598">            schedule_internal_command(__FUNCTION__, dev, &quot;list&quot;, NULL,</a>
+<a name="ln1599">                                      search-&gt;per_device_timeout, search, dynamic_list_search_cb);</a>
+<a name="ln1600"> </a>
+<a name="ln1601">            /* we'll respond to this search request async in the cb */</a>
+<a name="ln1602">            return;</a>
+<a name="ln1603">        }</a>
+<a name="ln1604"> </a>
+<a name="ln1605">        if (string_in_list(dev-&gt;targets, alias)) {</a>
+<a name="ln1606">            can = TRUE;</a>
+<a name="ln1607">        }</a>
+<a name="ln1608"> </a>
+<a name="ln1609">    } else if (safe_str_eq(check_type, &quot;status&quot;)) {</a>
+<a name="ln1610">        crm_trace(&quot;Running %s command to see if %s can fence %s (%s)&quot;,</a>
+<a name="ln1611">                  check_type, dev?dev-&gt;id:&quot;N/A&quot;, search-&gt;host, search-&gt;action);</a>
+<a name="ln1612">        schedule_internal_command(__FUNCTION__, dev, &quot;status&quot;, search-&gt;host,</a>
+<a name="ln1613">                                  search-&gt;per_device_timeout, search, status_search_cb);</a>
+<a name="ln1614">        /* we'll respond to this search request async in the cb */</a>
+<a name="ln1615">        return;</a>
+<a name="ln1616">    } else {</a>
+<a name="ln1617">        crm_err(&quot;Unknown check type: %s&quot;, check_type);</a>
+<a name="ln1618">    }</a>
+<a name="ln1619"> </a>
+<a name="ln1620">    if (safe_str_eq(host, alias)) {</a>
+<a name="ln1621">        crm_notice(&quot;%s can%s fence (%s) %s: %s&quot;, dev-&gt;id, can ? &quot;&quot; : &quot; not&quot;, search-&gt;action, host, check_type);</a>
+<a name="ln1622">    } else {</a>
+<a name="ln1623">        crm_notice(&quot;%s can%s fence (%s) %s (aka. '%s'): %s&quot;, dev-&gt;id, can ? &quot;&quot; : &quot; not&quot;, search-&gt;action, host, alias,</a>
+<a name="ln1624">                   check_type);</a>
+<a name="ln1625">    }</a>
+<a name="ln1626"> </a>
+<a name="ln1627">  search_report_results:</a>
+<a name="ln1628">    search_devices_record_result(search, dev ? dev-&gt;id : NULL, can);</a>
+<a name="ln1629">}</a>
+<a name="ln1630"> </a>
+<a name="ln1631">static void</a>
+<a name="ln1632">search_devices(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln1633">{</a>
+<a name="ln1634">    stonith_device_t *dev = value;</a>
+<a name="ln1635">    struct device_search_s *search = user_data;</a>
+<a name="ln1636"> </a>
+<a name="ln1637">    can_fence_host_with_device(dev, search);</a>
+<a name="ln1638">}</a>
+<a name="ln1639"> </a>
+<a name="ln1640">#define DEFAULT_QUERY_TIMEOUT 20</a>
+<a name="ln1641">static void</a>
+<a name="ln1642">get_capable_devices(const char *host, const char *action, int timeout, bool suicide, void *user_data,</a>
+<a name="ln1643">                    void (*callback) (GList * devices, void *user_data))</a>
+<a name="ln1644">{</a>
+<a name="ln1645">    struct device_search_s *search;</a>
+<a name="ln1646">    int per_device_timeout = DEFAULT_QUERY_TIMEOUT;</a>
+<a name="ln1647">    int devices_needing_async_query = 0;</a>
+<a name="ln1648">    char *key = NULL;</a>
+<a name="ln1649">    const char *check_type = NULL;</a>
+<a name="ln1650">    GHashTableIter gIter;</a>
+<a name="ln1651">    stonith_device_t *device = NULL;</a>
+<a name="ln1652"> </a>
+<a name="ln1653">    if (!g_hash_table_size(device_list)) {</a>
+<a name="ln1654">        callback(NULL, user_data);</a>
+<a name="ln1655">        return;</a>
+<a name="ln1656">    }</a>
+<a name="ln1657"> </a>
+<a name="ln1658">    search = calloc(1, sizeof(struct device_search_s));</a>
+<a name="ln1659">    if (!search) {</a>
+<a name="ln1660">        callback(NULL, user_data);</a>
+<a name="ln1661">        return;</a>
+<a name="ln1662">    }</a>
+<a name="ln1663"> </a>
+<a name="ln1664">    g_hash_table_iter_init(&amp;gIter, device_list);</a>
+<a name="ln1665">    while (g_hash_table_iter_next(&amp;gIter, (void **)&amp;key, (void **)&amp;device)) {</a>
+<a name="ln1666">        check_type = target_list_type(device);</a>
+<a name="ln1667">        if (safe_str_eq(check_type, &quot;status&quot;) || safe_str_eq(check_type, &quot;dynamic-list&quot;)) {</a>
+<a name="ln1668">            devices_needing_async_query++;</a>
+<a name="ln1669">        }</a>
+<a name="ln1670">    }</a>
+<a name="ln1671"> </a>
+<a name="ln1672">    /* If we have devices that require an async event in order to know what</a>
+<a name="ln1673">     * nodes they can fence, we have to give the events a timeout. The total</a>
+<a name="ln1674">     * query timeout is divided among those events. */</a>
+<a name="ln1675">    if (devices_needing_async_query) {</a>
+<a name="ln1676">        per_device_timeout = timeout / devices_needing_async_query;</a>
+<a name="ln1677">        if (!per_device_timeout) {</a>
+<a name="ln1678">            crm_err(&quot;STONITH timeout %ds is too low; using %ds, but consider raising to at least %ds&quot;,</a>
+<a name="ln1679">                    timeout, DEFAULT_QUERY_TIMEOUT,</a>
+<a name="ln1680">                    DEFAULT_QUERY_TIMEOUT * devices_needing_async_query);</a>
+<a name="ln1681">            per_device_timeout = DEFAULT_QUERY_TIMEOUT;</a>
+<a name="ln1682">        } else if (per_device_timeout &lt; DEFAULT_QUERY_TIMEOUT) {</a>
+<a name="ln1683">            crm_notice(&quot;STONITH timeout %ds is low for the current configuration;&quot;</a>
+<a name="ln1684">                       &quot; consider raising to at least %ds&quot;,</a>
+<a name="ln1685">                       timeout, DEFAULT_QUERY_TIMEOUT * devices_needing_async_query);</a>
+<a name="ln1686">        }</a>
+<a name="ln1687">    }</a>
+<a name="ln1688"> </a>
+<a name="ln1689">    search-&gt;host = host ? strdup(host) : NULL;</a>
+<a name="ln1690">    search-&gt;action = action ? strdup(action) : NULL;</a>
+<a name="ln1691">    search-&gt;per_device_timeout = per_device_timeout;</a>
+<a name="ln1692">    /* We are guaranteed this many replies. Even if a device gets</a>
+<a name="ln1693">     * unregistered some how during the async search, we will get</a>
+<a name="ln1694">     * the correct number of replies. */</a>
+<a name="ln1695">    search-&gt;replies_needed = g_hash_table_size(device_list);</a>
+<a name="ln1696">    search-&gt;allow_suicide = suicide;</a>
+<a name="ln1697">    search-&gt;callback = callback;</a>
+<a name="ln1698">    search-&gt;user_data = user_data;</a>
+<a name="ln1699">    /* kick off the search */</a>
+<a name="ln1700"> </a>
+<a name="ln1701">    crm_debug(&quot;Searching through %d devices to see what is capable of action (%s) for target %s&quot;,</a>
+<a name="ln1702">              search-&gt;replies_needed,</a>
+<a name="ln1703">              search-&gt;action ? search-&gt;action : &quot;&lt;unknown&gt;&quot;,</a>
+<a name="ln1704">              search-&gt;host ? search-&gt;host : &quot;&lt;anyone&gt;&quot;);</a>
+<a name="ln1705">    g_hash_table_foreach(device_list, search_devices, search);</a>
+<a name="ln1706">}</a>
+<a name="ln1707"> </a>
+<a name="ln1708">struct st_query_data {</a>
+<a name="ln1709">    xmlNode *reply;</a>
+<a name="ln1710">    char *remote_peer;</a>
+<a name="ln1711">    char *client_id;</a>
+<a name="ln1712">    char *target;</a>
+<a name="ln1713">    char *action;</a>
+<a name="ln1714">    int call_options;</a>
+<a name="ln1715">};</a>
+<a name="ln1716"> </a>
+<a name="ln1717">/*!</a>
+<a name="ln1718"> * \internal</a>
+<a name="ln1719"> * \brief Add action-specific attributes to query reply XML</a>
+<a name="ln1720"> *</a>
+<a name="ln1721"> * \param[in,out] xml     XML to add attributes to</a>
+<a name="ln1722"> * \param[in]     action  Fence action</a>
+<a name="ln1723"> * \param[in]     device  Fence device</a>
+<a name="ln1724"> */</a>
+<a name="ln1725">static void</a>
+<a name="ln1726">add_action_specific_attributes(xmlNode *xml, const char *action,</a>
+<a name="ln1727">                               stonith_device_t *device)</a>
+<a name="ln1728">{</a>
+<a name="ln1729">    int action_specific_timeout;</a>
+<a name="ln1730">    int delay_max;</a>
+<a name="ln1731"> </a>
+<a name="ln1732">    CRM_CHECK(xml &amp;&amp; action &amp;&amp; device, return);</a>
+<a name="ln1733"> </a>
+<a name="ln1734">    if (is_action_required(action, device)) {</a>
+<a name="ln1735">        crm_trace(&quot;Action %s is required on %s&quot;, action, device-&gt;id);</a>
+<a name="ln1736">        crm_xml_add_int(xml, F_STONITH_DEVICE_REQUIRED, 1);</a>
+<a name="ln1737">    }</a>
+<a name="ln1738"> </a>
+<a name="ln1739">    action_specific_timeout = get_action_timeout(device, action, 0);</a>
+<a name="ln1740">    if (action_specific_timeout) {</a>
+<a name="ln1741">        crm_trace(&quot;Action %s has timeout %dms on %s&quot;,</a>
+<a name="ln1742">                  action, action_specific_timeout, device-&gt;id);</a>
+<a name="ln1743">        crm_xml_add_int(xml, F_STONITH_ACTION_TIMEOUT, action_specific_timeout);</a>
+<a name="ln1744">    }</a>
+<a name="ln1745"> </a>
+<a name="ln1746">    delay_max = get_action_delay_max(device, action);</a>
+<a name="ln1747">    if (delay_max &gt; 0) {</a>
+<a name="ln1748">        crm_trace(&quot;Action %s has maximum random delay %dms on %s&quot;,</a>
+<a name="ln1749">                  action, delay_max, device-&gt;id);</a>
+<a name="ln1750">        crm_xml_add_int(xml, F_STONITH_DELAY_MAX, delay_max / 1000);</a>
+<a name="ln1751">    }</a>
+<a name="ln1752">}</a>
+<a name="ln1753"> </a>
+<a name="ln1754">/*!</a>
+<a name="ln1755"> * \internal</a>
+<a name="ln1756"> * \brief Add &quot;disallowed&quot; attribute to query reply XML if appropriate</a>
+<a name="ln1757"> *</a>
+<a name="ln1758"> * \param[in,out] xml            XML to add attribute to</a>
+<a name="ln1759"> * \param[in]     action         Fence action</a>
+<a name="ln1760"> * \param[in]     device         Fence device</a>
+<a name="ln1761"> * \param[in]     target         Fence target</a>
+<a name="ln1762"> * \param[in]     allow_suicide  Whether self-fencing is allowed</a>
+<a name="ln1763"> */</a>
+<a name="ln1764">static void</a>
+<a name="ln1765">add_disallowed(xmlNode *xml, const char *action, stonith_device_t *device,</a>
+<a name="ln1766">               const char *target, gboolean allow_suicide)</a>
+<a name="ln1767">{</a>
+<a name="ln1768">    if (!localhost_is_eligible(device, action, target, allow_suicide)) {</a>
+<a name="ln1769">        crm_trace(&quot;Action %s on %s is disallowed for local host&quot;,</a>
+<a name="ln1770">                  action, device-&gt;id);</a>
+<a name="ln1771">        crm_xml_add(xml, F_STONITH_ACTION_DISALLOWED, XML_BOOLEAN_TRUE);</a>
+<a name="ln1772">    }</a>
+<a name="ln1773">}</a>
+<a name="ln1774"> </a>
+<a name="ln1775">/*!</a>
+<a name="ln1776"> * \internal</a>
+<a name="ln1777"> * \brief Add child element with action-specific values to query reply XML</a>
+<a name="ln1778"> *</a>
+<a name="ln1779"> * \param[in,out] xml            XML to add attribute to</a>
+<a name="ln1780"> * \param[in]     action         Fence action</a>
+<a name="ln1781"> * \param[in]     device         Fence device</a>
+<a name="ln1782"> * \param[in]     target         Fence target</a>
+<a name="ln1783"> * \param[in]     allow_suicide  Whether self-fencing is allowed</a>
+<a name="ln1784"> */</a>
+<a name="ln1785">static void</a>
+<a name="ln1786">add_action_reply(xmlNode *xml, const char *action, stonith_device_t *device,</a>
+<a name="ln1787">               const char *target, gboolean allow_suicide)</a>
+<a name="ln1788">{</a>
+<a name="ln1789">    xmlNode *child = create_xml_node(xml, F_STONITH_ACTION);</a>
+<a name="ln1790"> </a>
+<a name="ln1791">    crm_xml_add(child, XML_ATTR_ID, action);</a>
+<a name="ln1792">    add_action_specific_attributes(child, action, device);</a>
+<a name="ln1793">    add_disallowed(child, action, device, target, allow_suicide);</a>
+<a name="ln1794">}</a>
+<a name="ln1795"> </a>
+<a name="ln1796">static void</a>
+<a name="ln1797">stonith_query_capable_device_cb(GList * devices, void *user_data)</a>
+<a name="ln1798">{</a>
+<a name="ln1799">    struct st_query_data *query = user_data;</a>
+<a name="ln1800">    int available_devices = 0;</a>
+<a name="ln1801">    xmlNode *dev = NULL;</a>
+<a name="ln1802">    xmlNode *list = NULL;</a>
+<a name="ln1803">    GListPtr lpc = NULL;</a>
+<a name="ln1804"> </a>
+<a name="ln1805">    /* Pack the results into XML */</a>
+<a name="ln1806">    list = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln1807">    crm_xml_add(list, F_STONITH_TARGET, query-&gt;target);</a>
+<a name="ln1808">    for (lpc = devices; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln1809">        stonith_device_t *device = g_hash_table_lookup(device_list, lpc-&gt;data);</a>
+<a name="ln1810">        const char *action = query-&gt;action;</a>
+<a name="ln1811"> </a>
+<a name="ln1812">        if (!device) {</a>
+<a name="ln1813">            /* It is possible the device got unregistered while</a>
+<a name="ln1814">             * determining who can fence the target */</a>
+<a name="ln1815">            continue;</a>
+<a name="ln1816">        }</a>
+<a name="ln1817"> </a>
+<a name="ln1818">        available_devices++;</a>
+<a name="ln1819"> </a>
+<a name="ln1820">        dev = create_xml_node(list, F_STONITH_DEVICE);</a>
+<a name="ln1821">        crm_xml_add(dev, XML_ATTR_ID, device-&gt;id);</a>
+<a name="ln1822">        crm_xml_add(dev, &quot;namespace&quot;, device-&gt;namespace);</a>
+<a name="ln1823">        crm_xml_add(dev, &quot;agent&quot;, device-&gt;agent);</a>
+<a name="ln1824">        crm_xml_add_int(dev, F_STONITH_DEVICE_VERIFIED, device-&gt;verified);</a>
+<a name="ln1825"> </a>
+<a name="ln1826">        /* If the originating stonithd wants to reboot the node, and we have a</a>
+<a name="ln1827">         * capable device that doesn't support &quot;reboot&quot;, remap to &quot;off&quot; instead.</a>
+<a name="ln1828">         */</a>
+<a name="ln1829">        if (is_not_set(device-&gt;flags, st_device_supports_reboot)</a>
+<a name="ln1830">            &amp;&amp; safe_str_eq(query-&gt;action, &quot;reboot&quot;)) {</a>
+<a name="ln1831">            crm_trace(&quot;%s doesn't support reboot, using values for off instead&quot;,</a>
+<a name="ln1832">                      device-&gt;id);</a>
+<a name="ln1833">            action = &quot;off&quot;;</a>
+<a name="ln1834">        }</a>
+<a name="ln1835"> </a>
+<a name="ln1836">        /* Add action-specific values if available */</a>
+<a name="ln1837">        add_action_specific_attributes(dev, action, device);</a>
+<a name="ln1838">        if (safe_str_eq(query-&gt;action, &quot;reboot&quot;)) {</a>
+<a name="ln1839">            /* A &quot;reboot&quot; *might* get remapped to &quot;off&quot; then &quot;on&quot;, so after</a>
+<a name="ln1840">             * sending the &quot;reboot&quot;-specific values in the main element, we add</a>
+<a name="ln1841">             * sub-elements for &quot;off&quot; and &quot;on&quot; values.</a>
+<a name="ln1842">             *</a>
+<a name="ln1843">             * We short-circuited earlier if &quot;reboot&quot;, &quot;off&quot; and &quot;on&quot; are all</a>
+<a name="ln1844">             * disallowed for the local host. However if only one or two are</a>
+<a name="ln1845">             * disallowed, we send back the results and mark which ones are</a>
+<a name="ln1846">             * disallowed. If &quot;reboot&quot; is disallowed, this might cause problems</a>
+<a name="ln1847">             * with older stonithd versions, which won't check for it. Older</a>
+<a name="ln1848">             * versions will ignore &quot;off&quot; and &quot;on&quot;, so they are not a problem.</a>
+<a name="ln1849">             */</a>
+<a name="ln1850">            add_disallowed(dev, action, device, query-&gt;target,</a>
+<a name="ln1851">                           is_set(query-&gt;call_options, st_opt_allow_suicide));</a>
+<a name="ln1852">            add_action_reply(dev, &quot;off&quot;, device, query-&gt;target,</a>
+<a name="ln1853">                             is_set(query-&gt;call_options, st_opt_allow_suicide));</a>
+<a name="ln1854">            add_action_reply(dev, &quot;on&quot;, device, query-&gt;target, FALSE);</a>
+<a name="ln1855">        }</a>
+<a name="ln1856"> </a>
+<a name="ln1857">        /* A query without a target wants device parameters */</a>
+<a name="ln1858">        if (query-&gt;target == NULL) {</a>
+<a name="ln1859">            xmlNode *attrs = create_xml_node(dev, XML_TAG_ATTRS);</a>
+<a name="ln1860"> </a>
+<a name="ln1861">            g_hash_table_foreach(device-&gt;params, hash2field, attrs);</a>
+<a name="ln1862">        }</a>
+<a name="ln1863">    }</a>
+<a name="ln1864"> </a>
+<a name="ln1865">    crm_xml_add_int(list, F_STONITH_AVAILABLE_DEVICES, available_devices);</a>
+<a name="ln1866">    if (query-&gt;target) {</a>
+<a name="ln1867">        crm_debug(&quot;Found %d matching devices for '%s'&quot;, available_devices, query-&gt;target);</a>
+<a name="ln1868">    } else {</a>
+<a name="ln1869">        crm_debug(&quot;%d devices installed&quot;, available_devices);</a>
+<a name="ln1870">    }</a>
+<a name="ln1871"> </a>
+<a name="ln1872">    if (list != NULL) {</a>
+<a name="ln1873">        crm_log_xml_trace(list, &quot;Add query results&quot;);</a>
+<a name="ln1874">        add_message_xml(query-&gt;reply, F_STONITH_CALLDATA, list);</a>
+<a name="ln1875">    }</a>
+<a name="ln1876">    stonith_send_reply(query-&gt;reply, query-&gt;call_options, query-&gt;remote_peer, query-&gt;client_id);</a>
+<a name="ln1877"> </a>
+<a name="ln1878">    free_xml(query-&gt;reply);</a>
+<a name="ln1879">    free(query-&gt;remote_peer);</a>
+<a name="ln1880">    free(query-&gt;client_id);</a>
+<a name="ln1881">    free(query-&gt;target);</a>
+<a name="ln1882">    free(query-&gt;action);</a>
+<a name="ln1883">    free(query);</a>
+<a name="ln1884">    free_xml(list);</a>
+<a name="ln1885">    g_list_free_full(devices, free);</a>
+<a name="ln1886">}</a>
+<a name="ln1887"> </a>
+<a name="ln1888">static void</a>
+<a name="ln1889">stonith_query(xmlNode * msg, const char *remote_peer, const char *client_id, int call_options)</a>
+<a name="ln1890">{</a>
+<a name="ln1891">    struct st_query_data *query = NULL;</a>
+<a name="ln1892">    const char *action = NULL;</a>
+<a name="ln1893">    const char *target = NULL;</a>
+<a name="ln1894">    int timeout = 0;</a>
+<a name="ln1895">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_ACTION, msg, LOG_DEBUG_3);</a>
+<a name="ln1896"> </a>
+<a name="ln1897">    crm_element_value_int(msg, F_STONITH_TIMEOUT, &amp;timeout);</a>
+<a name="ln1898">    if (dev) {</a>
+<a name="ln1899">        const char *device = crm_element_value(dev, F_STONITH_DEVICE);</a>
+<a name="ln1900"> </a>
+<a name="ln1901">        target = crm_element_value(dev, F_STONITH_TARGET);</a>
+<a name="ln1902">        action = crm_element_value(dev, F_STONITH_ACTION);</a>
+<a name="ln1903">        if (device &amp;&amp; safe_str_eq(device, &quot;manual_ack&quot;)) {</a>
+<a name="ln1904">            /* No query or reply necessary */</a>
+<a name="ln1905">            return;</a>
+<a name="ln1906">        }</a>
+<a name="ln1907">    }</a>
+<a name="ln1908"> </a>
+<a name="ln1909">    crm_log_xml_debug(msg, &quot;Query&quot;);</a>
+<a name="ln1910">    query = calloc(1, sizeof(struct st_query_data));</a>
+<a name="ln1911"> </a>
+<a name="ln1912">    query-&gt;reply = stonith_construct_reply(msg, NULL, NULL, pcmk_ok);</a>
+<a name="ln1913">    query-&gt;remote_peer = remote_peer ? strdup(remote_peer) : NULL;</a>
+<a name="ln1914">    query-&gt;client_id = client_id ? strdup(client_id) : NULL;</a>
+<a name="ln1915">    query-&gt;target = target ? strdup(target) : NULL;</a>
+<a name="ln1916">    query-&gt;action = action ? strdup(action) : NULL;</a>
+<a name="ln1917">    query-&gt;call_options = call_options;</a>
+<a name="ln1918"> </a>
+<a name="ln1919">    get_capable_devices(target, action, timeout,</a>
+<a name="ln1920">                        is_set(call_options, st_opt_allow_suicide),</a>
+<a name="ln1921">                        query, stonith_query_capable_device_cb);</a>
+<a name="ln1922">}</a>
+<a name="ln1923"> </a>
+<a name="ln1924">#define ST_LOG_OUTPUT_MAX 512</a>
+<a name="ln1925">static void</a>
+<a name="ln1926">log_operation(async_command_t * cmd, int rc, int pid, const char *next, const char *output)</a>
+<a name="ln1927">{</a>
+<a name="ln1928">    if (rc == 0) {</a>
+<a name="ln1929">        next = NULL;</a>
+<a name="ln1930">    }</a>
+<a name="ln1931"> </a>
+<a name="ln1932">    if (cmd-&gt;victim != NULL) {</a>
+<a name="ln1933">        do_crm_log(rc == 0 ? LOG_NOTICE : LOG_ERR,</a>
+<a name="ln1934">                   &quot;Operation '%s' [%d] (call %d from %s) for host '%s' with device '%s' returned: %d (%s)%s%s&quot;,</a>
+<a name="ln1935">                   cmd-&gt;action, pid, cmd-&gt;id, cmd-&gt;client_name, cmd-&gt;victim, cmd-&gt;device, rc,</a>
+<a name="ln1936">                   pcmk_strerror(rc), next ? &quot;. Trying: &quot; : &quot;&quot;, next ? next : &quot;&quot;);</a>
+<a name="ln1937">    } else {</a>
+<a name="ln1938">        do_crm_log_unlikely(rc == 0 ? LOG_DEBUG : LOG_NOTICE,</a>
+<a name="ln1939">                            &quot;Operation '%s' [%d] for device '%s' returned: %d (%s)%s%s&quot;,</a>
+<a name="ln1940">                            cmd-&gt;action, pid, cmd-&gt;device, rc, pcmk_strerror(rc),</a>
+<a name="ln1941">                            next ? &quot;. Trying: &quot; : &quot;&quot;, next ? next : &quot;&quot;);</a>
+<a name="ln1942">    }</a>
+<a name="ln1943"> </a>
+<a name="ln1944">    if (output) {</a>
+<a name="ln1945">        /* Logging the whole string confuses syslog when the string is xml */</a>
+<a name="ln1946">        char *prefix = crm_strdup_printf(&quot;%s:%d&quot;, cmd-&gt;device, pid);</a>
+<a name="ln1947"> </a>
+<a name="ln1948">        crm_log_output(rc == 0 ? LOG_DEBUG : LOG_WARNING, prefix, output);</a>
+<a name="ln1949">        free(prefix);</a>
+<a name="ln1950">    }</a>
+<a name="ln1951">}</a>
+<a name="ln1952"> </a>
+<a name="ln1953">static void</a>
+<a name="ln1954">stonith_send_async_reply(async_command_t * cmd, const char *output, int rc, GPid pid)</a>
+<a name="ln1955">{</a>
+<a name="ln1956">    xmlNode *reply = NULL;</a>
+<a name="ln1957">    gboolean bcast = FALSE;</a>
+<a name="ln1958"> </a>
+<a name="ln1959">    reply = stonith_construct_async_reply(cmd, output, NULL, rc);</a>
+<a name="ln1960"> </a>
+<a name="ln1961">    if (safe_str_eq(cmd-&gt;action, &quot;metadata&quot;)) {</a>
+<a name="ln1962">        /* Too verbose to log */</a>
+<a name="ln1963">        crm_trace(&quot;Metadata query for %s&quot;, cmd-&gt;device);</a>
+<a name="ln1964">        output = NULL;</a>
+<a name="ln1965"> </a>
+<a name="ln1966">    } else if (crm_str_eq(cmd-&gt;action, &quot;monitor&quot;, TRUE) ||</a>
+<a name="ln1967">               crm_str_eq(cmd-&gt;action, &quot;list&quot;, TRUE) || crm_str_eq(cmd-&gt;action, &quot;status&quot;, TRUE)) {</a>
+<a name="ln1968">        crm_trace(&quot;Never broadcast %s replies&quot;, cmd-&gt;action);</a>
+<a name="ln1969"> </a>
+<a name="ln1970">    } else if (!stand_alone &amp;&amp; safe_str_eq(cmd-&gt;origin, cmd-&gt;victim) &amp;&amp; safe_str_neq(cmd-&gt;action, &quot;on&quot;)) {</a>
+<a name="ln1971">        crm_trace(&quot;Broadcast %s reply for %s&quot;, cmd-&gt;action, cmd-&gt;victim);</a>
+<a name="ln1972">        crm_xml_add(reply, F_SUBTYPE, &quot;broadcast&quot;);</a>
+<a name="ln1973">        bcast = TRUE;</a>
+<a name="ln1974">    }</a>
+<a name="ln1975"> </a>
+<a name="ln1976">    log_operation(cmd, rc, pid, NULL, output);</a>
+<a name="ln1977">    crm_log_xml_trace(reply, &quot;Reply&quot;);</a>
+<a name="ln1978"> </a>
+<a name="ln1979">    if (bcast) {</a>
+<a name="ln1980">        crm_xml_add(reply, F_STONITH_OPERATION, T_STONITH_NOTIFY);</a>
+<a name="ln1981">        send_cluster_message(NULL, crm_msg_stonith_ng, reply, FALSE);</a>
+<a name="ln1982"> </a>
+<a name="ln1983">    } else if (cmd-&gt;origin) {</a>
+<a name="ln1984">        crm_trace(&quot;Directed reply to %s&quot;, cmd-&gt;origin);</a>
+<a name="ln1985">        send_cluster_message(crm_get_peer(0, cmd-&gt;origin), crm_msg_stonith_ng, reply, FALSE);</a>
+<a name="ln1986"> </a>
+<a name="ln1987">    } else {</a>
+<a name="ln1988">        crm_trace(&quot;Directed local %ssync reply to %s&quot;,</a>
+<a name="ln1989">                  (cmd-&gt;options &amp; st_opt_sync_call) ? &quot;&quot; : &quot;a-&quot;, cmd-&gt;client_name);</a>
+<a name="ln1990">        do_local_reply(reply, cmd-&gt;client, cmd-&gt;options &amp; st_opt_sync_call, FALSE);</a>
+<a name="ln1991">    }</a>
+<a name="ln1992"> </a>
+<a name="ln1993">    if (stand_alone) {</a>
+<a name="ln1994">        /* Do notification with a clean data object */</a>
+<a name="ln1995">        xmlNode *notify_data = create_xml_node(NULL, T_STONITH_NOTIFY_FENCE);</a>
+<a name="ln1996"> </a>
+<a name="ln1997">        crm_xml_add_int(notify_data, F_STONITH_RC, rc);</a>
+<a name="ln1998">        crm_xml_add(notify_data, F_STONITH_TARGET, cmd-&gt;victim);</a>
+<a name="ln1999">        crm_xml_add(notify_data, F_STONITH_OPERATION, cmd-&gt;op);</a>
+<a name="ln2000">        crm_xml_add(notify_data, F_STONITH_DELEGATE, &quot;localhost&quot;);</a>
+<a name="ln2001">        crm_xml_add(notify_data, F_STONITH_DEVICE, cmd-&gt;device);</a>
+<a name="ln2002">        crm_xml_add(notify_data, F_STONITH_REMOTE_OP_ID, cmd-&gt;remote_op_id);</a>
+<a name="ln2003">        crm_xml_add(notify_data, F_STONITH_ORIGIN, cmd-&gt;client);</a>
+<a name="ln2004"> </a>
+<a name="ln2005">        do_stonith_notify(0, T_STONITH_NOTIFY_FENCE, rc, notify_data);</a>
+<a name="ln2006">    }</a>
+<a name="ln2007"> </a>
+<a name="ln2008">    free_xml(reply);</a>
+<a name="ln2009">}</a>
+<a name="ln2010"> </a>
+<a name="ln2011">void</a>
+<a name="ln2012">unfence_cb(GPid pid, int rc, const char *output, gpointer user_data)</a>
+<a name="ln2013">{</a>
+<a name="ln2014">    async_command_t * cmd = user_data;</a>
+<a name="ln2015">    stonith_device_t *dev = g_hash_table_lookup(device_list, cmd-&gt;device);</a>
+<a name="ln2016"> </a>
+<a name="ln2017">    log_operation(cmd, rc, pid, NULL, output);</a>
+<a name="ln2018"> </a>
+<a name="ln2019">    cmd-&gt;active_on = NULL;</a>
+<a name="ln2020"> </a>
+<a name="ln2021">    if(dev) {</a>
+<a name="ln2022">        mainloop_set_trigger(dev-&gt;work);</a>
+<a name="ln2023">    } else {</a>
+<a name="ln2024">        crm_trace(&quot;Device %s does not exist&quot;, cmd-&gt;device);</a>
+<a name="ln2025">    }</a>
+<a name="ln2026"> </a>
+<a name="ln2027">    if(rc != 0) {</a>
+<a name="ln2028">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln2029">    }</a>
+<a name="ln2030">}</a>
+<a name="ln2031"> </a>
+<a name="ln2032">static void</a>
+<a name="ln2033">cancel_stonith_command(async_command_t * cmd)</a>
+<a name="ln2034">{</a>
+<a name="ln2035">    stonith_device_t *device;</a>
+<a name="ln2036"> </a>
+<a name="ln2037">    CRM_CHECK(cmd != NULL, return);</a>
+<a name="ln2038"> </a>
+<a name="ln2039">    if (!cmd-&gt;device) {</a>
+<a name="ln2040">        return;</a>
+<a name="ln2041">    }</a>
+<a name="ln2042"> </a>
+<a name="ln2043">    device = g_hash_table_lookup(device_list, cmd-&gt;device);</a>
+<a name="ln2044"> </a>
+<a name="ln2045">    if (device) {</a>
+<a name="ln2046">        crm_trace(&quot;Cancel scheduled %s on %s&quot;, cmd-&gt;action, device-&gt;id);</a>
+<a name="ln2047">        device-&gt;pending_ops = g_list_remove(device-&gt;pending_ops, cmd);</a>
+<a name="ln2048">    }</a>
+<a name="ln2049">}</a>
+<a name="ln2050"> </a>
+<a name="ln2051">static void</a>
+<a name="ln2052">st_child_done(GPid pid, int rc, const char *output, gpointer user_data)</a>
+<a name="ln2053">{</a>
+<a name="ln2054">    stonith_device_t *device = NULL;</a>
+<a name="ln2055">    stonith_device_t *next_device = NULL;</a>
+<a name="ln2056">    async_command_t *cmd = user_data;</a>
+<a name="ln2057"> </a>
+<a name="ln2058">    GListPtr gIter = NULL;</a>
+<a name="ln2059">    GListPtr gIterNext = NULL;</a>
+<a name="ln2060"> </a>
+<a name="ln2061">    CRM_CHECK(cmd != NULL, return);</a>
+<a name="ln2062"> </a>
+<a name="ln2063">    cmd-&gt;active_on = NULL;</a>
+<a name="ln2064"> </a>
+<a name="ln2065">    /* The device is ready to do something else now */</a>
+<a name="ln2066">    device = g_hash_table_lookup(device_list, cmd-&gt;device);</a>
+<a name="ln2067">    if (device) {</a>
+<a name="ln2068">        if (rc == pcmk_ok &amp;&amp;</a>
+<a name="ln2069">            (safe_str_eq(cmd-&gt;action, &quot;list&quot;) ||</a>
+<a name="ln2070">             safe_str_eq(cmd-&gt;action, &quot;monitor&quot;) || safe_str_eq(cmd-&gt;action, &quot;status&quot;))) {</a>
+<a name="ln2071"> </a>
+<a name="ln2072">            device-&gt;verified = TRUE;</a>
+<a name="ln2073">        }</a>
+<a name="ln2074"> </a>
+<a name="ln2075">        mainloop_set_trigger(device-&gt;work);</a>
+<a name="ln2076">    }</a>
+<a name="ln2077"> </a>
+<a name="ln2078">    crm_debug(&quot;Operation '%s' on '%s' completed with rc=%d (%d remaining)&quot;,</a>
+<a name="ln2079">              cmd-&gt;action, cmd-&gt;device, rc, g_list_length(cmd-&gt;device_next));</a>
+<a name="ln2080"> </a>
+<a name="ln2081">    if (rc == 0) {</a>
+<a name="ln2082">        GListPtr iter;</a>
+<a name="ln2083">        /* see if there are any required devices left to execute for this op */</a>
+<a name="ln2084">        for (iter = cmd-&gt;device_next; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln2085">            next_device = g_hash_table_lookup(device_list, iter-&gt;data);</a>
+<a name="ln2086"> </a>
+<a name="ln2087">            if (next_device != NULL &amp;&amp; is_action_required(cmd-&gt;action, next_device)) {</a>
+<a name="ln2088">                cmd-&gt;device_next = iter-&gt;next;</a>
+<a name="ln2089">                break;</a>
+<a name="ln2090">            }</a>
+<a name="ln2091">            next_device = NULL;</a>
+<a name="ln2092">        }</a>
+<a name="ln2093"> </a>
+<a name="ln2094">    } else if (rc != 0 &amp;&amp; cmd-&gt;device_next &amp;&amp; (is_action_required(cmd-&gt;action, device) == FALSE)) {</a>
+<a name="ln2095">        /* if this device didn't work out, see if there are any others we can try.</a>
+<a name="ln2096">         * if the failed device was 'required', we can't pick another device. */</a>
+<a name="ln2097">        next_device = g_hash_table_lookup(device_list, cmd-&gt;device_next-&gt;data);</a>
+<a name="ln2098">        cmd-&gt;device_next = cmd-&gt;device_next-&gt;next;</a>
+<a name="ln2099">    }</a>
+<a name="ln2100"> </a>
+<a name="ln2101">    /* this operation requires more fencing, hooray! */</a>
+<a name="ln2102">    if (next_device) {</a>
+<a name="ln2103">        log_operation(cmd, rc, pid, cmd-&gt;device, output);</a>
+<a name="ln2104"> </a>
+<a name="ln2105">        schedule_stonith_command(cmd, next_device);</a>
+<a name="ln2106">        /* Prevent cmd from being freed */</a>
+<a name="ln2107">        cmd = NULL;</a>
+<a name="ln2108">        goto done;</a>
+<a name="ln2109">    }</a>
+<a name="ln2110"> </a>
+<a name="ln2111">    stonith_send_async_reply(cmd, output, rc, pid);</a>
+<a name="ln2112"> </a>
+<a name="ln2113">    if (rc != 0) {</a>
+<a name="ln2114">        goto done;</a>
+<a name="ln2115">    }</a>
+<a name="ln2116"> </a>
+<a name="ln2117">    /* Check to see if any operations are scheduled to do the exact</a>
+<a name="ln2118">     * same thing that just completed.  If so, rather than</a>
+<a name="ln2119">     * performing the same fencing operation twice, return the result</a>
+<a name="ln2120">     * of this operation for all pending commands it matches. */</a>
+<a name="ln2121">    for (gIter = cmd_list; gIter != NULL; gIter = gIterNext) {</a>
+<a name="ln2122">        async_command_t *cmd_other = gIter-&gt;data;</a>
+<a name="ln2123"> </a>
+<a name="ln2124">        gIterNext = gIter-&gt;next;</a>
+<a name="ln2125"> </a>
+<a name="ln2126">        if (cmd == cmd_other) {</a>
+<a name="ln2127">            continue;</a>
+<a name="ln2128">        }</a>
+<a name="ln2129"> </a>
+<a name="ln2130">        /* A pending scheduled command matches the command that just finished if.</a>
+<a name="ln2131">         * 1. The client connections are different.</a>
+<a name="ln2132">         * 2. The node victim is the same.</a>
+<a name="ln2133">         * 3. The fencing action is the same.</a>
+<a name="ln2134">         * 4. The device scheduled to execute the action is the same.</a>
+<a name="ln2135">         */</a>
+<a name="ln2136">        if (safe_str_eq(cmd-&gt;client, cmd_other-&gt;client) ||</a>
+<a name="ln2137">            safe_str_neq(cmd-&gt;victim, cmd_other-&gt;victim) ||</a>
+<a name="ln2138">            safe_str_neq(cmd-&gt;action, cmd_other-&gt;action) ||</a>
+<a name="ln2139">            safe_str_neq(cmd-&gt;device, cmd_other-&gt;device)) {</a>
+<a name="ln2140"> </a>
+<a name="ln2141">            continue;</a>
+<a name="ln2142">        }</a>
+<a name="ln2143"> </a>
+<a name="ln2144">        /* Duplicate merging will do the right thing for either type of remapped</a>
+<a name="ln2145">         * reboot. If the executing stonithd remapped an unsupported reboot to</a>
+<a name="ln2146">         * off, then cmd-&gt;action will be reboot and will be merged with any</a>
+<a name="ln2147">         * other reboot requests. If the originating stonithd remapped a</a>
+<a name="ln2148">         * topology reboot to off then on, we will get here once with</a>
+<a name="ln2149">         * cmd-&gt;action &quot;off&quot; and once with &quot;on&quot;, and they will be merged</a>
+<a name="ln2150">         * separately with similar requests.</a>
+<a name="ln2151">         */</a>
+<a name="ln2152">        crm_notice</a>
+<a name="ln2153">            (&quot;Merging stonith action %s for node %s originating from client %s with identical stonith request from client %s&quot;,</a>
+<a name="ln2154">             cmd_other-&gt;action, cmd_other-&gt;victim, cmd_other-&gt;client_name, cmd-&gt;client_name);</a>
+<a name="ln2155"> </a>
+<a name="ln2156">        cmd_list = g_list_remove_link(cmd_list, gIter);</a>
+<a name="ln2157"> </a>
+<a name="ln2158">        stonith_send_async_reply(cmd_other, output, rc, pid);</a>
+<a name="ln2159">        cancel_stonith_command(cmd_other);</a>
+<a name="ln2160"> </a>
+<a name="ln2161">        free_async_command(cmd_other);</a>
+<a name="ln2162">        g_list_free_1(gIter);</a>
+<a name="ln2163">    }</a>
+<a name="ln2164"> </a>
+<a name="ln2165">  done:</a>
+<a name="ln2166">    free_async_command(cmd);</a>
+<a name="ln2167">}</a>
+<a name="ln2168"> </a>
+<a name="ln2169">static gint</a>
+<a name="ln2170">sort_device_priority(gconstpointer a, gconstpointer b)</a>
+<a name="ln2171">{</a>
+<a name="ln2172">    const stonith_device_t *dev_a = a;</a>
+<a name="ln2173">    const stonith_device_t *dev_b = b;</a>
+<a name="ln2174"> </a>
+<a name="ln2175">    if (dev_a-&gt;priority &gt; dev_b-&gt;priority) {</a>
+<a name="ln2176">        return -1;</a>
+<a name="ln2177">    } else if (dev_a-&gt;priority &lt; dev_b-&gt;priority) {</a>
+<a name="ln2178">        return 1;</a>
+<a name="ln2179">    }</a>
+<a name="ln2180">    return 0;</a>
+<a name="ln2181">}</a>
+<a name="ln2182"> </a>
+<a name="ln2183">static void</a>
+<a name="ln2184">stonith_fence_get_devices_cb(GList * devices, void *user_data)</a>
+<a name="ln2185">{</a>
+<a name="ln2186">    async_command_t *cmd = user_data;</a>
+<a name="ln2187">    stonith_device_t *device = NULL;</a>
+<a name="ln2188"> </a>
+<a name="ln2189">    crm_info(&quot;Found %d matching devices for '%s'&quot;, g_list_length(devices), cmd-&gt;victim);</a>
+<a name="ln2190"> </a>
+<a name="ln2191">    if (g_list_length(devices) &gt; 0) {</a>
+<a name="ln2192">        /* Order based on priority */</a>
+<a name="ln2193">        devices = g_list_sort(devices, sort_device_priority);</a>
+<a name="ln2194">        device = g_hash_table_lookup(device_list, devices-&gt;data);</a>
+<a name="ln2195"> </a>
+<a name="ln2196">        if (device) {</a>
+<a name="ln2197">            cmd-&gt;device_list = devices;</a>
+<a name="ln2198">            cmd-&gt;device_next = devices-&gt;next;</a>
+<a name="ln2199">            devices = NULL;     /* list owned by cmd now */</a>
+<a name="ln2200">        }</a>
+<a name="ln2201">    }</a>
+<a name="ln2202"> </a>
+<a name="ln2203">    /* we have a device, schedule it for fencing. */</a>
+<a name="ln2204">    if (device) {</a>
+<a name="ln2205">        schedule_stonith_command(cmd, device);</a>
+<a name="ln2206">        /* in progress */</a>
+<a name="ln2207">        return;</a>
+<a name="ln2208">    }</a>
+<a name="ln2209"> </a>
+<a name="ln2210">    /* no device found! */</a>
+<a name="ln2211">    stonith_send_async_reply(cmd, NULL, -ENODEV, 0);</a>
+<a name="ln2212"> </a>
+<a name="ln2213">    free_async_command(cmd);</a>
+<a name="ln2214">    g_list_free_full(devices, free);</a>
+<a name="ln2215">}</a>
+<a name="ln2216"> </a>
+<a name="ln2217">static int</a>
+<a name="ln2218">stonith_fence(xmlNode * msg)</a>
+<a name="ln2219">{</a>
+<a name="ln2220">    const char *device_id = NULL;</a>
+<a name="ln2221">    stonith_device_t *device = NULL;</a>
+<a name="ln2222">    async_command_t *cmd = create_async_command(msg);</a>
+<a name="ln2223">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, msg, LOG_ERR);</a>
+<a name="ln2224"> </a>
+<a name="ln2225">    if (cmd == NULL) {</a>
+<a name="ln2226">        return -EPROTO;</a>
+<a name="ln2227">    }</a>
+<a name="ln2228"> </a>
+<a name="ln2229">    device_id = crm_element_value(dev, F_STONITH_DEVICE);</a>
+<a name="ln2230">    if (device_id) {</a>
+<a name="ln2231">        device = g_hash_table_lookup(device_list, device_id);</a>
+<a name="ln2232">        if (device == NULL) {</a>
+<a name="ln2233">            crm_err(&quot;Requested device '%s' is not available&quot;, device_id);</a>
+<a name="ln2234">            return -ENODEV;</a>
+<a name="ln2235">        }</a>
+<a name="ln2236">        schedule_stonith_command(cmd, device);</a>
+<a name="ln2237"> </a>
+<a name="ln2238">    } else {</a>
+<a name="ln2239">        const char *host = crm_element_value(dev, F_STONITH_TARGET);</a>
+<a name="ln2240">        char *nodename = NULL;</a>
+<a name="ln2241"> </a>
+<a name="ln2242">        if (cmd-&gt;options &amp; st_opt_cs_nodeid) {</a>
+<a name="ln2243">            int nodeid = crm_atoi(host, NULL);</a>
+<a name="ln2244"> </a>
+<a name="ln2245">            nodename = stonith_get_peer_name(nodeid);</a>
+<a name="ln2246">            if (nodename) {</a>
+<a name="ln2247">                host = nodename;</a>
+<a name="ln2248">            }</a>
+<a name="ln2249">        }</a>
+<a name="ln2250"> </a>
+<a name="ln2251">        /* If we get to here, then self-fencing is implicitly allowed */</a>
+<a name="ln2252">        get_capable_devices(host, cmd-&gt;action, cmd-&gt;default_timeout,</a>
+<a name="ln2253">                            TRUE, cmd, stonith_fence_get_devices_cb);</a>
+<a name="ln2254"> </a>
+<a name="ln2255">        free(nodename);</a>
+<a name="ln2256">    }</a>
+<a name="ln2257"> </a>
+<a name="ln2258">    return -EINPROGRESS;</a>
+<a name="ln2259">}</a>
+<a name="ln2260"> </a>
+<a name="ln2261">xmlNode *</a>
+<a name="ln2262">stonith_construct_reply(xmlNode * request, const char *output, xmlNode * data, int rc)</a>
+<a name="ln2263">{</a>
+<a name="ln2264">    int lpc = 0;</a>
+<a name="ln2265">    xmlNode *reply = NULL;</a>
+<a name="ln2266"> </a>
+<a name="ln2267">    const char *name = NULL;</a>
+<a name="ln2268">    const char *value = NULL;</a>
+<a name="ln2269"> </a>
+<a name="ln2270">    const char *names[] = {</a>
+<a name="ln2271">        F_STONITH_OPERATION,</a>
+<a name="ln2272">        F_STONITH_CALLID,</a>
+<a name="ln2273">        F_STONITH_CLIENTID,</a>
+<a name="ln2274">        F_STONITH_CLIENTNAME,</a>
+<a name="ln2275">        F_STONITH_REMOTE_OP_ID,</a>
+<a name="ln2276">        F_STONITH_CALLOPTS</a>
+<a name="ln2277">    };</a>
+<a name="ln2278"> </a>
+<a name="ln2279">    crm_trace(&quot;Creating a basic reply&quot;);</a>
+<a name="ln2280">    reply = create_xml_node(NULL, T_STONITH_REPLY);</a>
+<a name="ln2281"> </a>
+<a name="ln2282">    crm_xml_add(reply, &quot;st_origin&quot;, __FUNCTION__);</a>
+<a name="ln2283">    crm_xml_add(reply, F_TYPE, T_STONITH_NG);</a>
+<a name="ln2284">    crm_xml_add(reply, &quot;st_output&quot;, output);</a>
+<a name="ln2285">    crm_xml_add_int(reply, F_STONITH_RC, rc);</a>
+<a name="ln2286"> </a>
+<a name="ln2287">    CRM_CHECK(request != NULL, crm_warn(&quot;Can't create a sane reply&quot;); return reply);</a>
+<a name="ln2288">    for (lpc = 0; lpc &lt; DIMOF(names); lpc++) {</a>
+<a name="ln2289">        name = names[lpc];</a>
+<a name="ln2290">        value = crm_element_value(request, name);</a>
+<a name="ln2291">        crm_xml_add(reply, name, value);</a>
+<a name="ln2292">    }</a>
+<a name="ln2293"> </a>
+<a name="ln2294">    if (data != NULL) {</a>
+<a name="ln2295">        crm_trace(&quot;Attaching reply output&quot;);</a>
+<a name="ln2296">        add_message_xml(reply, F_STONITH_CALLDATA, data);</a>
+<a name="ln2297">    }</a>
+<a name="ln2298">    return reply;</a>
+<a name="ln2299">}</a>
+<a name="ln2300"> </a>
+<a name="ln2301">static xmlNode *</a>
+<a name="ln2302">stonith_construct_async_reply(async_command_t * cmd, const char *output, xmlNode * data, int rc)</a>
+<a name="ln2303">{</a>
+<a name="ln2304">    xmlNode *reply = NULL;</a>
+<a name="ln2305"> </a>
+<a name="ln2306">    crm_trace(&quot;Creating a basic reply&quot;);</a>
+<a name="ln2307">    reply = create_xml_node(NULL, T_STONITH_REPLY);</a>
+<a name="ln2308"> </a>
+<a name="ln2309">    crm_xml_add(reply, &quot;st_origin&quot;, __FUNCTION__);</a>
+<a name="ln2310">    crm_xml_add(reply, F_TYPE, T_STONITH_NG);</a>
+<a name="ln2311"> </a>
+<a name="ln2312">    crm_xml_add(reply, F_STONITH_OPERATION, cmd-&gt;op);</a>
+<a name="ln2313">    crm_xml_add(reply, F_STONITH_DEVICE, cmd-&gt;device);</a>
+<a name="ln2314">    crm_xml_add(reply, F_STONITH_REMOTE_OP_ID, cmd-&gt;remote_op_id);</a>
+<a name="ln2315">    crm_xml_add(reply, F_STONITH_CLIENTID, cmd-&gt;client);</a>
+<a name="ln2316">    crm_xml_add(reply, F_STONITH_CLIENTNAME, cmd-&gt;client_name);</a>
+<a name="ln2317">    crm_xml_add(reply, F_STONITH_TARGET, cmd-&gt;victim);</a>
+<a name="ln2318">    crm_xml_add(reply, F_STONITH_ACTION, cmd-&gt;op);</a>
+<a name="ln2319">    crm_xml_add(reply, F_STONITH_ORIGIN, cmd-&gt;origin);</a>
+<a name="ln2320">    crm_xml_add_int(reply, F_STONITH_CALLID, cmd-&gt;id);</a>
+<a name="ln2321">    crm_xml_add_int(reply, F_STONITH_CALLOPTS, cmd-&gt;options);</a>
+<a name="ln2322"> </a>
+<a name="ln2323">    crm_xml_add_int(reply, F_STONITH_RC, rc);</a>
+<a name="ln2324"> </a>
+<a name="ln2325">    crm_xml_add(reply, &quot;st_output&quot;, output);</a>
+<a name="ln2326"> </a>
+<a name="ln2327">    if (data != NULL) {</a>
+<a name="ln2328">        crm_info(&quot;Attaching reply output&quot;);</a>
+<a name="ln2329">        add_message_xml(reply, F_STONITH_CALLDATA, data);</a>
+<a name="ln2330">    }</a>
+<a name="ln2331">    return reply;</a>
+<a name="ln2332">}</a>
+<a name="ln2333"> </a>
+<a name="ln2334">bool fencing_peer_active(crm_node_t *peer)</a>
+<a name="ln2335">{</a>
+<a name="ln2336">    if (peer == NULL) {</a>
+<a name="ln2337">        return FALSE;</a>
+<a name="ln2338">    } else if (peer-&gt;uname == NULL) {</a>
+<a name="ln2339">        return FALSE;</a>
+<a name="ln2340">    } else if (is_set(peer-&gt;processes, crm_get_cluster_proc())) {</a>
+<a name="ln2341">        return TRUE;</a>
+<a name="ln2342">    }</a>
+<a name="ln2343">    return FALSE;</a>
+<a name="ln2344">}</a>
+<a name="ln2345"> </a>
+<a name="ln2346">/*!</a>
+<a name="ln2347"> * \internal</a>
+<a name="ln2348"> * \brief Determine if we need to use an alternate node to</a>
+<a name="ln2349"> * fence the target. If so return that node's uname</a>
+<a name="ln2350"> *</a>
+<a name="ln2351"> * \retval NULL, no alternate host</a>
+<a name="ln2352"> * \retval uname, uname of alternate host to use</a>
+<a name="ln2353"> */</a>
+<a name="ln2354">static const char *</a>
+<a name="ln2355">check_alternate_host(const char *target)</a>
+<a name="ln2356">{</a>
+<a name="ln2357">    const char *alternate_host = NULL;</a>
+<a name="ln2358"> </a>
+<a name="ln2359">    crm_trace(&quot;Checking if we (%s) can fence %s&quot;, stonith_our_uname, target);</a>
+<a name="ln2360">    if (find_topology_for_host(target) &amp;&amp; safe_str_eq(target, stonith_our_uname)) {</a>
+<a name="ln2361">        GHashTableIter gIter;</a>
+<a name="ln2362">        crm_node_t *entry = NULL;</a>
+<a name="ln2363"> </a>
+<a name="ln2364">        g_hash_table_iter_init(&amp;gIter, crm_peer_cache);</a>
+<a name="ln2365">        while (g_hash_table_iter_next(&amp;gIter, NULL, (void **)&amp;entry)) {</a>
+<a name="ln2366">            crm_trace(&quot;Checking for %s.%d != %s&quot;, entry-&gt;uname, entry-&gt;id, target);</a>
+<a name="ln2367">            if (fencing_peer_active(entry)</a>
+<a name="ln2368">                &amp;&amp; safe_str_neq(entry-&gt;uname, target)) {</a>
+<a name="ln2369">                alternate_host = entry-&gt;uname;</a>
+<a name="ln2370">                break;</a>
+<a name="ln2371">            }</a>
+<a name="ln2372">        }</a>
+<a name="ln2373">        if (alternate_host == NULL) {</a>
+<a name="ln2374">            crm_err(&quot;No alternate host available to handle complex self fencing request&quot;);</a>
+<a name="ln2375">            g_hash_table_iter_init(&amp;gIter, crm_peer_cache);</a>
+<a name="ln2376">            while (g_hash_table_iter_next(&amp;gIter, NULL, (void **)&amp;entry)) {</a>
+<a name="ln2377">                crm_notice(&quot;Peer[%d] %s&quot;, entry-&gt;id, entry-&gt;uname);</a>
+<a name="ln2378">            }</a>
+<a name="ln2379">        }</a>
+<a name="ln2380">    }</a>
+<a name="ln2381"> </a>
+<a name="ln2382">    return alternate_host;</a>
+<a name="ln2383">}</a>
+<a name="ln2384"> </a>
+<a name="ln2385">static void</a>
+<a name="ln2386">stonith_send_reply(xmlNode * reply, int call_options, const char *remote_peer,</a>
+<a name="ln2387">                   const char *client_id)</a>
+<a name="ln2388">{</a>
+<a name="ln2389">    if (remote_peer) {</a>
+<a name="ln2390">        send_cluster_message(crm_get_peer(0, remote_peer), crm_msg_stonith_ng, reply, FALSE);</a>
+<a name="ln2391">    } else {</a>
+<a name="ln2392">        do_local_reply(reply, client_id, is_set(call_options, st_opt_sync_call), remote_peer != NULL);</a>
+<a name="ln2393">    }</a>
+<a name="ln2394">}</a>
+<a name="ln2395"> </a>
+<a name="ln2396">static int</a>
+<a name="ln2397">handle_request(crm_client_t * client, uint32_t id, uint32_t flags, xmlNode * request,</a>
+<a name="ln2398">               const char *remote_peer)</a>
+<a name="ln2399">{</a>
+<a name="ln2400">    int call_options = 0;</a>
+<a name="ln2401">    int rc = -EOPNOTSUPP;</a>
+<a name="ln2402"> </a>
+<a name="ln2403">    xmlNode *data = NULL;</a>
+<a name="ln2404">    xmlNode *reply = NULL;</a>
+<a name="ln2405"> </a>
+<a name="ln2406">    char *output = NULL;</a>
+<a name="ln2407">    const char *op = crm_element_value(request, F_STONITH_OPERATION);</a>
+<a name="ln2408">    const char *client_id = crm_element_value(request, F_STONITH_CLIENTID);</a>
+<a name="ln2409"> </a>
+<a name="ln2410">    crm_element_value_int(request, F_STONITH_CALLOPTS, &amp;call_options);</a>
+<a name="ln2411"> </a>
+<a name="ln2412">    if (is_set(call_options, st_opt_sync_call)) {</a>
+<a name="ln2413">        CRM_ASSERT(client == NULL || client-&gt;request_id == id);</a>
+<a name="ln2414">    }</a>
+<a name="ln2415"> </a>
+<a name="ln2416">    if (crm_str_eq(op, CRM_OP_REGISTER, TRUE)) {</a>
+<a name="ln2417">        xmlNode *reply = create_xml_node(NULL, &quot;reply&quot;);</a>
+<a name="ln2418"> </a>
+<a name="ln2419">        CRM_ASSERT(client);</a>
+<a name="ln2420">        crm_xml_add(reply, F_STONITH_OPERATION, CRM_OP_REGISTER);</a>
+<a name="ln2421">        crm_xml_add(reply, F_STONITH_CLIENTID, client-&gt;id);</a>
+<a name="ln2422">        crm_ipcs_send(client, id, reply, flags);</a>
+<a name="ln2423">        client-&gt;request_id = 0;</a>
+<a name="ln2424">        free_xml(reply);</a>
+<a name="ln2425">        return 0;</a>
+<a name="ln2426"> </a>
+<a name="ln2427">    } else if (crm_str_eq(op, STONITH_OP_EXEC, TRUE)) {</a>
+<a name="ln2428">        rc = stonith_device_action(request, &amp;output);</a>
+<a name="ln2429"> </a>
+<a name="ln2430">    } else if (crm_str_eq(op, STONITH_OP_TIMEOUT_UPDATE, TRUE)) {</a>
+<a name="ln2431">        const char *call_id = crm_element_value(request, F_STONITH_CALLID);</a>
+<a name="ln2432">        const char *client_id = crm_element_value(request, F_STONITH_CLIENTID);</a>
+<a name="ln2433">        int op_timeout = 0;</a>
+<a name="ln2434"> </a>
+<a name="ln2435">        crm_element_value_int(request, F_STONITH_TIMEOUT, &amp;op_timeout);</a>
+<a name="ln2436">        do_stonith_async_timeout_update(client_id, call_id, op_timeout);</a>
+<a name="ln2437">        return 0;</a>
+<a name="ln2438"> </a>
+<a name="ln2439">    } else if (crm_str_eq(op, STONITH_OP_QUERY, TRUE)) {</a>
+<a name="ln2440">        if (remote_peer) {</a>
+<a name="ln2441">            create_remote_stonith_op(client_id, request, TRUE); /* Record it for the future notification */</a>
+<a name="ln2442">        }</a>
+<a name="ln2443">        stonith_query(request, remote_peer, client_id, call_options);</a>
+<a name="ln2444">        return 0;</a>
+<a name="ln2445"> </a>
+<a name="ln2446">    } else if (crm_str_eq(op, T_STONITH_NOTIFY, TRUE)) {</a>
+<a name="ln2447">        const char *flag_name = NULL;</a>
+<a name="ln2448"> </a>
+<a name="ln2449">        CRM_ASSERT(client);</a>
+<a name="ln2450">        flag_name = crm_element_value(request, F_STONITH_NOTIFY_ACTIVATE);</a>
+<a name="ln2451">        if (flag_name) {</a>
+<a name="ln2452">            crm_debug(&quot;Setting %s callbacks for %s (%s): ON&quot;, flag_name, client-&gt;name, client-&gt;id);</a>
+<a name="ln2453">            client-&gt;options |= get_stonith_flag(flag_name);</a>
+<a name="ln2454">        }</a>
+<a name="ln2455"> </a>
+<a name="ln2456">        flag_name = crm_element_value(request, F_STONITH_NOTIFY_DEACTIVATE);</a>
+<a name="ln2457">        if (flag_name) {</a>
+<a name="ln2458">            crm_debug(&quot;Setting %s callbacks for %s (%s): off&quot;, flag_name, client-&gt;name, client-&gt;id);</a>
+<a name="ln2459">            client-&gt;options |= get_stonith_flag(flag_name);</a>
+<a name="ln2460">        }</a>
+<a name="ln2461"> </a>
+<a name="ln2462">        if (flags &amp; crm_ipc_client_response) {</a>
+<a name="ln2463">            crm_ipcs_send_ack(client, id, flags, &quot;ack&quot;, __FUNCTION__, __LINE__);</a>
+<a name="ln2464">        }</a>
+<a name="ln2465">        return 0;</a>
+<a name="ln2466"> </a>
+<a name="ln2467">    } else if (crm_str_eq(op, STONITH_OP_RELAY, TRUE)) {</a>
+<a name="ln2468">        xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, request, LOG_TRACE);</a>
+<a name="ln2469"> </a>
+<a name="ln2470">        crm_notice(&quot;Peer %s has received a forwarded fencing request from %s to fence (%s) peer %s&quot;,</a>
+<a name="ln2471">                   stonith_our_uname,</a>
+<a name="ln2472">                   client ? client-&gt;name : remote_peer,</a>
+<a name="ln2473">                   crm_element_value(dev, F_STONITH_ACTION),</a>
+<a name="ln2474">                   crm_element_value(dev, F_STONITH_TARGET));</a>
+<a name="ln2475"> </a>
+<a name="ln2476">        if (initiate_remote_stonith_op(NULL, request, FALSE) != NULL) {</a>
+<a name="ln2477">            rc = -EINPROGRESS;</a>
+<a name="ln2478">        }</a>
+<a name="ln2479"> </a>
+<a name="ln2480">    } else if (crm_str_eq(op, STONITH_OP_FENCE, TRUE)) {</a>
+<a name="ln2481"> </a>
+<a name="ln2482">        if (remote_peer || stand_alone) {</a>
+<a name="ln2483">            rc = stonith_fence(request);</a>
+<a name="ln2484"> </a>
+<a name="ln2485">        } else if (call_options &amp; st_opt_manual_ack) {</a>
+<a name="ln2486">            remote_fencing_op_t *rop = NULL;</a>
+<a name="ln2487">            xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, request, LOG_TRACE);</a>
+<a name="ln2488">            const char *target = crm_element_value(dev, F_STONITH_TARGET);</a>
+<a name="ln2489"> </a>
+<a name="ln2490">            crm_notice(&quot;Received manual confirmation that %s is fenced&quot;, target);</a>
+<a name="ln2491">            rop = initiate_remote_stonith_op(client, request, TRUE);</a>
+<a name="ln2492">            rc = stonith_manual_ack(request, rop);</a>
+<a name="ln2493"> </a>
+<a name="ln2494">        } else {</a>
+<a name="ln2495">            const char *alternate_host = NULL;</a>
+<a name="ln2496">            xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, request, LOG_TRACE);</a>
+<a name="ln2497">            const char *target = crm_element_value(dev, F_STONITH_TARGET);</a>
+<a name="ln2498">            const char *action = crm_element_value(dev, F_STONITH_ACTION);</a>
+<a name="ln2499">            const char *device = crm_element_value(dev, F_STONITH_DEVICE);</a>
+<a name="ln2500"> </a>
+<a name="ln2501">            if (client) {</a>
+<a name="ln2502">                int tolerance = 0;</a>
+<a name="ln2503"> </a>
+<a name="ln2504">                crm_notice(&quot;Client %s.%.8s wants to fence (%s) '%s' with device '%s'&quot;,</a>
+<a name="ln2505">                           client-&gt;name, client-&gt;id, action, target, device ? device : &quot;(any)&quot;);</a>
+<a name="ln2506"> </a>
+<a name="ln2507">                crm_element_value_int(dev, F_STONITH_TOLERANCE, &amp;tolerance);</a>
+<a name="ln2508"> </a>
+<a name="ln2509">                if (stonith_check_fence_tolerance(tolerance, target, action)) {</a>
+<a name="ln2510">                    rc = 0;</a>
+<a name="ln2511">                    goto done;</a>
+<a name="ln2512">                }</a>
+<a name="ln2513"> </a>
+<a name="ln2514">            } else {</a>
+<a name="ln2515">                crm_notice(&quot;Peer %s wants to fence (%s) '%s' with device '%s'&quot;,</a>
+<a name="ln2516">                           remote_peer, action, target, device ? device : &quot;(any)&quot;);</a>
+<a name="ln2517">            }</a>
+<a name="ln2518"> </a>
+<a name="ln2519">            alternate_host = check_alternate_host(target);</a>
+<a name="ln2520"> </a>
+<a name="ln2521">            if (alternate_host &amp;&amp; client) {</a>
+<a name="ln2522">                const char *client_id = NULL;</a>
+<a name="ln2523"> </a>
+<a name="ln2524">                crm_notice(&quot;Forwarding complex self fencing request to peer %s&quot;, alternate_host);</a>
+<a name="ln2525"> </a>
+<a name="ln2526">                if (client-&gt;id) {</a>
+<a name="ln2527">                    client_id = client-&gt;id;</a>
+<a name="ln2528">                } else {</a>
+<a name="ln2529">                    client_id = crm_element_value(request, F_STONITH_CLIENTID);</a>
+<a name="ln2530">                }</a>
+<a name="ln2531"> </a>
+<a name="ln2532">                /* Create a record of it, otherwise call_id will be 0 if we need to notify of failures */</a>
+<a name="ln2533">                create_remote_stonith_op(client_id, request, FALSE);</a>
+<a name="ln2534"> </a>
+<a name="ln2535">                crm_xml_add(request, F_STONITH_OPERATION, STONITH_OP_RELAY);</a>
+<a name="ln2536">                crm_xml_add(request, F_STONITH_CLIENTID, client-&gt;id);</a>
+<a name="ln2537">                send_cluster_message(crm_get_peer(0, alternate_host), crm_msg_stonith_ng, request,</a>
+<a name="ln2538">                                     FALSE);</a>
+<a name="ln2539">                rc = -EINPROGRESS;</a>
+<a name="ln2540"> </a>
+<a name="ln2541">            } else if (initiate_remote_stonith_op(client, request, FALSE) != NULL) {</a>
+<a name="ln2542">                rc = -EINPROGRESS;</a>
+<a name="ln2543">            }</a>
+<a name="ln2544">        }</a>
+<a name="ln2545"> </a>
+<a name="ln2546">    } else if (crm_str_eq(op, STONITH_OP_FENCE_HISTORY, TRUE)) {</a>
+<a name="ln2547">        rc = stonith_fence_history(request, &amp;data);</a>
+<a name="ln2548"> </a>
+<a name="ln2549">    } else if (crm_str_eq(op, STONITH_OP_DEVICE_ADD, TRUE)) {</a>
+<a name="ln2550">        const char *device_id = NULL;</a>
+<a name="ln2551"> </a>
+<a name="ln2552">        rc = stonith_device_register(request, &amp;device_id, FALSE);</a>
+<a name="ln2553">        do_stonith_notify_device(call_options, op, rc, device_id);</a>
+<a name="ln2554"> </a>
+<a name="ln2555">    } else if (crm_str_eq(op, STONITH_OP_DEVICE_DEL, TRUE)) {</a>
+<a name="ln2556">        xmlNode *dev = get_xpath_object(&quot;//&quot; F_STONITH_DEVICE, request, LOG_ERR);</a>
+<a name="ln2557">        const char *device_id = crm_element_value(dev, XML_ATTR_ID);</a>
+<a name="ln2558"> </a>
+<a name="ln2559">        rc = stonith_device_remove(device_id, FALSE);</a>
+<a name="ln2560">        do_stonith_notify_device(call_options, op, rc, device_id);</a>
+<a name="ln2561"> </a>
+<a name="ln2562">    } else if (crm_str_eq(op, STONITH_OP_LEVEL_ADD, TRUE)) {</a>
+<a name="ln2563">        char *device_id = NULL;</a>
+<a name="ln2564"> </a>
+<a name="ln2565">        rc = stonith_level_register(request, &amp;device_id);</a>
+<a name="ln2566">        do_stonith_notify_level(call_options, op, rc, device_id);</a>
+<a name="ln2567">        free(device_id);</a>
+<a name="ln2568"> </a>
+<a name="ln2569">    } else if (crm_str_eq(op, STONITH_OP_LEVEL_DEL, TRUE)) {</a>
+<a name="ln2570">        char *device_id = NULL;</a>
+<a name="ln2571"> </a>
+<a name="ln2572">        rc = stonith_level_remove(request, &amp;device_id);</a>
+<a name="ln2573">        do_stonith_notify_level(call_options, op, rc, device_id);</a>
+<a name="ln2574"> </a>
+<a name="ln2575">    } else if (crm_str_eq(op, STONITH_OP_CONFIRM, TRUE)) {</a>
+<a name="ln2576">        async_command_t *cmd = create_async_command(request);</a>
+<a name="ln2577">        xmlNode *reply = stonith_construct_async_reply(cmd, NULL, NULL, 0);</a>
+<a name="ln2578"> </a>
+<a name="ln2579">        crm_xml_add(reply, F_STONITH_OPERATION, T_STONITH_NOTIFY);</a>
+<a name="ln2580">        crm_notice(&quot;Broadcasting manual fencing confirmation for node %s&quot;, cmd-&gt;victim);</a>
+<a name="ln2581">        send_cluster_message(NULL, crm_msg_stonith_ng, reply, FALSE);</a>
+<a name="ln2582"> </a>
+<a name="ln2583">        free_async_command(cmd);</a>
+<a name="ln2584">        free_xml(reply);</a>
+<a name="ln2585"> </a>
+<a name="ln2586">    } else if(safe_str_eq(op, CRM_OP_RM_NODE_CACHE)) {</a>
+<a name="ln2587">        int node_id = 0;</a>
+<a name="ln2588">        const char *name = NULL;</a>
+<a name="ln2589"> </a>
+<a name="ln2590">        crm_element_value_int(request, XML_ATTR_ID, &amp;node_id);</a>
+<a name="ln2591">        name = crm_element_value(request, XML_ATTR_UNAME);</a>
+<a name="ln2592">        reap_crm_member(node_id, name);</a>
+<a name="ln2593"> </a>
+<a name="ln2594">        return pcmk_ok;</a>
+<a name="ln2595"> </a>
+<a name="ln2596">    } else {</a>
+<a name="ln2597">        crm_err(&quot;Unknown %s from %s&quot;, op, client ? client-&gt;name : remote_peer);</a>
+<a name="ln2598">        crm_log_xml_warn(request, &quot;UnknownOp&quot;);</a>
+<a name="ln2599">    }</a>
+<a name="ln2600"> </a>
+<a name="ln2601">  done:</a>
+<a name="ln2602"> </a>
+<a name="ln2603">    /* Always reply unless the request is in process still.</a>
+<a name="ln2604">     * If in progress, a reply will happen async after the request</a>
+<a name="ln2605">     * processing is finished */</a>
+<a name="ln2606">    if (rc != -EINPROGRESS) {</a>
+<a name="ln2607">        crm_trace(&quot;Reply handling: %p %u %u %d %d %s&quot;, client, client?client-&gt;request_id:0,</a>
+<a name="ln2608">                  id, is_set(call_options, st_opt_sync_call), call_options,</a>
+<a name="ln2609">                  crm_element_value(request, F_STONITH_CALLOPTS));</a>
+<a name="ln2610"> </a>
+<a name="ln2611">        if (is_set(call_options, st_opt_sync_call)) {</a>
+<a name="ln2612">            CRM_ASSERT(client == NULL || client-&gt;request_id == id);</a>
+<a name="ln2613">        }</a>
+<a name="ln2614">        reply = stonith_construct_reply(request, output, data, rc);</a>
+<a name="ln2615">        stonith_send_reply(reply, call_options, remote_peer, client_id);</a>
+<a name="ln2616">    }</a>
+<a name="ln2617"> </a>
+<a name="ln2618">    free(output);</a>
+<a name="ln2619">    free_xml(data);</a>
+<a name="ln2620">    free_xml(reply);</a>
+<a name="ln2621"> </a>
+<a name="ln2622">    return rc;</a>
+<a name="ln2623">}</a>
+<a name="ln2624"> </a>
+<a name="ln2625">static void</a>
+<a name="ln2626">handle_reply(crm_client_t * client, xmlNode * request, const char *remote_peer)</a>
+<a name="ln2627">{</a>
+<a name="ln2628">    const char *op = crm_element_value(request, F_STONITH_OPERATION);</a>
+<a name="ln2629"> </a>
+<a name="ln2630">    if (crm_str_eq(op, STONITH_OP_QUERY, TRUE)) {</a>
+<a name="ln2631">        process_remote_stonith_query(request);</a>
+<a name="ln2632">    } else if (crm_str_eq(op, T_STONITH_NOTIFY, TRUE)) {</a>
+<a name="ln2633">        process_remote_stonith_exec(request);</a>
+<a name="ln2634">    } else if (crm_str_eq(op, STONITH_OP_FENCE, TRUE)) {</a>
+<a name="ln2635">        /* Reply to a complex fencing op */</a>
+<a name="ln2636">        process_remote_stonith_exec(request);</a>
+<a name="ln2637">    } else {</a>
+<a name="ln2638">        crm_err(&quot;Unknown %s reply from %s&quot;, op, client ? client-&gt;name : remote_peer);</a>
+<a name="ln2639">        crm_log_xml_warn(request, &quot;UnknownOp&quot;);</a>
+<a name="ln2640">    }</a>
+<a name="ln2641">}</a>
+<a name="ln2642"> </a>
+<a name="ln2643">void</a>
+<a name="ln2644">stonith_command(crm_client_t * client, uint32_t id, uint32_t flags, xmlNode * request,</a>
+<a name="ln2645">                const char *remote_peer)</a>
+<a name="ln2646">{</a>
+<a name="ln2647">    int call_options = 0;</a>
+<a name="ln2648">    int rc = 0;</a>
+<a name="ln2649">    gboolean is_reply = FALSE;</a>
+<a name="ln2650"> </a>
+<a name="ln2651">    /* Copy op for reporting. The original might get freed by handle_reply()</a>
+<a name="ln2652">     * before we use it in crm_debug():</a>
+<a name="ln2653">     *     handle_reply()</a>
+<a name="ln2654">     *     |- process_remote_stonith_exec()</a>
+<a name="ln2655">     *     |-- remote_op_done()</a>
+<a name="ln2656">     *     |--- handle_local_reply_and_notify()</a>
+<a name="ln2657">     *     |---- crm_xml_add(...F_STONITH_OPERATION...)</a>
+<a name="ln2658">     *     |--- free_xml(op-&gt;request)</a>
+<a name="ln2659">     */</a>
+<a name="ln2660">    char *op = crm_element_value_copy(request, F_STONITH_OPERATION);</a>
+<a name="ln2661"> </a>
+<a name="ln2662">    if (get_xpath_object(&quot;//&quot; T_STONITH_REPLY, request, LOG_DEBUG_3)) {</a>
+<a name="ln2663">        is_reply = TRUE;</a>
+<a name="ln2664">    }</a>
+<a name="ln2665"> </a>
+<a name="ln2666">    crm_element_value_int(request, F_STONITH_CALLOPTS, &amp;call_options);</a>
+<a name="ln2667">    crm_debug(&quot;Processing %s%s %u from %s (%16x)&quot;, op, is_reply ? &quot; reply&quot; : &quot;&quot;,</a>
+<a name="ln2668">              id, client ? client-&gt;name : remote_peer, call_options);</a>
+<a name="ln2669"> </a>
+<a name="ln2670">    if (is_set(call_options, st_opt_sync_call)) {</a>
+<a name="ln2671">        CRM_ASSERT(client == NULL || client-&gt;request_id == id);</a>
+<a name="ln2672">    }</a>
+<a name="ln2673"> </a>
+<a name="ln2674">    if (is_reply) {</a>
+<a name="ln2675">        handle_reply(client, request, remote_peer);</a>
+<a name="ln2676">    } else {</a>
+<a name="ln2677">        rc = handle_request(client, id, flags, request, remote_peer);</a>
+<a name="ln2678">    }</a>
+<a name="ln2679"> </a>
+<a name="ln2680">    crm_debug(&quot;Processed %s%s from %s: %s (%d)&quot;, op,</a>
+<a name="ln2681">              is_reply ? &quot; reply&quot; : &quot;&quot;, client ? client-&gt;name : remote_peer,</a>
+<a name="ln2682">              rc &gt; 0 ? &quot;&quot; : pcmk_strerror(rc), rc);</a>
+<a name="ln2683"> </a>
+<a name="ln2684">    free(op);</a>
+<a name="ln2685">}</a>
+
+</code></pre>
+<div class="balloon" rel="238"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cmd'. Check lines: 238, 237.</p></div>
+<div class="balloon" rel="519"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 519, 518.</p></div>
+<div class="balloon" rel="534"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 534, 533.</p></div>
+<div class="balloon" rel="601"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="683"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 683, 683.</p></div>
+<div class="balloon" rel="729"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V1001/" target="_blank">V1001</a> The 'offset' variable is assigned but is not used until the end of the function.</p></div>
+<div class="balloon" rel="865"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'device'. Check lines: 865, 864.</p></div>
+<div class="balloon" rel="945"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cmd'. Check lines: 945, 943.</p></div>
+<div class="balloon" rel="1036"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 1036, 1036.</p></div>
+<div class="balloon" rel="1038"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'g_list_free_full' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="1097"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> Dereferencing of the null pointer 'device' might take place. The potential null pointer is passed into 'device_has_duplicate' function. Inspect the first argument. Check lines: 1097, 1124, 864.</p></div>
+<div class="balloon" rel="1368"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'tp'. Check lines: 1368, 1367.</p></div>
+<div class="balloon" rel="1912"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'query'. Check lines: 1912, 1910.</p></div>
+<div class="balloon" rel="2392"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'remote_peer != NULL' is always false.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,638 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;sys/types.h&gt;</a>
+<a name="ln28">#include &lt;sys/stat.h&gt;</a>
+<a name="ln29">#include &lt;unistd.h&gt;</a>
+<a name="ln30">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;stdlib.h&gt;</a>
+<a name="ln33">#include &lt;errno.h&gt;</a>
+<a name="ln34">#include &lt;fcntl.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln40"> </a>
+<a name="ln41">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">#include &lt;cibio.h&gt;</a>
+<a name="ln46">#include &lt;callbacks.h&gt;</a>
+<a name="ln47">#include &lt;pwd.h&gt;</a>
+<a name="ln48">#include &lt;grp.h&gt;</a>
+<a name="ln49">#include &quot;common.h&quot;</a>
+<a name="ln50"> </a>
+<a name="ln51">#if HAVE_LIBXML2</a>
+<a name="ln52">#  include &lt;libxml/parser.h&gt;</a>
+<a name="ln53">#endif</a>
+<a name="ln54"> </a>
+<a name="ln55">#ifdef HAVE_GETOPT_H</a>
+<a name="ln56">#  include &lt;getopt.h&gt;</a>
+<a name="ln57">#endif</a>
+<a name="ln58"> </a>
+<a name="ln59">#if HAVE_BZLIB_H</a>
+<a name="ln60">#  include &lt;bzlib.h&gt;</a>
+<a name="ln61">#endif</a>
+<a name="ln62"> </a>
+<a name="ln63">extern int init_remote_listener(int port, gboolean encrypted);</a>
+<a name="ln64">gboolean cib_shutdown_flag = FALSE;</a>
+<a name="ln65">int cib_status = pcmk_ok;</a>
+<a name="ln66"> </a>
+<a name="ln67">crm_cluster_t crm_cluster;</a>
+<a name="ln68"> </a>
+<a name="ln69">#if SUPPORT_HEARTBEAT</a>
+<a name="ln70">oc_ev_t *cib_ev_token;</a>
+<a name="ln71">ll_cluster_t *hb_conn = NULL;</a>
+<a name="ln72">extern void oc_ev_special(const oc_ev_t *, oc_ev_class_t, int);</a>
+<a name="ln73">gboolean cib_register_ha(ll_cluster_t * hb_cluster, const char *client_name);</a>
+<a name="ln74">#else</a>
+<a name="ln75">void *hb_conn = NULL;</a>
+<a name="ln76">#endif</a>
+<a name="ln77"> </a>
+<a name="ln78">GMainLoop *mainloop = NULL;</a>
+<a name="ln79">const char *cib_root = NULL;</a>
+<a name="ln80">char *cib_our_uname = NULL;</a>
+<a name="ln81">gboolean preserve_status = FALSE;</a>
+<a name="ln82"> </a>
+<a name="ln83">/* volatile because it may be changed in a signal handler */</a>
+<a name="ln84">volatile gboolean cib_writes_enabled = TRUE;</a>
+<a name="ln85"> </a>
+<a name="ln86">int remote_fd = 0;</a>
+<a name="ln87">int remote_tls_fd = 0;</a>
+<a name="ln88"> </a>
+<a name="ln89">int cib_init(void);</a>
+<a name="ln90">void cib_shutdown(int nsig);</a>
+<a name="ln91">gboolean startCib(const char *filename);</a>
+<a name="ln92">extern int write_cib_contents(gpointer p);</a>
+<a name="ln93"> </a>
+<a name="ln94">GHashTable *config_hash = NULL;</a>
+<a name="ln95">GHashTable *local_notify_queue = NULL;</a>
+<a name="ln96"> </a>
+<a name="ln97">char *channel1 = NULL;</a>
+<a name="ln98">char *channel2 = NULL;</a>
+<a name="ln99">char *channel3 = NULL;</a>
+<a name="ln100">char *channel4 = NULL;</a>
+<a name="ln101">char *channel5 = NULL;</a>
+<a name="ln102"> </a>
+<a name="ln103">#define OPTARGS	&quot;maswr:V?&quot;</a>
+<a name="ln104">void cib_cleanup(void);</a>
+<a name="ln105"> </a>
+<a name="ln106">static void</a>
+<a name="ln107">cib_enable_writes(int nsig)</a>
+<a name="ln108">{</a>
+<a name="ln109">    crm_info(&quot;(Re)enabling disk writes&quot;);</a>
+<a name="ln110">    cib_writes_enabled = TRUE;</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">static void</a>
+<a name="ln114">log_cib_client(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln115">{</a>
+<a name="ln116">    crm_info(&quot;Client %s&quot;, crm_client_name(value));</a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119">/* *INDENT-OFF* */</a>
+<a name="ln120">static struct crm_option long_options[] = {</a>
+<a name="ln121">    /* Top-level Options */</a>
+<a name="ln122">    {&quot;help&quot;,    0, 0, '?', &quot;\tThis text&quot;},</a>
+<a name="ln123">    {&quot;verbose&quot;, 0, 0, 'V', &quot;\tIncrease debug output&quot;},</a>
+<a name="ln124"> </a>
+<a name="ln125">    {&quot;per-action-cib&quot;, 0, 0, 'a', &quot;\tAdvanced use only&quot;},</a>
+<a name="ln126">    {&quot;stand-alone&quot;,    0, 0, 's', &quot;\tAdvanced use only&quot;},</a>
+<a name="ln127">    {&quot;disk-writes&quot;,    0, 0, 'w', &quot;\tAdvanced use only&quot;},</a>
+<a name="ln128">    {&quot;cib-root&quot;,       1, 0, 'r', &quot;\tAdvanced use only&quot;},</a>
+<a name="ln129"> </a>
+<a name="ln130">    {0, 0, 0, 0}</a>
+<a name="ln131">};</a>
+<a name="ln132">/* *INDENT-ON* */</a>
+<a name="ln133"> </a>
+<a name="ln134">int</a>
+<a name="ln135">main(int argc, char **argv)</a>
+<a name="ln136">{</a>
+<a name="ln137">    int flag;</a>
+<a name="ln138">    int rc = 0;</a>
+<a name="ln139">    int index = 0;</a>
+<a name="ln140">    int argerr = 0;</a>
+<a name="ln141">    struct passwd *pwentry = NULL;</a>
+<a name="ln142"> </a>
+<a name="ln143">    crm_log_preinit(NULL, argc, argv);</a>
+<a name="ln144">    crm_set_options(NULL, &quot;[options]&quot;,</a>
+<a name="ln145">                    long_options, &quot;Daemon for storing and replicating the cluster configuration&quot;);</a>
+<a name="ln146"> </a>
+<a name="ln147">    crm_peer_init();</a>
+<a name="ln148"> </a>
+<a name="ln149">    mainloop_add_signal(SIGTERM, cib_shutdown);</a>
+<a name="ln150">    mainloop_add_signal(SIGPIPE, cib_enable_writes);</a>
+<a name="ln151"> </a>
+<a name="ln152">    cib_writer = mainloop_add_trigger(G_PRIORITY_LOW, write_cib_contents, NULL);</a>
+<a name="ln153"> </a>
+<a name="ln154">    while (1) {</a>
+<a name="ln155">        flag = crm_get_option(argc, argv, &amp;index);</a>
+<a name="ln156">        if (flag == -1)</a>
+<a name="ln157">            break;</a>
+<a name="ln158"> </a>
+<a name="ln159">        switch (flag) {</a>
+<a name="ln160">            case 'V':</a>
+<a name="ln161">                crm_bump_log_level(argc, argv);</a>
+<a name="ln162">                break;</a>
+<a name="ln163">            case 's':</a>
+<a name="ln164">                stand_alone = TRUE;</a>
+<a name="ln165">                preserve_status = TRUE;</a>
+<a name="ln166">                cib_writes_enabled = FALSE;</a>
+<a name="ln167"> </a>
+<a name="ln168">                pwentry = getpwnam(CRM_DAEMON_USER);</a>
+<a name="ln169">                CRM_CHECK(pwentry != NULL,</a>
+<a name="ln170">                          crm_perror(LOG_ERR, &quot;Invalid uid (%s) specified&quot;, CRM_DAEMON_USER);</a>
+<a name="ln171">                          return 100);</a>
+<a name="ln172"> </a>
+<a name="ln173">                rc = setgid(pwentry-&gt;pw_gid);</a>
+<a name="ln174">                if (rc &lt; 0) {</a>
+<a name="ln175">                    crm_perror(LOG_ERR, &quot;Could not set group to %d&quot;, pwentry-&gt;pw_gid);</a>
+<a name="ln176">                    return 100;</a>
+<a name="ln177">                }</a>
+<a name="ln178"> </a>
+<a name="ln179">                rc = initgroups(CRM_DAEMON_GROUP, pwentry-&gt;pw_gid);</a>
+<a name="ln180">                if (rc &lt; 0) {</a>
+<a name="ln181">                    crm_perror(LOG_ERR, &quot;Could not setup groups for user %d&quot;, pwentry-&gt;pw_uid);</a>
+<a name="ln182">                    return 100;</a>
+<a name="ln183">                }</a>
+<a name="ln184"> </a>
+<a name="ln185">                rc = setuid(pwentry-&gt;pw_uid);</a>
+<a name="ln186">                if (rc &lt; 0) {</a>
+<a name="ln187">                    crm_perror(LOG_ERR, &quot;Could not set user to %d&quot;, pwentry-&gt;pw_uid);</a>
+<a name="ln188">                    return 100;</a>
+<a name="ln189">                }</a>
+<a name="ln190">                break;</a>
+<a name="ln191">            case '?':          /* Help message */</a>
+<a name="ln192">                crm_help(flag, EX_OK);</a>
+<a name="ln193">                break;</a>
+<a name="ln194">            case 'w':</a>
+<a name="ln195">                cib_writes_enabled = TRUE;</a>
+<a name="ln196">                break;</a>
+<a name="ln197">            case 'r':</a>
+<a name="ln198">                cib_root = optarg;</a>
+<a name="ln199">                break;</a>
+<a name="ln200">            case 'm':</a>
+<a name="ln201">                cib_metadata();</a>
+<a name="ln202">                return 0;</a>
+<a name="ln203">            default:</a>
+<a name="ln204">                ++argerr;</a>
+<a name="ln205">                break;</a>
+<a name="ln206">        }</a>
+<a name="ln207">    }</a>
+<a name="ln208">    if (argc - optind == 1 &amp;&amp; safe_str_eq(&quot;metadata&quot;, argv[optind])) {</a>
+<a name="ln209">        cib_metadata();</a>
+<a name="ln210">        return 0;</a>
+<a name="ln211">    }</a>
+<a name="ln212"> </a>
+<a name="ln213">    if (optind &gt; argc) {</a>
+<a name="ln214">        ++argerr;</a>
+<a name="ln215">    }</a>
+<a name="ln216"> </a>
+<a name="ln217">    if (argerr) {</a>
+<a name="ln218">        crm_help('?', EX_USAGE);</a>
+<a name="ln219">    }</a>
+<a name="ln220"> </a>
+<a name="ln221">    crm_log_init(NULL, LOG_INFO, TRUE, FALSE, argc, argv, FALSE);</a>
+<a name="ln222">    if (cib_root == NULL) {</a>
+<a name="ln223">        char *path = crm_strdup_printf(&quot;%s/cib.xml&quot;, CRM_CONFIG_DIR);</a>
+<a name="ln224">        char *legacy = crm_strdup_printf(&quot;%s/cib.xml&quot;, CRM_LEGACY_CONFIG_DIR);</a>
+<a name="ln225"> </a>
+<a name="ln226">        if (g_file_test(path, G_FILE_TEST_EXISTS)) {</a>
+<a name="ln227">            cib_root = CRM_CONFIG_DIR;</a>
+<a name="ln228"> </a>
+<a name="ln229">        } else if (g_file_test(legacy, G_FILE_TEST_EXISTS)) {</a>
+<a name="ln230">            cib_root = CRM_LEGACY_CONFIG_DIR;</a>
+<a name="ln231">            crm_notice(&quot;Using legacy config location: %s&quot;, cib_root);</a>
+<a name="ln232"> </a>
+<a name="ln233">        } else {</a>
+<a name="ln234">            cib_root = CRM_CONFIG_DIR;</a>
+<a name="ln235">            crm_notice(&quot;Using new config location: %s&quot;, cib_root);</a>
+<a name="ln236">        }</a>
+<a name="ln237"> </a>
+<a name="ln238">        free(legacy);</a>
+<a name="ln239">        free(path);</a>
+<a name="ln240"> </a>
+<a name="ln241">    } else {</a>
+<a name="ln242">        crm_notice(&quot;Using custom config location: %s&quot;, cib_root);</a>
+<a name="ln243">    }</a>
+<a name="ln244"> </a>
+<a name="ln245">    if (crm_is_writable(cib_root, NULL, CRM_DAEMON_USER, CRM_DAEMON_GROUP, FALSE) == FALSE) {</a>
+<a name="ln246">        crm_err(&quot;Bad permissions on %s. Terminating&quot;, cib_root);</a>
+<a name="ln247">        fprintf(stderr, &quot;ERROR: Bad permissions on %s. See logs for details\n&quot;, cib_root);</a>
+<a name="ln248">        fflush(stderr);</a>
+<a name="ln249">        return 100;</a>
+<a name="ln250">    }</a>
+<a name="ln251"> </a>
+<a name="ln252">    /* read local config file */</a>
+<a name="ln253">    rc = cib_init();</a>
+<a name="ln254"> </a>
+<a name="ln255">    CRM_CHECK(crm_hash_table_size(client_connections) == 0,</a>
+<a name="ln256">              crm_warn(&quot;Not all clients gone at exit&quot;));</a>
+<a name="ln257">    g_hash_table_foreach(client_connections, log_cib_client, NULL);</a>
+<a name="ln258">    cib_cleanup();</a>
+<a name="ln259"> </a>
+<a name="ln260">#if SUPPORT_HEARTBEAT</a>
+<a name="ln261">    if (hb_conn) {</a>
+<a name="ln262">        hb_conn-&gt;llc_ops-&gt;delete(hb_conn);</a>
+<a name="ln263">    }</a>
+<a name="ln264">#endif</a>
+<a name="ln265"> </a>
+<a name="ln266">    crm_info(&quot;Done&quot;);</a>
+<a name="ln267">    return rc;</a>
+<a name="ln268">}</a>
+<a name="ln269"> </a>
+<a name="ln270">void</a>
+<a name="ln271">cib_cleanup(void)</a>
+<a name="ln272">{</a>
+<a name="ln273">    crm_peer_destroy();</a>
+<a name="ln274">    if (local_notify_queue) {</a>
+<a name="ln275">        g_hash_table_destroy(local_notify_queue);</a>
+<a name="ln276">    }</a>
+<a name="ln277">    crm_client_cleanup();</a>
+<a name="ln278">    g_hash_table_destroy(config_hash);</a>
+<a name="ln279">    free(cib_our_uname);</a>
+<a name="ln280">    free(channel1);</a>
+<a name="ln281">    free(channel2);</a>
+<a name="ln282">    free(channel3);</a>
+<a name="ln283">    free(channel4);</a>
+<a name="ln284">    free(channel5);</a>
+<a name="ln285">}</a>
+<a name="ln286"> </a>
+<a name="ln287">unsigned long cib_num_ops = 0;</a>
+<a name="ln288">const char *cib_stat_interval = &quot;10min&quot;;</a>
+<a name="ln289">unsigned long cib_num_local = 0, cib_num_updates = 0, cib_num_fail = 0;</a>
+<a name="ln290">unsigned long cib_bad_connects = 0, cib_num_timeouts = 0;</a>
+<a name="ln291"> </a>
+<a name="ln292">#if SUPPORT_HEARTBEAT</a>
+<a name="ln293">gboolean ccm_connect(void);</a>
+<a name="ln294"> </a>
+<a name="ln295">static void</a>
+<a name="ln296">ccm_connection_destroy(gpointer user_data)</a>
+<a name="ln297">{</a>
+<a name="ln298">    crm_err(&quot;CCM connection failed... blocking while we reconnect&quot;);</a>
+<a name="ln299">    CRM_ASSERT(ccm_connect());</a>
+<a name="ln300">    return;</a>
+<a name="ln301">}</a>
+<a name="ln302"> </a>
+<a name="ln303">static void *ccm_library = NULL;</a>
+<a name="ln304"> </a>
+<a name="ln305">gboolean</a>
+<a name="ln306">ccm_connect(void)</a>
+<a name="ln307">{</a>
+<a name="ln308">    gboolean did_fail = TRUE;</a>
+<a name="ln309">    int num_ccm_fails = 0;</a>
+<a name="ln310">    int max_ccm_fails = 30;</a>
+<a name="ln311">    int ret;</a>
+<a name="ln312">    int cib_ev_fd;</a>
+<a name="ln313"> </a>
+<a name="ln314">    int (*ccm_api_register) (oc_ev_t ** token) =</a>
+<a name="ln315">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_register&quot;, 1);</a>
+<a name="ln316"> </a>
+<a name="ln317">    int (*ccm_api_set_callback) (const oc_ev_t * token,</a>
+<a name="ln318">                                 oc_ev_class_t class,</a>
+<a name="ln319">                                 oc_ev_callback_t * fn,</a>
+<a name="ln320">                                 oc_ev_callback_t ** prev_fn) =</a>
+<a name="ln321">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_set_callback&quot;, 1);</a>
+<a name="ln322"> </a>
+<a name="ln323">    void (*ccm_api_special) (const oc_ev_t *, oc_ev_class_t, int) =</a>
+<a name="ln324">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_special&quot;, 1);</a>
+<a name="ln325">    int (*ccm_api_activate) (const oc_ev_t * token, int *fd) =</a>
+<a name="ln326">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_activate&quot;, 1);</a>
+<a name="ln327">    int (*ccm_api_unregister) (oc_ev_t * token) =</a>
+<a name="ln328">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_unregister&quot;, 1);</a>
+<a name="ln329"> </a>
+<a name="ln330">    static struct mainloop_fd_callbacks ccm_fd_callbacks = {</a>
+<a name="ln331">        .dispatch = cib_ccm_dispatch,</a>
+<a name="ln332">        .destroy = ccm_connection_destroy,</a>
+<a name="ln333">    };</a>
+<a name="ln334"> </a>
+<a name="ln335">    while (did_fail) {</a>
+<a name="ln336">        did_fail = FALSE;</a>
+<a name="ln337">        crm_info(&quot;Registering with CCM...&quot;);</a>
+<a name="ln338">        ret = (*ccm_api_register) (&amp;cib_ev_token);</a>
+<a name="ln339">        if (ret != 0) {</a>
+<a name="ln340">            did_fail = TRUE;</a>
+<a name="ln341">        }</a>
+<a name="ln342"> </a>
+<a name="ln343">        if (did_fail == FALSE) {</a>
+<a name="ln344">            crm_trace(&quot;Setting up CCM callbacks&quot;);</a>
+<a name="ln345">            ret = (*ccm_api_set_callback) (cib_ev_token, OC_EV_MEMB_CLASS,</a>
+<a name="ln346">                                           cib_ccm_msg_callback, NULL);</a>
+<a name="ln347">            if (ret != 0) {</a>
+<a name="ln348">                crm_warn(&quot;CCM callback not set&quot;);</a>
+<a name="ln349">                did_fail = TRUE;</a>
+<a name="ln350">            }</a>
+<a name="ln351">        }</a>
+<a name="ln352">        if (did_fail == FALSE) {</a>
+<a name="ln353">            (*ccm_api_special) (cib_ev_token, OC_EV_MEMB_CLASS, 0);</a>
+<a name="ln354"> </a>
+<a name="ln355">            crm_trace(&quot;Activating CCM token&quot;);</a>
+<a name="ln356">            ret = (*ccm_api_activate) (cib_ev_token, &amp;cib_ev_fd);</a>
+<a name="ln357">            if (ret != 0) {</a>
+<a name="ln358">                crm_warn(&quot;CCM Activation failed&quot;);</a>
+<a name="ln359">                did_fail = TRUE;</a>
+<a name="ln360">            }</a>
+<a name="ln361">        }</a>
+<a name="ln362"> </a>
+<a name="ln363">        if (did_fail) {</a>
+<a name="ln364">            num_ccm_fails++;</a>
+<a name="ln365">            (*ccm_api_unregister) (cib_ev_token);</a>
+<a name="ln366"> </a>
+<a name="ln367">            if (num_ccm_fails &lt; max_ccm_fails) {</a>
+<a name="ln368">                crm_warn(&quot;CCM Connection failed %d times (%d max)&quot;, num_ccm_fails, max_ccm_fails);</a>
+<a name="ln369">                sleep(3);</a>
+<a name="ln370"> </a>
+<a name="ln371">            } else {</a>
+<a name="ln372">                crm_err(&quot;CCM Activation failed %d (max) times&quot;, num_ccm_fails);</a>
+<a name="ln373">                return FALSE;</a>
+<a name="ln374">            }</a>
+<a name="ln375">        }</a>
+<a name="ln376">    }</a>
+<a name="ln377"> </a>
+<a name="ln378">    crm_debug(&quot;CCM Activation passed... all set to go!&quot;);</a>
+<a name="ln379">    mainloop_add_fd(&quot;heartbeat-ccm&quot;, G_PRIORITY_MEDIUM, cib_ev_fd, cib_ev_token, &amp;ccm_fd_callbacks);</a>
+<a name="ln380"> </a>
+<a name="ln381">    return TRUE;</a>
+<a name="ln382">}</a>
+<a name="ln383">#endif</a>
+<a name="ln384"> </a>
+<a name="ln385">#if SUPPORT_COROSYNC</a>
+<a name="ln386">static void</a>
+<a name="ln387">cib_cs_dispatch(cpg_handle_t handle,</a>
+<a name="ln388">                 const struct cpg_name *groupName,</a>
+<a name="ln389">                 uint32_t nodeid, uint32_t pid, void *msg, size_t msg_len)</a>
+<a name="ln390">{</a>
+<a name="ln391">    uint32_t kind = 0;</a>
+<a name="ln392">    xmlNode *xml = NULL;</a>
+<a name="ln393">    const char *from = NULL;</a>
+<a name="ln394">    char *data = pcmk_message_common_cs(handle, nodeid, pid, msg, &amp;kind, &amp;from);</a>
+<a name="ln395"> </a>
+<a name="ln396">    if(data == NULL) {</a>
+<a name="ln397">        return;</a>
+<a name="ln398">    }</a>
+<a name="ln399">    if (kind == crm_class_cluster) {</a>
+<a name="ln400">        xml = string2xml(data);</a>
+<a name="ln401">        if (xml == NULL) {</a>
+<a name="ln402">            crm_err(&quot;Invalid XML: '%.120s'&quot;, data);</a>
+<a name="ln403">            free(data);</a>
+<a name="ln404">            return;</a>
+<a name="ln405">        }</a>
+<a name="ln406">        crm_xml_add(xml, F_ORIG, from);</a>
+<a name="ln407">        /* crm_xml_add_int(xml, F_SEQ, wrapper-&gt;id); */</a>
+<a name="ln408">        cib_peer_callback(xml, NULL);</a>
+<a name="ln409">    }</a>
+<a name="ln410"> </a>
+<a name="ln411">    free_xml(xml);</a>
+<a name="ln412">    free(data);</a>
+<a name="ln413">}</a>
+<a name="ln414"> </a>
+<a name="ln415">static void</a>
+<a name="ln416">cib_cs_destroy(gpointer user_data)</a>
+<a name="ln417">{</a>
+<a name="ln418">    if (cib_shutdown_flag) {</a>
+<a name="ln419">        crm_info(&quot;Corosync disconnection complete&quot;);</a>
+<a name="ln420">    } else {</a>
+<a name="ln421">        crm_err(&quot;Corosync connection lost!  Exiting.&quot;);</a>
+<a name="ln422">        terminate_cib(__FUNCTION__, -1);</a>
+<a name="ln423">    }</a>
+<a name="ln424">}</a>
+<a name="ln425">#endif</a>
+<a name="ln426"> </a>
+<a name="ln427">static void</a>
+<a name="ln428">cib_peer_update_callback(enum crm_status_type type, crm_node_t * node, const void *data)</a>
+<a name="ln429">{</a>
+<a name="ln430">    switch (type) {</a>
+<a name="ln431">        case crm_status_processes:</a>
+<a name="ln432">#if !SUPPORT_PLUGIN</a>
+<a name="ln433">            if (cib_legacy_mode()</a>
+<a name="ln434">                &amp;&amp; is_not_set(node-&gt;processes, crm_get_cluster_proc())) {</a>
+<a name="ln435"> </a>
+<a name="ln436">                uint32_t old = data? *(const uint32_t *)data : 0;</a>
+<a name="ln437"> </a>
+<a name="ln438">                if ((node-&gt;processes ^ old) &amp; crm_proc_cpg) {</a>
+<a name="ln439">                    crm_info(&quot;Attempting to disable legacy mode after %s left the cluster&quot;,</a>
+<a name="ln440">                             node-&gt;uname);</a>
+<a name="ln441">                    legacy_mode = FALSE;</a>
+<a name="ln442">                }</a>
+<a name="ln443">            }</a>
+<a name="ln444">#endif</a>
+<a name="ln445">            break;</a>
+<a name="ln446"> </a>
+<a name="ln447">        case crm_status_uname:</a>
+<a name="ln448">        case crm_status_rstate:</a>
+<a name="ln449">        case crm_status_nstate:</a>
+<a name="ln450">            if (cib_shutdown_flag &amp;&amp; (crm_active_peers() &lt; 2)</a>
+<a name="ln451">                &amp;&amp; crm_hash_table_size(client_connections) == 0) {</a>
+<a name="ln452"> </a>
+<a name="ln453">                crm_info(&quot;No more peers&quot;);</a>
+<a name="ln454">                terminate_cib(__FUNCTION__, 1);</a>
+<a name="ln455">            }</a>
+<a name="ln456">            break;</a>
+<a name="ln457">    }</a>
+<a name="ln458">}</a>
+<a name="ln459"> </a>
+<a name="ln460">#if SUPPORT_HEARTBEAT</a>
+<a name="ln461">static void</a>
+<a name="ln462">cib_ha_connection_destroy(gpointer user_data)</a>
+<a name="ln463">{</a>
+<a name="ln464">    if (cib_shutdown_flag) {</a>
+<a name="ln465">        crm_info(&quot;Heartbeat disconnection complete... exiting&quot;);</a>
+<a name="ln466">        terminate_cib(__FUNCTION__, 0);</a>
+<a name="ln467">    } else {</a>
+<a name="ln468">        crm_err(&quot;Heartbeat connection lost!  Exiting.&quot;);</a>
+<a name="ln469">        terminate_cib(__FUNCTION__, -1);</a>
+<a name="ln470">    }</a>
+<a name="ln471">}</a>
+<a name="ln472">#endif</a>
+<a name="ln473"> </a>
+<a name="ln474">int</a>
+<a name="ln475">cib_init(void)</a>
+<a name="ln476">{</a>
+<a name="ln477">    if (is_openais_cluster()) {</a>
+<a name="ln478">#if SUPPORT_COROSYNC</a>
+<a name="ln479">        crm_cluster.destroy = cib_cs_destroy;</a>
+<a name="ln480">        crm_cluster.cpg.cpg_deliver_fn = cib_cs_dispatch;</a>
+<a name="ln481">        crm_cluster.cpg.cpg_confchg_fn = pcmk_cpg_membership;</a>
+<a name="ln482">#endif</a>
+<a name="ln483">    } else if (is_heartbeat_cluster()) {</a>
+<a name="ln484">#if SUPPORT_HEARTBEAT</a>
+<a name="ln485">        crm_cluster.hb_dispatch = cib_ha_peer_callback;</a>
+<a name="ln486">        crm_cluster.destroy = cib_ha_connection_destroy;</a>
+<a name="ln487">#endif</a>
+<a name="ln488">    }</a>
+<a name="ln489"> </a>
+<a name="ln490">    config_hash =</a>
+<a name="ln491">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln492"> </a>
+<a name="ln493">    if (startCib(&quot;cib.xml&quot;) == FALSE) {</a>
+<a name="ln494">        crm_crit(&quot;Cannot start CIB... terminating&quot;);</a>
+<a name="ln495">        crm_exit(ENODATA);</a>
+<a name="ln496">    }</a>
+<a name="ln497"> </a>
+<a name="ln498">    if (stand_alone == FALSE) {</a>
+<a name="ln499">        if (is_openais_cluster()) {</a>
+<a name="ln500">            crm_set_status_callback(&amp;cib_peer_update_callback);</a>
+<a name="ln501">        }</a>
+<a name="ln502"> </a>
+<a name="ln503">        if (crm_cluster_connect(&amp;crm_cluster) == FALSE) {</a>
+<a name="ln504">            crm_crit(&quot;Cannot sign in to the cluster... terminating&quot;);</a>
+<a name="ln505">            crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln506">        }</a>
+<a name="ln507">        cib_our_uname = crm_cluster.uname;</a>
+<a name="ln508"> </a>
+<a name="ln509">#if SUPPORT_HEARTBEAT</a>
+<a name="ln510">        if (is_heartbeat_cluster()) {</a>
+<a name="ln511"> </a>
+<a name="ln512">            gboolean was_error = FALSE;</a>
+<a name="ln513"> </a>
+<a name="ln514">            hb_conn = crm_cluster.hb_conn;</a>
+<a name="ln515">            if (was_error == FALSE) {</a>
+<a name="ln516">                if (HA_OK !=</a>
+<a name="ln517">                    hb_conn-&gt;llc_ops-&gt;set_cstatus_callback(hb_conn, cib_client_status_callback,</a>
+<a name="ln518">                                                           hb_conn)) {</a>
+<a name="ln519"> </a>
+<a name="ln520">                    crm_err(&quot;Cannot set cstatus callback: %s&quot;, hb_conn-&gt;llc_ops-&gt;errmsg(hb_conn));</a>
+<a name="ln521">                    was_error = TRUE;</a>
+<a name="ln522">                }</a>
+<a name="ln523">            }</a>
+<a name="ln524"> </a>
+<a name="ln525">            if (was_error == FALSE) {</a>
+<a name="ln526">                was_error = (ccm_connect() == FALSE);</a>
+<a name="ln527">            }</a>
+<a name="ln528"> </a>
+<a name="ln529">            if (was_error == FALSE) {</a>
+<a name="ln530">                /* Async get client status information in the cluster */</a>
+<a name="ln531">                crm_info(&quot;Requesting the list of configured nodes&quot;);</a>
+<a name="ln532">                hb_conn-&gt;llc_ops-&gt;client_status(hb_conn, NULL, CRM_SYSTEM_CIB, -1);</a>
+<a name="ln533">            }</a>
+<a name="ln534">        }</a>
+<a name="ln535">#endif</a>
+<a name="ln536"> </a>
+<a name="ln537">    } else {</a>
+<a name="ln538">        cib_our_uname = strdup(&quot;localhost&quot;);</a>
+<a name="ln539">    }</a>
+<a name="ln540"> </a>
+<a name="ln541">    cib_ipc_servers_init(&amp;ipcs_ro,</a>
+<a name="ln542">                         &amp;ipcs_rw,</a>
+<a name="ln543">                         &amp;ipcs_shm,</a>
+<a name="ln544">                         &amp;ipc_ro_callbacks,</a>
+<a name="ln545">                         &amp;ipc_rw_callbacks);</a>
+<a name="ln546"> </a>
+<a name="ln547">    if (stand_alone) {</a>
+<a name="ln548">        cib_is_master = TRUE;</a>
+<a name="ln549">    }</a>
+<a name="ln550"> </a>
+<a name="ln551">    /* Create the mainloop and run it... */</a>
+<a name="ln552">    mainloop = g_main_new(FALSE);</a>
+<a name="ln553">    crm_info(&quot;Starting %s mainloop&quot;, crm_system_name);</a>
+<a name="ln554">    g_main_run(mainloop);</a>
+<a name="ln555"> </a>
+<a name="ln556">    /* If main loop returned, clean up and exit. We disconnect in case</a>
+<a name="ln557">     * terminate_cib() was called with fast=1.</a>
+<a name="ln558">     */</a>
+<a name="ln559">    crm_cluster_disconnect(&amp;crm_cluster);</a>
+<a name="ln560">    cib_ipc_servers_destroy(ipcs_ro, ipcs_rw, ipcs_shm);</a>
+<a name="ln561"> </a>
+<a name="ln562">    return crm_exit(pcmk_ok);</a>
+<a name="ln563">}</a>
+<a name="ln564"> </a>
+<a name="ln565">gboolean</a>
+<a name="ln566">startCib(const char *filename)</a>
+<a name="ln567">{</a>
+<a name="ln568">    gboolean active = FALSE;</a>
+<a name="ln569">    xmlNode *cib = readCibXmlFile(cib_root, filename, !preserve_status);</a>
+<a name="ln570"> </a>
+<a name="ln571">    CRM_ASSERT(cib != NULL);</a>
+<a name="ln572"> </a>
+<a name="ln573">    if (activateCibXml(cib, TRUE, &quot;start&quot;) == 0) {</a>
+<a name="ln574">        int port = 0;</a>
+<a name="ln575">        const char *port_s = NULL;</a>
+<a name="ln576"> </a>
+<a name="ln577">        active = TRUE;</a>
+<a name="ln578"> </a>
+<a name="ln579">        cib_read_config(config_hash, cib);</a>
+<a name="ln580"> </a>
+<a name="ln581">        port_s = crm_element_value(cib, &quot;remote-tls-port&quot;);</a>
+<a name="ln582">        if (port_s) {</a>
+<a name="ln583">            port = crm_parse_int(port_s, &quot;0&quot;);</a>
+<a name="ln584">            remote_tls_fd = init_remote_listener(port, TRUE);</a>
+<a name="ln585">        }</a>
+<a name="ln586"> </a>
+<a name="ln587">        port_s = crm_element_value(cib, &quot;remote-clear-port&quot;);</a>
+<a name="ln588">        if (port_s) {</a>
+<a name="ln589">            port = crm_parse_int(port_s, &quot;0&quot;);</a>
+<a name="ln590">            remote_fd = init_remote_listener(port, FALSE);</a>
+<a name="ln591">        }</a>
+<a name="ln592"> </a>
+<a name="ln593">        crm_info(&quot;CIB Initialization completed successfully&quot;);</a>
+<a name="ln594">    }</a>
+<a name="ln595"> </a>
+<a name="ln596">    return active;</a>
+<a name="ln597">}</a>
+
+</code></pre>
+<div class="balloon" rel="255"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

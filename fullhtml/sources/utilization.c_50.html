@@ -1,0 +1,523 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2014 Gao,Yan &lt;ygao@suse.com&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln25">#include &lt;allocate.h&gt;</a>
+<a name="ln26">#include &lt;utils.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">static GListPtr find_colocated_rscs(GListPtr colocated_rscs, resource_t * rsc,</a>
+<a name="ln29">                                    resource_t * orig_rsc);</a>
+<a name="ln30"> </a>
+<a name="ln31">static GListPtr group_find_colocated_rscs(GListPtr colocated_rscs, resource_t * rsc,</a>
+<a name="ln32">                                          resource_t * orig_rsc);</a>
+<a name="ln33"> </a>
+<a name="ln34">static void group_add_unallocated_utilization(GHashTable * all_utilization, resource_t * rsc,</a>
+<a name="ln35">                                              GListPtr all_rscs);</a>
+<a name="ln36"> </a>
+<a name="ln37">struct compare_data {</a>
+<a name="ln38">    const node_t *node1;</a>
+<a name="ln39">    const node_t *node2;</a>
+<a name="ln40">    int result;</a>
+<a name="ln41">};</a>
+<a name="ln42"> </a>
+<a name="ln43">static void</a>
+<a name="ln44">do_compare_capacity1(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln45">{</a>
+<a name="ln46">    int node1_capacity = 0;</a>
+<a name="ln47">    int node2_capacity = 0;</a>
+<a name="ln48">    struct compare_data *data = user_data;</a>
+<a name="ln49"> </a>
+<a name="ln50">    node1_capacity = crm_parse_int(value, &quot;0&quot;);</a>
+<a name="ln51">    node2_capacity =</a>
+<a name="ln52">        crm_parse_int(g_hash_table_lookup(data-&gt;node2-&gt;details-&gt;utilization, key), &quot;0&quot;);</a>
+<a name="ln53"> </a>
+<a name="ln54">    if (node1_capacity &gt; node2_capacity) {</a>
+<a name="ln55">        data-&gt;result--;</a>
+<a name="ln56">    } else if (node1_capacity &lt; node2_capacity) {</a>
+<a name="ln57">        data-&gt;result++;</a>
+<a name="ln58">    }</a>
+<a name="ln59">}</a>
+<a name="ln60"> </a>
+<a name="ln61">static void</a>
+<a name="ln62">do_compare_capacity2(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln63">{</a>
+<a name="ln64">    int node1_capacity = 0;</a>
+<a name="ln65">    int node2_capacity = 0;</a>
+<a name="ln66">    struct compare_data *data = user_data;</a>
+<a name="ln67"> </a>
+<a name="ln68">    if (g_hash_table_lookup_extended(data-&gt;node1-&gt;details-&gt;utilization, key, NULL, NULL)) {</a>
+<a name="ln69">        return;</a>
+<a name="ln70">    }</a>
+<a name="ln71"> </a>
+<a name="ln72">    node1_capacity = 0;</a>
+<a name="ln73">    node2_capacity = crm_parse_int(value, &quot;0&quot;);</a>
+<a name="ln74"> </a>
+<a name="ln75">    if (node1_capacity &gt; node2_capacity) {</a>
+<a name="ln76">        data-&gt;result--;</a>
+<a name="ln77">    } else if (node1_capacity &lt; node2_capacity) {</a>
+<a name="ln78">        data-&gt;result++;</a>
+<a name="ln79">    }</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">/* rc &lt; 0 if 'node1' has more capacity remaining</a>
+<a name="ln83"> * rc &gt; 0 if 'node1' has less capacity remaining</a>
+<a name="ln84"> */</a>
+<a name="ln85">int</a>
+<a name="ln86">compare_capacity(const node_t * node1, const node_t * node2)</a>
+<a name="ln87">{</a>
+<a name="ln88">    struct compare_data data;</a>
+<a name="ln89"> </a>
+<a name="ln90">    data.node1 = node1;</a>
+<a name="ln91">    data.node2 = node2;</a>
+<a name="ln92">    data.result = 0;</a>
+<a name="ln93"> </a>
+<a name="ln94">    g_hash_table_foreach(node1-&gt;details-&gt;utilization, do_compare_capacity1, &amp;data);</a>
+<a name="ln95">    g_hash_table_foreach(node2-&gt;details-&gt;utilization, do_compare_capacity2, &amp;data);</a>
+<a name="ln96"> </a>
+<a name="ln97">    return data.result;</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">struct calculate_data {</a>
+<a name="ln101">    GHashTable *current_utilization;</a>
+<a name="ln102">    gboolean plus;</a>
+<a name="ln103">};</a>
+<a name="ln104"> </a>
+<a name="ln105">static void</a>
+<a name="ln106">do_calculate_utilization(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln107">{</a>
+<a name="ln108">    const char *current = NULL;</a>
+<a name="ln109">    char *result = NULL;</a>
+<a name="ln110">    struct calculate_data *data = user_data;</a>
+<a name="ln111"> </a>
+<a name="ln112">    current = g_hash_table_lookup(data-&gt;current_utilization, key);</a>
+<a name="ln113">    if (data-&gt;plus) {</a>
+<a name="ln114">        result = crm_itoa(crm_parse_int(current, &quot;0&quot;) + crm_parse_int(value, &quot;0&quot;));</a>
+<a name="ln115">        g_hash_table_replace(data-&gt;current_utilization, strdup(key), result);</a>
+<a name="ln116"> </a>
+<a name="ln117">    } else if (current) {</a>
+<a name="ln118">        result = crm_itoa(crm_parse_int(current, &quot;0&quot;) - crm_parse_int(value, &quot;0&quot;));</a>
+<a name="ln119">        g_hash_table_replace(data-&gt;current_utilization, strdup(key), result);</a>
+<a name="ln120">    }</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123">/* Specify 'plus' to FALSE when allocating</a>
+<a name="ln124"> * Otherwise to TRUE when deallocating</a>
+<a name="ln125"> */</a>
+<a name="ln126">void</a>
+<a name="ln127">calculate_utilization(GHashTable * current_utilization,</a>
+<a name="ln128">                      GHashTable * utilization, gboolean plus)</a>
+<a name="ln129">{</a>
+<a name="ln130">    struct calculate_data data;</a>
+<a name="ln131"> </a>
+<a name="ln132">    data.current_utilization = current_utilization;</a>
+<a name="ln133">    data.plus = plus;</a>
+<a name="ln134"> </a>
+<a name="ln135">    g_hash_table_foreach(utilization, do_calculate_utilization, &amp;data);</a>
+<a name="ln136">}</a>
+<a name="ln137"> </a>
+<a name="ln138"> </a>
+<a name="ln139">struct capacity_data {</a>
+<a name="ln140">    node_t *node;</a>
+<a name="ln141">    const char *rsc_id;</a>
+<a name="ln142">    gboolean is_enough;</a>
+<a name="ln143">};</a>
+<a name="ln144"> </a>
+<a name="ln145">static void</a>
+<a name="ln146">check_capacity(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln147">{</a>
+<a name="ln148">    int required = 0;</a>
+<a name="ln149">    int remaining = 0;</a>
+<a name="ln150">    struct capacity_data *data = user_data;</a>
+<a name="ln151"> </a>
+<a name="ln152">    required = crm_parse_int(value, &quot;0&quot;);</a>
+<a name="ln153">    remaining = crm_parse_int(g_hash_table_lookup(data-&gt;node-&gt;details-&gt;utilization, key), &quot;0&quot;);</a>
+<a name="ln154"> </a>
+<a name="ln155">    if (required &gt; remaining) {</a>
+<a name="ln156">        CRM_ASSERT(data-&gt;rsc_id);</a>
+<a name="ln157">        CRM_ASSERT(data-&gt;node);</a>
+<a name="ln158"> </a>
+<a name="ln159">        crm_debug(&quot;Node %s has no enough %s for %s: required=%d remaining=%d&quot;,</a>
+<a name="ln160">                  data-&gt;node-&gt;details-&gt;uname, (char *)key, data-&gt;rsc_id, required, remaining);</a>
+<a name="ln161">        data-&gt;is_enough = FALSE;</a>
+<a name="ln162">    }</a>
+<a name="ln163">}</a>
+<a name="ln164"> </a>
+<a name="ln165">static gboolean</a>
+<a name="ln166">have_enough_capacity(node_t * node, const char * rsc_id, GHashTable * utilization)</a>
+<a name="ln167">{</a>
+<a name="ln168">    struct capacity_data data;</a>
+<a name="ln169"> </a>
+<a name="ln170">    data.node = node;</a>
+<a name="ln171">    data.rsc_id = rsc_id;</a>
+<a name="ln172">    data.is_enough = TRUE;</a>
+<a name="ln173"> </a>
+<a name="ln174">    g_hash_table_foreach(utilization, check_capacity, &amp;data);</a>
+<a name="ln175"> </a>
+<a name="ln176">    return data.is_enough;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179"> </a>
+<a name="ln180">static void</a>
+<a name="ln181">native_add_unallocated_utilization(GHashTable * all_utilization, resource_t * rsc)</a>
+<a name="ln182">{</a>
+<a name="ln183">    if(is_set(rsc-&gt;flags, pe_rsc_provisional) == FALSE) {</a>
+<a name="ln184">        return;</a>
+<a name="ln185">    }</a>
+<a name="ln186"> </a>
+<a name="ln187">    calculate_utilization(all_utilization, rsc-&gt;utilization, TRUE);</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">static void</a>
+<a name="ln191">add_unallocated_utilization(GHashTable * all_utilization, resource_t * rsc,</a>
+<a name="ln192">                    GListPtr all_rscs, resource_t * orig_rsc)</a>
+<a name="ln193">{</a>
+<a name="ln194">    if(is_set(rsc-&gt;flags, pe_rsc_provisional) == FALSE) {</a>
+<a name="ln195">        return;</a>
+<a name="ln196">    }</a>
+<a name="ln197"> </a>
+<a name="ln198">    if (rsc-&gt;variant == pe_native) {</a>
+<a name="ln199">        pe_rsc_trace(orig_rsc, &quot;%s: Adding %s as colocated utilization&quot;,</a>
+<a name="ln200">                     orig_rsc-&gt;id, rsc-&gt;id);</a>
+<a name="ln201">        native_add_unallocated_utilization(all_utilization, rsc);</a>
+<a name="ln202"> </a>
+<a name="ln203">    } else if (rsc-&gt;variant == pe_group) {</a>
+<a name="ln204">        pe_rsc_trace(orig_rsc, &quot;%s: Adding %s as colocated utilization&quot;,</a>
+<a name="ln205">                     orig_rsc-&gt;id, rsc-&gt;id);</a>
+<a name="ln206">        group_add_unallocated_utilization(all_utilization, rsc, all_rscs);</a>
+<a name="ln207"> </a>
+<a name="ln208">    } else if (pe_rsc_is_clone(rsc)) {</a>
+<a name="ln209">        GListPtr gIter1 = NULL;</a>
+<a name="ln210">        gboolean existing = FALSE;</a>
+<a name="ln211"> </a>
+<a name="ln212">        /* Check if there's any child already existing in the list */</a>
+<a name="ln213">        gIter1 = rsc-&gt;children;</a>
+<a name="ln214">        for (; gIter1 != NULL; gIter1 = gIter1-&gt;next) {</a>
+<a name="ln215">            resource_t *child = (resource_t *) gIter1-&gt;data;</a>
+<a name="ln216">            GListPtr gIter2 = NULL;</a>
+<a name="ln217"> </a>
+<a name="ln218">            if (g_list_find(all_rscs, child)) {</a>
+<a name="ln219">                existing = TRUE;</a>
+<a name="ln220"> </a>
+<a name="ln221">            } else {</a>
+<a name="ln222">                /* Check if there's any child of another cloned group already existing in the list */</a>
+<a name="ln223">                gIter2 = child-&gt;children;</a>
+<a name="ln224">                for (; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln225">                    resource_t *grandchild = (resource_t *) gIter2-&gt;data;</a>
+<a name="ln226"> </a>
+<a name="ln227">                    if (g_list_find(all_rscs, grandchild)) {</a>
+<a name="ln228">                        pe_rsc_trace(orig_rsc, &quot;%s: Adding %s as colocated utilization&quot;,</a>
+<a name="ln229">                                     orig_rsc-&gt;id, child-&gt;id);</a>
+<a name="ln230">                        add_unallocated_utilization(all_utilization, child, all_rscs, orig_rsc);</a>
+<a name="ln231">                        existing = TRUE;</a>
+<a name="ln232">                        break;</a>
+<a name="ln233">                    }</a>
+<a name="ln234">                }</a>
+<a name="ln235">            }</a>
+<a name="ln236">        }</a>
+<a name="ln237"> </a>
+<a name="ln238">        if (existing == FALSE) {</a>
+<a name="ln239">            resource_t *first_child = (resource_t *) rsc-&gt;children-&gt;data;</a>
+<a name="ln240"> </a>
+<a name="ln241">            pe_rsc_trace(orig_rsc, &quot;%s: Adding %s as colocated utilization&quot;,</a>
+<a name="ln242">                         orig_rsc-&gt;id, ID(first_child-&gt;xml));</a>
+<a name="ln243">            add_unallocated_utilization(all_utilization, first_child, all_rscs, orig_rsc);</a>
+<a name="ln244">        }</a>
+<a name="ln245">    }</a>
+<a name="ln246">}</a>
+<a name="ln247"> </a>
+<a name="ln248">static GHashTable *</a>
+<a name="ln249">sum_unallocated_utilization(resource_t * rsc, GListPtr colocated_rscs)</a>
+<a name="ln250">{</a>
+<a name="ln251">    GListPtr gIter = NULL;</a>
+<a name="ln252">    GListPtr all_rscs = NULL;</a>
+<a name="ln253">    GHashTable *all_utilization = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln254">                                          g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln255"> </a>
+<a name="ln256">    all_rscs = g_list_copy(colocated_rscs);</a>
+<a name="ln257">    if (g_list_find(all_rscs, rsc) == FALSE) {</a>
+<a name="ln258">        all_rscs = g_list_append(all_rscs, rsc);</a>
+<a name="ln259">    }</a>
+<a name="ln260"> </a>
+<a name="ln261">    for (gIter = all_rscs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln262">        resource_t *listed_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln263"> </a>
+<a name="ln264">        if(is_set(listed_rsc-&gt;flags, pe_rsc_provisional) == FALSE) {</a>
+<a name="ln265">            continue;</a>
+<a name="ln266">        }</a>
+<a name="ln267"> </a>
+<a name="ln268">        pe_rsc_trace(rsc, &quot;%s: Processing unallocated colocated %s&quot;, rsc-&gt;id, listed_rsc-&gt;id);</a>
+<a name="ln269">        add_unallocated_utilization(all_utilization, listed_rsc, all_rscs, rsc);</a>
+<a name="ln270">    }</a>
+<a name="ln271"> </a>
+<a name="ln272">    g_list_free(all_rscs);</a>
+<a name="ln273"> </a>
+<a name="ln274">    return all_utilization;</a>
+<a name="ln275">}</a>
+<a name="ln276"> </a>
+<a name="ln277">static GListPtr</a>
+<a name="ln278">find_colocated_rscs(GListPtr colocated_rscs, resource_t * rsc, resource_t * orig_rsc)</a>
+<a name="ln279">{</a>
+<a name="ln280">    GListPtr gIter = NULL;</a>
+<a name="ln281"> </a>
+<a name="ln282">    if (rsc == NULL) {</a>
+<a name="ln283">        return colocated_rscs;</a>
+<a name="ln284"> </a>
+<a name="ln285">    } else if (g_list_find(colocated_rscs, rsc)) {</a>
+<a name="ln286">        return colocated_rscs;</a>
+<a name="ln287">    }</a>
+<a name="ln288"> </a>
+<a name="ln289">    crm_trace(&quot;%s: %s is supposed to be colocated with %s&quot;, orig_rsc-&gt;id, rsc-&gt;id, orig_rsc-&gt;id);</a>
+<a name="ln290">    colocated_rscs = g_list_append(colocated_rscs, rsc);</a>
+<a name="ln291"> </a>
+<a name="ln292">    for (gIter = rsc-&gt;rsc_cons; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln293">        rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln294">        resource_t *rsc_rh = constraint-&gt;rsc_rh;</a>
+<a name="ln295"> </a>
+<a name="ln296">        /* Break colocation loop */</a>
+<a name="ln297">        if (rsc_rh == orig_rsc) {</a>
+<a name="ln298">            continue;</a>
+<a name="ln299">        }</a>
+<a name="ln300"> </a>
+<a name="ln301">        if (constraint-&gt;score == INFINITY</a>
+<a name="ln302">            &amp;&amp; filter_colocation_constraint(rsc, rsc_rh, constraint, TRUE) == influence_rsc_location) {</a>
+<a name="ln303"> </a>
+<a name="ln304">            if (rsc_rh-&gt;variant == pe_group) {</a>
+<a name="ln305">                /* Need to use group_variant_data */</a>
+<a name="ln306">                colocated_rscs = group_find_colocated_rscs(colocated_rscs, rsc_rh, orig_rsc);</a>
+<a name="ln307"> </a>
+<a name="ln308">            } else {</a>
+<a name="ln309">                colocated_rscs = find_colocated_rscs(colocated_rscs, rsc_rh, orig_rsc);</a>
+<a name="ln310">            }</a>
+<a name="ln311">        }</a>
+<a name="ln312">    }</a>
+<a name="ln313"> </a>
+<a name="ln314">    for (gIter = rsc-&gt;rsc_cons_lhs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln315">        rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln316">        resource_t *rsc_lh = constraint-&gt;rsc_lh;</a>
+<a name="ln317"> </a>
+<a name="ln318">        /* Break colocation loop */</a>
+<a name="ln319">        if (rsc_lh == orig_rsc) {</a>
+<a name="ln320">            continue;</a>
+<a name="ln321">        }</a>
+<a name="ln322"> </a>
+<a name="ln323">        if (pe_rsc_is_clone(rsc_lh) == FALSE &amp;&amp; pe_rsc_is_clone(rsc)) {</a>
+<a name="ln324">            /* We do not know if rsc_lh will be colocated with orig_rsc in this case */</a>
+<a name="ln325">            continue;</a>
+<a name="ln326">        }</a>
+<a name="ln327"> </a>
+<a name="ln328">        if (constraint-&gt;score == INFINITY</a>
+<a name="ln329">            &amp;&amp; filter_colocation_constraint(rsc_lh, rsc, constraint, TRUE) == influence_rsc_location) {</a>
+<a name="ln330"> </a>
+<a name="ln331">            if (rsc_lh-&gt;variant == pe_group) {</a>
+<a name="ln332">                /* Need to use group_variant_data */</a>
+<a name="ln333">                colocated_rscs = group_find_colocated_rscs(colocated_rscs, rsc_lh, orig_rsc);</a>
+<a name="ln334"> </a>
+<a name="ln335">            } else {</a>
+<a name="ln336">                colocated_rscs = find_colocated_rscs(colocated_rscs, rsc_lh, orig_rsc);</a>
+<a name="ln337">            }</a>
+<a name="ln338">        }</a>
+<a name="ln339">    }</a>
+<a name="ln340"> </a>
+<a name="ln341">    return colocated_rscs;</a>
+<a name="ln342">}</a>
+<a name="ln343"> </a>
+<a name="ln344">void</a>
+<a name="ln345">process_utilization(resource_t * rsc, node_t ** prefer, pe_working_set_t * data_set)</a>
+<a name="ln346">{</a>
+<a name="ln347">    int alloc_details = scores_log_level + 1;</a>
+<a name="ln348"> </a>
+<a name="ln349">    if (safe_str_neq(data_set-&gt;placement_strategy, &quot;default&quot;)) {</a>
+<a name="ln350">        GHashTableIter iter;</a>
+<a name="ln351">        GListPtr colocated_rscs = NULL;</a>
+<a name="ln352">        gboolean any_capable = FALSE;</a>
+<a name="ln353">        node_t *node = NULL;</a>
+<a name="ln354"> </a>
+<a name="ln355">        colocated_rscs = find_colocated_rscs(colocated_rscs, rsc, rsc);</a>
+<a name="ln356">        if (colocated_rscs) {</a>
+<a name="ln357">            GHashTable *unallocated_utilization = NULL;</a>
+<a name="ln358">            char *rscs_id = crm_concat(rsc-&gt;id, &quot;and its colocated resources&quot;, ' ');</a>
+<a name="ln359">            node_t *most_capable_node = NULL;</a>
+<a name="ln360"> </a>
+<a name="ln361">            unallocated_utilization = sum_unallocated_utilization(rsc, colocated_rscs);</a>
+<a name="ln362"> </a>
+<a name="ln363">            g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln364">            while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln365">                if (can_run_resources(node) == FALSE || node-&gt;weight &lt; 0) {</a>
+<a name="ln366">                    continue;</a>
+<a name="ln367">                }</a>
+<a name="ln368"> </a>
+<a name="ln369">                if (have_enough_capacity(node, rscs_id, unallocated_utilization)) {</a>
+<a name="ln370">                    any_capable = TRUE;</a>
+<a name="ln371">                }</a>
+<a name="ln372"> </a>
+<a name="ln373">                if (most_capable_node == NULL ||</a>
+<a name="ln374">                    compare_capacity(node, most_capable_node) &lt; 0) {</a>
+<a name="ln375">                    /* &lt; 0 means 'node' is more capable */</a>
+<a name="ln376">                    most_capable_node = node;</a>
+<a name="ln377">                }</a>
+<a name="ln378">            }</a>
+<a name="ln379"> </a>
+<a name="ln380">            if (any_capable) {</a>
+<a name="ln381">                g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln382">                while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln383">                    if (can_run_resources(node) == FALSE || node-&gt;weight &lt; 0) {</a>
+<a name="ln384">                        continue;</a>
+<a name="ln385">                    }</a>
+<a name="ln386"> </a>
+<a name="ln387">                    if (have_enough_capacity(node, rscs_id, unallocated_utilization) == FALSE) {</a>
+<a name="ln388">                        pe_rsc_debug(rsc, &quot;Resource %s and its colocated resources cannot be allocated to node %s: no enough capacity&quot;,</a>
+<a name="ln389">                                     rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln390">                        resource_location(rsc, node, -INFINITY, &quot;__limit_utilization__&quot;, data_set);</a>
+<a name="ln391">                    }</a>
+<a name="ln392">                }</a>
+<a name="ln393"> </a>
+<a name="ln394">            } else if (*prefer == NULL) {</a>
+<a name="ln395">                *prefer = most_capable_node;</a>
+<a name="ln396">            }</a>
+<a name="ln397"> </a>
+<a name="ln398">            if (unallocated_utilization) {</a>
+<a name="ln399">                g_hash_table_destroy(unallocated_utilization);</a>
+<a name="ln400">            }</a>
+<a name="ln401"> </a>
+<a name="ln402">            g_list_free(colocated_rscs);</a>
+<a name="ln403">            free(rscs_id);</a>
+<a name="ln404">        }</a>
+<a name="ln405"> </a>
+<a name="ln406">        if (any_capable == FALSE) {</a>
+<a name="ln407">            g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln408">            while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln409">                if (can_run_resources(node) == FALSE || node-&gt;weight &lt; 0) {</a>
+<a name="ln410">                    continue;</a>
+<a name="ln411">                }</a>
+<a name="ln412"> </a>
+<a name="ln413">                if (have_enough_capacity(node, rsc-&gt;id, rsc-&gt;utilization) == FALSE) {</a>
+<a name="ln414">                    pe_rsc_debug(rsc, &quot;Resource %s cannot be allocated to node %s: no enough capacity&quot;,</a>
+<a name="ln415">                                 rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln416">                    resource_location(rsc, node, -INFINITY, &quot;__limit_utilization__&quot;, data_set);</a>
+<a name="ln417">                }</a>
+<a name="ln418">            }</a>
+<a name="ln419">        }</a>
+<a name="ln420">        dump_node_scores(alloc_details, rsc, &quot;Post-utilization&quot;, rsc-&gt;allowed_nodes);</a>
+<a name="ln421">    }</a>
+<a name="ln422">}</a>
+<a name="ln423"> </a>
+<a name="ln424">#define VARIANT_GROUP 1</a>
+<a name="ln425">#include &lt;lib/pengine/variant.h&gt;</a>
+<a name="ln426"> </a>
+<a name="ln427">GListPtr</a>
+<a name="ln428">group_find_colocated_rscs(GListPtr colocated_rscs, resource_t * rsc, resource_t * orig_rsc)</a>
+<a name="ln429">{</a>
+<a name="ln430">    group_variant_data_t *group_data = NULL;</a>
+<a name="ln431"> </a>
+<a name="ln432">    get_group_variant_data(group_data, rsc);</a>
+<a name="ln433">    if (group_data-&gt;colocated || pe_rsc_is_clone(rsc-&gt;parent)) {</a>
+<a name="ln434">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln435"> </a>
+<a name="ln436">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln437">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln438"> </a>
+<a name="ln439">            colocated_rscs = find_colocated_rscs(colocated_rscs, child_rsc, orig_rsc);</a>
+<a name="ln440">        }</a>
+<a name="ln441"> </a>
+<a name="ln442">    } else {</a>
+<a name="ln443">        if (group_data-&gt;first_child) {</a>
+<a name="ln444">            colocated_rscs = find_colocated_rscs(colocated_rscs, group_data-&gt;first_child, orig_rsc);</a>
+<a name="ln445">        }</a>
+<a name="ln446">    }</a>
+<a name="ln447"> </a>
+<a name="ln448">    colocated_rscs = find_colocated_rscs(colocated_rscs, rsc, orig_rsc);</a>
+<a name="ln449"> </a>
+<a name="ln450">    return colocated_rscs;</a>
+<a name="ln451">}</a>
+<a name="ln452"> </a>
+<a name="ln453">static void</a>
+<a name="ln454">group_add_unallocated_utilization(GHashTable * all_utilization, resource_t * rsc,</a>
+<a name="ln455">                                  GListPtr all_rscs)</a>
+<a name="ln456">{</a>
+<a name="ln457">    group_variant_data_t *group_data = NULL;</a>
+<a name="ln458"> </a>
+<a name="ln459">    get_group_variant_data(group_data, rsc);</a>
+<a name="ln460">    if (group_data-&gt;colocated || pe_rsc_is_clone(rsc-&gt;parent)) {</a>
+<a name="ln461">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln462"> </a>
+<a name="ln463">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln464">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln465"> </a>
+<a name="ln466">            if (is_set(child_rsc-&gt;flags, pe_rsc_provisional) &amp;&amp;</a>
+<a name="ln467">                g_list_find(all_rscs, child_rsc) == FALSE) {</a>
+<a name="ln468">                native_add_unallocated_utilization(all_utilization, child_rsc);</a>
+<a name="ln469">            }</a>
+<a name="ln470">        }</a>
+<a name="ln471"> </a>
+<a name="ln472">    } else {</a>
+<a name="ln473">        if (group_data-&gt;first_child &amp;&amp;</a>
+<a name="ln474">            is_set(group_data-&gt;first_child-&gt;flags, pe_rsc_provisional) &amp;&amp;</a>
+<a name="ln475">            g_list_find(all_rscs, group_data-&gt;first_child) == FALSE) {</a>
+<a name="ln476">            native_add_unallocated_utilization(all_utilization, group_data-&gt;first_child);</a>
+<a name="ln477">        }</a>
+<a name="ln478">    }</a>
+<a name="ln479">}</a>
+<a name="ln480"> </a>
+<a name="ln481"> </a>
+
+</code></pre>
+<div class="balloon" rel="115"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 115, 115.</p></div>
+<div class="balloon" rel="119"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 119, 119.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

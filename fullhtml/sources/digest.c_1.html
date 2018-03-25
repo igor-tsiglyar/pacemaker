@@ -1,0 +1,288 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2015 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27">#include &lt;string.h&gt;</a>
+<a name="ln28">#include &lt;stdlib.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;crm/crm.h&gt;</a>
+<a name="ln31">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln32">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#define BEST_EFFORT_STATUS 0</a>
+<a name="ln35"> </a>
+<a name="ln36">/*!</a>
+<a name="ln37"> * \brief Dump XML in a format used with v1 digests</a>
+<a name="ln38"> *</a>
+<a name="ln39"> * \param[in] an_xml_node Root of XML to dump</a>
+<a name="ln40"> *</a>
+<a name="ln41"> * \return Newly allocated buffer containing dumped XML</a>
+<a name="ln42"> */</a>
+<a name="ln43">static char *</a>
+<a name="ln44">dump_xml_for_digest(xmlNode * an_xml_node)</a>
+<a name="ln45">{</a>
+<a name="ln46">    char *buffer = NULL;</a>
+<a name="ln47">    int offset = 0, max = 0;</a>
+<a name="ln48"> </a>
+<a name="ln49">    /* for compatibility with the old result which is used for v1 digests */</a>
+<a name="ln50">    crm_buffer_add_char(&amp;buffer, &amp;offset, &amp;max, ' ');</a>
+<a name="ln51">    crm_xml_dump(an_xml_node, 0, &amp;buffer, &amp;offset, &amp;max, 0);</a>
+<a name="ln52">    crm_buffer_add_char(&amp;buffer, &amp;offset, &amp;max, '\n');</a>
+<a name="ln53"> </a>
+<a name="ln54">    return buffer;</a>
+<a name="ln55">}</a>
+<a name="ln56"> </a>
+<a name="ln57">/*!</a>
+<a name="ln58"> * \brief Calculate and return v1 digest of XML tree</a>
+<a name="ln59"> *</a>
+<a name="ln60"> * \param[in] input Root of XML to digest</a>
+<a name="ln61"> * \param[in] sort Whether to sort the XML before calculating digest</a>
+<a name="ln62"> * \param[in] ignored Not used</a>
+<a name="ln63"> *</a>
+<a name="ln64"> * \return Newly allocated string containing digest</a>
+<a name="ln65"> * \note Example return value: &quot;c048eae664dba840e1d2060f00299e9d&quot;</a>
+<a name="ln66"> */</a>
+<a name="ln67">static char *</a>
+<a name="ln68">calculate_xml_digest_v1(xmlNode * input, gboolean sort, gboolean ignored)</a>
+<a name="ln69">{</a>
+<a name="ln70">    char *digest = NULL;</a>
+<a name="ln71">    char *buffer = NULL;</a>
+<a name="ln72">    xmlNode *copy = NULL;</a>
+<a name="ln73"> </a>
+<a name="ln74">    if (sort) {</a>
+<a name="ln75">        crm_trace(&quot;Sorting xml...&quot;);</a>
+<a name="ln76">        copy = sorted_xml(input, NULL, TRUE);</a>
+<a name="ln77">        crm_trace(&quot;Done&quot;);</a>
+<a name="ln78">        input = copy;</a>
+<a name="ln79">    }</a>
+<a name="ln80"> </a>
+<a name="ln81">    buffer = dump_xml_for_digest(input);</a>
+<a name="ln82">    CRM_CHECK(buffer != NULL &amp;&amp; strlen(buffer) &gt; 0, free_xml(copy);</a>
+<a name="ln83">              free(buffer);</a>
+<a name="ln84">              return NULL);</a>
+<a name="ln85"> </a>
+<a name="ln86">    digest = crm_md5sum(buffer);</a>
+<a name="ln87">    crm_log_xml_trace(input, &quot;digest:source&quot;);</a>
+<a name="ln88"> </a>
+<a name="ln89">    free(buffer);</a>
+<a name="ln90">    free_xml(copy);</a>
+<a name="ln91">    return digest;</a>
+<a name="ln92">}</a>
+<a name="ln93"> </a>
+<a name="ln94">/*!</a>
+<a name="ln95"> * \brief Calculate and return v2 digest of XML tree</a>
+<a name="ln96"> *</a>
+<a name="ln97"> * \param[in] source Root of XML to digest</a>
+<a name="ln98"> * \param[in] do_filter Whether to filter certain XML attributes</a>
+<a name="ln99"> *</a>
+<a name="ln100"> * \return Newly allocated string containing digest</a>
+<a name="ln101"> */</a>
+<a name="ln102">static char *</a>
+<a name="ln103">calculate_xml_digest_v2(xmlNode * source, gboolean do_filter)</a>
+<a name="ln104">{</a>
+<a name="ln105">    char *digest = NULL;</a>
+<a name="ln106">    char *buffer = NULL;</a>
+<a name="ln107">    int offset, max;</a>
+<a name="ln108"> </a>
+<a name="ln109">    static struct qb_log_callsite *digest_cs = NULL;</a>
+<a name="ln110"> </a>
+<a name="ln111">    crm_trace(&quot;Begin digest %s&quot;, do_filter?&quot;filtered&quot;:&quot;&quot;);</a>
+<a name="ln112">    if (do_filter &amp;&amp; BEST_EFFORT_STATUS) {</a>
+<a name="ln113">        /* Exclude the status calculation from the digest</a>
+<a name="ln114">         *</a>
+<a name="ln115">         * This doesn't mean it won't be sync'd, we just won't be paranoid</a>
+<a name="ln116">         * about it being an _exact_ copy</a>
+<a name="ln117">         *</a>
+<a name="ln118">         * We don't need it to be exact, since we throw it away and regenerate</a>
+<a name="ln119">         * from our peers whenever a new DC is elected anyway</a>
+<a name="ln120">         *</a>
+<a name="ln121">         * Importantly, this reduces the amount of XML to copy+export as</a>
+<a name="ln122">         * well as the amount of data for MD5 needs to operate on</a>
+<a name="ln123">         */</a>
+<a name="ln124"> </a>
+<a name="ln125">    } else {</a>
+<a name="ln126">        crm_xml_dump(source, do_filter ? xml_log_option_filtered : 0, &amp;buffer, &amp;offset, &amp;max, 0);</a>
+<a name="ln127">    }</a>
+<a name="ln128"> </a>
+<a name="ln129">    CRM_ASSERT(buffer != NULL);</a>
+<a name="ln130">    digest = crm_md5sum(buffer);</a>
+<a name="ln131"> </a>
+<a name="ln132">    if (digest_cs == NULL) {</a>
+<a name="ln133">        digest_cs = qb_log_callsite_get(__func__, __FILE__, &quot;cib-digest&quot;, LOG_TRACE, __LINE__,</a>
+<a name="ln134">                                        crm_trace_nonlog);</a>
+<a name="ln135">    }</a>
+<a name="ln136">    if (digest_cs &amp;&amp; digest_cs-&gt;targets) {</a>
+<a name="ln137">        char *trace_file = crm_concat(&quot;/tmp/digest&quot;, digest, '-');</a>
+<a name="ln138"> </a>
+<a name="ln139">        crm_trace(&quot;Saving %s.%s.%s to %s&quot;,</a>
+<a name="ln140">                  crm_element_value(source, XML_ATTR_GENERATION_ADMIN),</a>
+<a name="ln141">                  crm_element_value(source, XML_ATTR_GENERATION),</a>
+<a name="ln142">                  crm_element_value(source, XML_ATTR_NUMUPDATES), trace_file);</a>
+<a name="ln143">        save_xml_to_file(source, &quot;digest input&quot;, trace_file);</a>
+<a name="ln144">        free(trace_file);</a>
+<a name="ln145">    }</a>
+<a name="ln146"> </a>
+<a name="ln147">    free(buffer);</a>
+<a name="ln148">    crm_trace(&quot;End digest&quot;);</a>
+<a name="ln149">    return digest;</a>
+<a name="ln150">}</a>
+<a name="ln151"> </a>
+<a name="ln152">/*!</a>
+<a name="ln153"> * \brief Calculate and return digest of XML tree, suitable for storing on disk</a>
+<a name="ln154"> *</a>
+<a name="ln155"> * \param[in] input Root of XML to digest</a>
+<a name="ln156"> *</a>
+<a name="ln157"> * \return Newly allocated string containing digest</a>
+<a name="ln158"> */</a>
+<a name="ln159">char *</a>
+<a name="ln160">calculate_on_disk_digest(xmlNode * input)</a>
+<a name="ln161">{</a>
+<a name="ln162">    /* Always use the v1 format for on-disk digests</a>
+<a name="ln163">     * a) it's a compatibility nightmare</a>
+<a name="ln164">     * b) we only use this once at startup, all other</a>
+<a name="ln165">     *    invocations are in a separate child process</a>
+<a name="ln166">     */</a>
+<a name="ln167">    return calculate_xml_digest_v1(input, FALSE, FALSE);</a>
+<a name="ln168">}</a>
+<a name="ln169"> </a>
+<a name="ln170">/*!</a>
+<a name="ln171"> * \brief Calculate and return digest of XML operation</a>
+<a name="ln172"> *</a>
+<a name="ln173"> * \param[in] input Root of XML to digest</a>
+<a name="ln174"> * \param[in] version Not used</a>
+<a name="ln175"> *</a>
+<a name="ln176"> * \return Newly allocated string containing digest</a>
+<a name="ln177"> */</a>
+<a name="ln178">char *</a>
+<a name="ln179">calculate_operation_digest(xmlNode *input, const char *version)</a>
+<a name="ln180">{</a>
+<a name="ln181">    /* We still need the sorting for operation digests */</a>
+<a name="ln182">    return calculate_xml_digest_v1(input, TRUE, FALSE);</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">/*!</a>
+<a name="ln186"> * \brief Calculate and return digest of XML tree</a>
+<a name="ln187"> *</a>
+<a name="ln188"> * \param[in] input Root of XML to digest</a>
+<a name="ln189"> * \param[in] sort Whether to sort XML before calculating digest</a>
+<a name="ln190"> * \param[in] do_filter Whether to filter certain XML attributes</a>
+<a name="ln191"> * \param[in] version CRM feature set version (used to select v1/v2 digest)</a>
+<a name="ln192"> *</a>
+<a name="ln193"> * \return Newly allocated string containing digest</a>
+<a name="ln194"> */</a>
+<a name="ln195">char *</a>
+<a name="ln196">calculate_xml_versioned_digest(xmlNode * input, gboolean sort, gboolean do_filter,</a>
+<a name="ln197">                               const char *version)</a>
+<a name="ln198">{</a>
+<a name="ln199">    /*</a>
+<a name="ln200">     * The sorting associated with v1 digest creation accounted for 23% of</a>
+<a name="ln201">     * the CIB's CPU usage on the server. v2 drops this.</a>
+<a name="ln202">     *</a>
+<a name="ln203">     * The filtering accounts for an additional 2.5% and we may want to</a>
+<a name="ln204">     * remove it in future.</a>
+<a name="ln205">     *</a>
+<a name="ln206">     * v2 also uses the xmlBuffer contents directly to avoid additional copying</a>
+<a name="ln207">     */</a>
+<a name="ln208">    if (version == NULL || compare_version(&quot;3.0.5&quot;, version) &gt; 0) {</a>
+<a name="ln209">        crm_trace(&quot;Using v1 digest algorithm for %s&quot;, crm_str(version));</a>
+<a name="ln210">        return calculate_xml_digest_v1(input, sort, do_filter);</a>
+<a name="ln211">    }</a>
+<a name="ln212">    crm_trace(&quot;Using v2 digest algorithm for %s&quot;, crm_str(version));</a>
+<a name="ln213">    return calculate_xml_digest_v2(input, do_filter);</a>
+<a name="ln214">}</a>
+<a name="ln215"> </a>
+<a name="ln216">/*!</a>
+<a name="ln217"> * \internal</a>
+<a name="ln218"> * \brief Return whether calculated digest of XML tree matches expected digest</a>
+<a name="ln219"> *</a>
+<a name="ln220"> * \param[in] input Root of XML to digest</a>
+<a name="ln221"> * \param[in] expected Expected digest in on-disk format</a>
+<a name="ln222"> *</a>
+<a name="ln223"> * \return TRUE if digests match, FALSE otherwise or on error</a>
+<a name="ln224"> */</a>
+<a name="ln225">gboolean</a>
+<a name="ln226">crm_digest_verify(xmlNode *input, const char *expected)</a>
+<a name="ln227">{</a>
+<a name="ln228">    char *calculated = NULL;</a>
+<a name="ln229">    gboolean passed;</a>
+<a name="ln230"> </a>
+<a name="ln231">    if (input != NULL) {</a>
+<a name="ln232">        calculated = calculate_on_disk_digest(input);</a>
+<a name="ln233">        if (calculated == NULL) {</a>
+<a name="ln234">            crm_perror(LOG_ERR, &quot;Could not calculate digest for comparison&quot;);</a>
+<a name="ln235">            return FALSE;</a>
+<a name="ln236">        }</a>
+<a name="ln237">    }</a>
+<a name="ln238">    passed = safe_str_eq(expected, calculated);</a>
+<a name="ln239">    if (passed) {</a>
+<a name="ln240">        crm_trace(&quot;Digest comparison passed: %s&quot;, calculated);</a>
+<a name="ln241">    } else {</a>
+<a name="ln242">        crm_err(&quot;Digest comparison failed: expected %s, calculated %s&quot;,</a>
+<a name="ln243">                expected, calculated);</a>
+<a name="ln244">    }</a>
+<a name="ln245">    free(calculated);</a>
+<a name="ln246">    return passed;</a>
+<a name="ln247">}</a>
+
+</code></pre>
+<div class="balloon" rel="112"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always false: 0.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

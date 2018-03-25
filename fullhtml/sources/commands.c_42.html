@@ -1,0 +1,1231 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2013 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22">#include &lt;crm_internal.h&gt;</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;sys/types.h&gt;</a>
+<a name="ln25">#include &lt;regex.h&gt;</a>
+<a name="ln26">#include &lt;glib.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln29">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln30">#include &lt;crm/cib.h&gt;</a>
+<a name="ln31">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln32">#include &lt;crm/cluster/election.h&gt;</a>
+<a name="ln33">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;internal.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">/*</a>
+<a name="ln38"> * Legacy attrd (all pre-1.1.11 Pacemaker versions, plus all versions when using</a>
+<a name="ln39"> * heartbeat, CMAN, or corosync-plugin stacks) is unversioned.</a>
+<a name="ln40"> *</a>
+<a name="ln41"> * With atomic attrd, each attrd will send ATTRD_PROTOCOL_VERSION with every</a>
+<a name="ln42"> * peer request and reply. Currently, there is no way to know the minimum</a>
+<a name="ln43"> * version supported by all peers, which limits its usefulness.</a>
+<a name="ln44"> *</a>
+<a name="ln45"> * Protocol  Pacemaker  Significant changes</a>
+<a name="ln46"> * --------  ---------  -------------------</a>
+<a name="ln47"> *     1       1.1.11   ATTRD_OP_UPDATE (F_ATTRD_ATTRIBUTE only),</a>
+<a name="ln48"> *                      ATTRD_OP_PEER_REMOVE, ATTRD_OP_REFRESH, ATTRD_OP_FLUSH,</a>
+<a name="ln49"> *                      ATTRD_OP_SYNC, ATTRD_OP_SYNC_RESPONSE</a>
+<a name="ln50"> *     1       1.1.13   ATTRD_OP_UPDATE (with F_ATTR_REGEX), ATTRD_OP_QUERY</a>
+<a name="ln51"> *     1       1.1.15   ATTRD_OP_UPDATE_BOTH, ATTRD_OP_UPDATE_DELAY</a>
+<a name="ln52"> *     2       1.1.17   ATTRD_OP_CLEAR_FAILCOUNT</a>
+<a name="ln53"> */</a>
+<a name="ln54">#define ATTRD_PROTOCOL_VERSION &quot;2&quot;</a>
+<a name="ln55"> </a>
+<a name="ln56">int last_cib_op_done = 0;</a>
+<a name="ln57">char *peer_writer = NULL;</a>
+<a name="ln58">GHashTable *attributes = NULL;</a>
+<a name="ln59"> </a>
+<a name="ln60">typedef struct attribute_s {</a>
+<a name="ln61">    char *uuid; /* TODO: Remove if at all possible */</a>
+<a name="ln62">    char *id;</a>
+<a name="ln63">    char *set;</a>
+<a name="ln64"> </a>
+<a name="ln65">    GHashTable *values;</a>
+<a name="ln66"> </a>
+<a name="ln67">    int update;</a>
+<a name="ln68">    int timeout_ms;</a>
+<a name="ln69"> </a>
+<a name="ln70">    /* TODO: refactor these three as a bitmask */</a>
+<a name="ln71">    bool changed; /* whether attribute value has changed since last write */</a>
+<a name="ln72">    bool unknown_peer_uuids; /* whether we know we're missing a peer uuid */</a>
+<a name="ln73">    gboolean is_private; /* whether to keep this attribute out of the CIB */</a>
+<a name="ln74"> </a>
+<a name="ln75">    mainloop_timer_t *timer;</a>
+<a name="ln76"> </a>
+<a name="ln77">    char *user;</a>
+<a name="ln78"> </a>
+<a name="ln79">} attribute_t;</a>
+<a name="ln80"> </a>
+<a name="ln81">typedef struct attribute_value_s {</a>
+<a name="ln82">        uint32_t nodeid;</a>
+<a name="ln83">        gboolean is_remote;</a>
+<a name="ln84">        char *nodename;</a>
+<a name="ln85">        char *current;</a>
+<a name="ln86">        char *requested;</a>
+<a name="ln87">} attribute_value_t;</a>
+<a name="ln88"> </a>
+<a name="ln89"> </a>
+<a name="ln90">void write_attribute(attribute_t *a);</a>
+<a name="ln91">void write_or_elect_attribute(attribute_t *a);</a>
+<a name="ln92">void attrd_peer_update(crm_node_t *peer, xmlNode *xml, const char *host, bool filter);</a>
+<a name="ln93">void attrd_peer_sync(crm_node_t *peer, xmlNode *xml);</a>
+<a name="ln94">void attrd_peer_remove(const char *host, gboolean uncache, const char *source);</a>
+<a name="ln95"> </a>
+<a name="ln96">static gboolean</a>
+<a name="ln97">send_attrd_message(crm_node_t * node, xmlNode * data)</a>
+<a name="ln98">{</a>
+<a name="ln99">    crm_xml_add(data, F_TYPE, T_ATTRD);</a>
+<a name="ln100">    crm_xml_add(data, F_ATTRD_IGNORE_LOCALLY, &quot;atomic-version&quot;); /* Tell older versions to ignore our messages */</a>
+<a name="ln101">    crm_xml_add(data, F_ATTRD_VERSION, ATTRD_PROTOCOL_VERSION);</a>
+<a name="ln102">    crm_xml_add_int(data, F_ATTRD_WRITER, election_state(writer));</a>
+<a name="ln103"> </a>
+<a name="ln104">    return send_cluster_message(node, crm_msg_attrd, data, TRUE);</a>
+<a name="ln105">}</a>
+<a name="ln106"> </a>
+<a name="ln107">static gboolean</a>
+<a name="ln108">attribute_timer_cb(gpointer data)</a>
+<a name="ln109">{</a>
+<a name="ln110">    attribute_t *a = data;</a>
+<a name="ln111">    crm_trace(&quot;Dampen interval expired for %s in state %d&quot;, a-&gt;id, election_state(writer));</a>
+<a name="ln112">    write_or_elect_attribute(a);</a>
+<a name="ln113">    return FALSE;</a>
+<a name="ln114">}</a>
+<a name="ln115"> </a>
+<a name="ln116">static void</a>
+<a name="ln117">free_attribute_value(gpointer data)</a>
+<a name="ln118">{</a>
+<a name="ln119">    attribute_value_t *v = data;</a>
+<a name="ln120"> </a>
+<a name="ln121">    free(v-&gt;nodename);</a>
+<a name="ln122">    free(v-&gt;current);</a>
+<a name="ln123">    free(v-&gt;requested);</a>
+<a name="ln124">    free(v);</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">void</a>
+<a name="ln128">free_attribute(gpointer data)</a>
+<a name="ln129">{</a>
+<a name="ln130">    attribute_t *a = data;</a>
+<a name="ln131">    if(a) {</a>
+<a name="ln132">        free(a-&gt;id);</a>
+<a name="ln133">        free(a-&gt;set);</a>
+<a name="ln134">        free(a-&gt;uuid);</a>
+<a name="ln135">        free(a-&gt;user);</a>
+<a name="ln136"> </a>
+<a name="ln137">        mainloop_timer_del(a-&gt;timer);</a>
+<a name="ln138">        g_hash_table_destroy(a-&gt;values);</a>
+<a name="ln139"> </a>
+<a name="ln140">        free(a);</a>
+<a name="ln141">    }</a>
+<a name="ln142">}</a>
+<a name="ln143"> </a>
+<a name="ln144">static xmlNode *</a>
+<a name="ln145">build_attribute_xml(</a>
+<a name="ln146">    xmlNode *parent, const char *name, const char *set, const char *uuid, unsigned int timeout_ms, const char *user,</a>
+<a name="ln147">    gboolean is_private, const char *peer, uint32_t peerid, const char *value)</a>
+<a name="ln148">{</a>
+<a name="ln149">    xmlNode *xml = create_xml_node(parent, __FUNCTION__);</a>
+<a name="ln150"> </a>
+<a name="ln151">    crm_xml_add(xml, F_ATTRD_ATTRIBUTE, name);</a>
+<a name="ln152">    crm_xml_add(xml, F_ATTRD_SET, set);</a>
+<a name="ln153">    crm_xml_add(xml, F_ATTRD_KEY, uuid);</a>
+<a name="ln154">    crm_xml_add(xml, F_ATTRD_USER, user);</a>
+<a name="ln155">    crm_xml_add(xml, F_ATTRD_HOST, peer);</a>
+<a name="ln156">    crm_xml_add_int(xml, F_ATTRD_HOST_ID, peerid);</a>
+<a name="ln157">    crm_xml_add(xml, F_ATTRD_VALUE, value);</a>
+<a name="ln158">    crm_xml_add_int(xml, F_ATTRD_DAMPEN, timeout_ms/1000);</a>
+<a name="ln159">    crm_xml_add_int(xml, F_ATTRD_IS_PRIVATE, is_private);</a>
+<a name="ln160"> </a>
+<a name="ln161">    return xml;</a>
+<a name="ln162">}</a>
+<a name="ln163"> </a>
+<a name="ln164">static attribute_t *</a>
+<a name="ln165">create_attribute(xmlNode *xml)</a>
+<a name="ln166">{</a>
+<a name="ln167">    int dampen = 0;</a>
+<a name="ln168">    const char *value = crm_element_value(xml, F_ATTRD_DAMPEN);</a>
+<a name="ln169">    attribute_t *a = calloc(1, sizeof(attribute_t));</a>
+<a name="ln170"> </a>
+<a name="ln171">    a-&gt;id      = crm_element_value_copy(xml, F_ATTRD_ATTRIBUTE);</a>
+<a name="ln172">    a-&gt;set     = crm_element_value_copy(xml, F_ATTRD_SET);</a>
+<a name="ln173">    a-&gt;uuid    = crm_element_value_copy(xml, F_ATTRD_KEY);</a>
+<a name="ln174">    a-&gt;values = g_hash_table_new_full(crm_strcase_hash, crm_strcase_equal, NULL, free_attribute_value);</a>
+<a name="ln175"> </a>
+<a name="ln176">    crm_element_value_int(xml, F_ATTRD_IS_PRIVATE, &amp;a-&gt;is_private);</a>
+<a name="ln177"> </a>
+<a name="ln178">#if ENABLE_ACL</a>
+<a name="ln179">    crm_trace(&quot;Performing all %s operations as user '%s'&quot;, a-&gt;id, a-&gt;user);</a>
+<a name="ln180">    a-&gt;user = crm_element_value_copy(xml, F_ATTRD_USER);</a>
+<a name="ln181">#endif</a>
+<a name="ln182"> </a>
+<a name="ln183">    if(value) {</a>
+<a name="ln184">        dampen = crm_get_msec(value);</a>
+<a name="ln185">        crm_trace(&quot;Created attribute %s with delay %dms (%s)&quot;, a-&gt;id, dampen, value);</a>
+<a name="ln186">    } else {</a>
+<a name="ln187">        crm_trace(&quot;Created attribute %s with no delay&quot;, a-&gt;id);</a>
+<a name="ln188">    }</a>
+<a name="ln189"> </a>
+<a name="ln190">    if(dampen &gt; 0) {</a>
+<a name="ln191">        a-&gt;timeout_ms = dampen;</a>
+<a name="ln192">        a-&gt;timer = mainloop_timer_add(a-&gt;id, a-&gt;timeout_ms, FALSE, attribute_timer_cb, a);</a>
+<a name="ln193">    } else if (dampen &lt; 0) {</a>
+<a name="ln194">	crm_warn(&quot;Ignoring invalid delay %s for attribute %s&quot;, value, a-&gt;id);</a>
+<a name="ln195">    }</a>
+<a name="ln196"> </a>
+<a name="ln197">    g_hash_table_replace(attributes, a-&gt;id, a);</a>
+<a name="ln198">    return a;</a>
+<a name="ln199">}</a>
+<a name="ln200"> </a>
+<a name="ln201">/*!</a>
+<a name="ln202"> * \internal</a>
+<a name="ln203"> * \brief Respond to a client peer-remove request (i.e. propagate to all peers)</a>
+<a name="ln204"> *</a>
+<a name="ln205"> * \param[in] client_name Name of client that made request (for log messages)</a>
+<a name="ln206"> * \param[in] xml         Root of request XML</a>
+<a name="ln207"> *</a>
+<a name="ln208"> * \return void</a>
+<a name="ln209"> */</a>
+<a name="ln210">void</a>
+<a name="ln211">attrd_client_peer_remove(const char *client_name, xmlNode *xml)</a>
+<a name="ln212">{</a>
+<a name="ln213">    const char *host = crm_element_value(xml, F_ATTRD_HOST);</a>
+<a name="ln214"> </a>
+<a name="ln215">    if (host) {</a>
+<a name="ln216">        crm_info(&quot;Client %s is requesting all values for %s be removed&quot;,</a>
+<a name="ln217">                 client_name, host);</a>
+<a name="ln218">        send_attrd_message(NULL, xml); /* ends up at attrd_peer_message() */</a>
+<a name="ln219">    } else {</a>
+<a name="ln220">        crm_info(&quot;Ignoring request by client %s to remove all peer values without specifying peer&quot;,</a>
+<a name="ln221">                 client_name);</a>
+<a name="ln222">    }</a>
+<a name="ln223">}</a>
+<a name="ln224"> </a>
+<a name="ln225">/*!</a>
+<a name="ln226"> * \internal</a>
+<a name="ln227"> * \brief Respond to a client update request</a>
+<a name="ln228"> *</a>
+<a name="ln229"> * \param[in] xml         Root of request XML</a>
+<a name="ln230"> *</a>
+<a name="ln231"> * \return void</a>
+<a name="ln232"> */</a>
+<a name="ln233">void</a>
+<a name="ln234">attrd_client_update(xmlNode *xml)</a>
+<a name="ln235">{</a>
+<a name="ln236">    attribute_t *a = NULL;</a>
+<a name="ln237">    char *host = crm_element_value_copy(xml, F_ATTRD_HOST);</a>
+<a name="ln238">    const char *attr = crm_element_value(xml, F_ATTRD_ATTRIBUTE);</a>
+<a name="ln239">    const char *value = crm_element_value(xml, F_ATTRD_VALUE);</a>
+<a name="ln240">    const char *regex = crm_element_value(xml, F_ATTRD_REGEX);</a>
+<a name="ln241"> </a>
+<a name="ln242">    /* If a regex was specified, broadcast a message for each match */</a>
+<a name="ln243">    if ((attr == NULL) &amp;&amp; regex) {</a>
+<a name="ln244">        GHashTableIter aIter;</a>
+<a name="ln245">        regex_t *r_patt = calloc(1, sizeof(regex_t));</a>
+<a name="ln246"> </a>
+<a name="ln247">        crm_debug(&quot;Setting %s to %s&quot;, regex, value);</a>
+<a name="ln248">        if (regcomp(r_patt, regex, REG_EXTENDED)) {</a>
+<a name="ln249">            crm_err(&quot;Bad regex '%s' for update&quot;, regex);</a>
+<a name="ln250"> </a>
+<a name="ln251">        } else {</a>
+<a name="ln252">            g_hash_table_iter_init(&amp;aIter, attributes);</a>
+<a name="ln253">            while (g_hash_table_iter_next(&amp;aIter, (gpointer *) &amp; attr, NULL)) {</a>
+<a name="ln254">                int status = regexec(r_patt, attr, 0, NULL, 0);</a>
+<a name="ln255"> </a>
+<a name="ln256">                if (status == 0) {</a>
+<a name="ln257">                    crm_trace(&quot;Matched %s with %s&quot;, attr, regex);</a>
+<a name="ln258">                    crm_xml_add(xml, F_ATTRD_ATTRIBUTE, attr);</a>
+<a name="ln259">                    send_attrd_message(NULL, xml);</a>
+<a name="ln260">                }</a>
+<a name="ln261">            }</a>
+<a name="ln262">        }</a>
+<a name="ln263"> </a>
+<a name="ln264">        free(host);</a>
+<a name="ln265">        regfree(r_patt);</a>
+<a name="ln266">        free(r_patt);</a>
+<a name="ln267">        return;</a>
+<a name="ln268"> </a>
+<a name="ln269">    } else if (attr == NULL) {</a>
+<a name="ln270">        crm_err(&quot;Update request did not specify attribute or regular expression&quot;);</a>
+<a name="ln271">        free(host);</a>
+<a name="ln272">        return;</a>
+<a name="ln273">    }</a>
+<a name="ln274"> </a>
+<a name="ln275">    if (host == NULL) {</a>
+<a name="ln276">        crm_trace(&quot;Inferring host&quot;);</a>
+<a name="ln277">        host = strdup(attrd_cluster-&gt;uname);</a>
+<a name="ln278">        crm_xml_add(xml, F_ATTRD_HOST, host);</a>
+<a name="ln279">        crm_xml_add_int(xml, F_ATTRD_HOST_ID, attrd_cluster-&gt;nodeid);</a>
+<a name="ln280">    }</a>
+<a name="ln281"> </a>
+<a name="ln282">    a = g_hash_table_lookup(attributes, attr);</a>
+<a name="ln283"> </a>
+<a name="ln284">    /* If value was specified using ++ or += notation, expand to real value */</a>
+<a name="ln285">    if (value) {</a>
+<a name="ln286">        if (attrd_value_needs_expansion(value)) {</a>
+<a name="ln287">            int int_value;</a>
+<a name="ln288">            attribute_value_t *v = NULL;</a>
+<a name="ln289"> </a>
+<a name="ln290">            if (a) {</a>
+<a name="ln291">                v = g_hash_table_lookup(a-&gt;values, host);</a>
+<a name="ln292">            }</a>
+<a name="ln293">            int_value = attrd_expand_value(value, (v? v-&gt;current : NULL));</a>
+<a name="ln294"> </a>
+<a name="ln295">            crm_info(&quot;Expanded %s=%s to %d&quot;, attr, value, int_value);</a>
+<a name="ln296">            crm_xml_add_int(xml, F_ATTRD_VALUE, int_value);</a>
+<a name="ln297"> </a>
+<a name="ln298">            /* Replacing the value frees the previous memory, so re-query it */</a>
+<a name="ln299">            value = crm_element_value(xml, F_ATTRD_VALUE);</a>
+<a name="ln300">        }</a>
+<a name="ln301">    }</a>
+<a name="ln302"> </a>
+<a name="ln303">    if ((peer_writer == NULL) &amp;&amp; (election_state(writer) != election_in_progress)) {</a>
+<a name="ln304">        crm_info(&quot;Starting an election to determine the writer&quot;);</a>
+<a name="ln305">        election_vote(writer);</a>
+<a name="ln306">    }</a>
+<a name="ln307"> </a>
+<a name="ln308">    crm_debug(&quot;Broadcasting %s[%s] = %s%s&quot;, attr, host, value,</a>
+<a name="ln309">              ((election_state(writer) == election_won)? &quot; (writer)&quot; : &quot;&quot;));</a>
+<a name="ln310"> </a>
+<a name="ln311">    free(host);</a>
+<a name="ln312"> </a>
+<a name="ln313">    send_attrd_message(NULL, xml); /* ends up at attrd_peer_message() */</a>
+<a name="ln314">}</a>
+<a name="ln315"> </a>
+<a name="ln316">/*!</a>
+<a name="ln317"> * \internal</a>
+<a name="ln318"> * \brief Respond to client clear-failure request</a>
+<a name="ln319"> *</a>
+<a name="ln320"> * \param[in] xml         Request XML</a>
+<a name="ln321"> */</a>
+<a name="ln322">void</a>
+<a name="ln323">attrd_client_clear_failure(xmlNode *xml)</a>
+<a name="ln324">{</a>
+<a name="ln325">#if 0</a>
+<a name="ln326">    /* @TODO This would be most efficient, but there is currently no way to</a>
+<a name="ln327">     * verify that all peers support the op. If that ever changes, we could</a>
+<a name="ln328">     * enable this code.</a>
+<a name="ln329">     */</a>
+<a name="ln330">    if (all_peers_support_clear_failure) {</a>
+<a name="ln331">        /* Propagate to all peers (including ourselves).</a>
+<a name="ln332">         * This ends up at attrd_peer_message().</a>
+<a name="ln333">         */</a>
+<a name="ln334">        send_attrd_message(NULL, xml);</a>
+<a name="ln335">        return;</a>
+<a name="ln336">    }</a>
+<a name="ln337">#endif</a>
+<a name="ln338"> </a>
+<a name="ln339">    const char *rsc = crm_element_value(xml, F_ATTRD_RESOURCE);</a>
+<a name="ln340">    const char *op = crm_element_value(xml, F_ATTRD_OPERATION);</a>
+<a name="ln341">    const char *interval_s = crm_element_value(xml, F_ATTRD_INTERVAL);</a>
+<a name="ln342"> </a>
+<a name="ln343">    /* Map this to an update */</a>
+<a name="ln344">    crm_xml_add(xml, F_ATTRD_TASK, ATTRD_OP_UPDATE);</a>
+<a name="ln345"> </a>
+<a name="ln346">    /* Add regular expression matching desired attributes */</a>
+<a name="ln347"> </a>
+<a name="ln348">    if (rsc) {</a>
+<a name="ln349">        char *pattern;</a>
+<a name="ln350"> </a>
+<a name="ln351">        if (op == NULL) {</a>
+<a name="ln352">            pattern = crm_strdup_printf(ATTRD_RE_CLEAR_ONE, rsc);</a>
+<a name="ln353"> </a>
+<a name="ln354">        } else {</a>
+<a name="ln355">            int interval = crm_get_interval(interval_s);</a>
+<a name="ln356"> </a>
+<a name="ln357">            pattern = crm_strdup_printf(ATTRD_RE_CLEAR_OP,</a>
+<a name="ln358">                                        rsc, op, interval);</a>
+<a name="ln359">        }</a>
+<a name="ln360"> </a>
+<a name="ln361">        crm_xml_add(xml, F_ATTRD_REGEX, pattern);</a>
+<a name="ln362">        free(pattern);</a>
+<a name="ln363"> </a>
+<a name="ln364">    } else {</a>
+<a name="ln365">        crm_xml_add(xml, F_ATTRD_REGEX, ATTRD_RE_CLEAR_ALL);</a>
+<a name="ln366">    }</a>
+<a name="ln367"> </a>
+<a name="ln368">    /* Make sure attribute and value are not set, so we delete via regex */</a>
+<a name="ln369">    if (crm_element_value(xml, F_ATTRD_ATTRIBUTE)) {</a>
+<a name="ln370">        crm_xml_replace(xml, F_ATTRD_ATTRIBUTE, NULL);</a>
+<a name="ln371">    }</a>
+<a name="ln372">    if (crm_element_value(xml, F_ATTRD_VALUE)) {</a>
+<a name="ln373">        crm_xml_replace(xml, F_ATTRD_VALUE, NULL);</a>
+<a name="ln374">    }</a>
+<a name="ln375"> </a>
+<a name="ln376">    attrd_client_update(xml);</a>
+<a name="ln377">}</a>
+<a name="ln378"> </a>
+<a name="ln379">/*!</a>
+<a name="ln380"> * \internal</a>
+<a name="ln381"> * \brief Respond to a client refresh request (i.e. write out all attributes)</a>
+<a name="ln382"> *</a>
+<a name="ln383"> * \return void</a>
+<a name="ln384"> */</a>
+<a name="ln385">void</a>
+<a name="ln386">attrd_client_refresh(void)</a>
+<a name="ln387">{</a>
+<a name="ln388">    GHashTableIter iter;</a>
+<a name="ln389">    attribute_t *a = NULL;</a>
+<a name="ln390"> </a>
+<a name="ln391">    /* 'refresh' forces a write of the current value of all attributes</a>
+<a name="ln392">     * Cancel any existing timers, we're writing it NOW</a>
+<a name="ln393">     */</a>
+<a name="ln394">    g_hash_table_iter_init(&amp;iter, attributes);</a>
+<a name="ln395">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp; a)) {</a>
+<a name="ln396">        mainloop_timer_stop(a-&gt;timer);</a>
+<a name="ln397">    }</a>
+<a name="ln398"> </a>
+<a name="ln399">    crm_info(&quot;Updating all attributes&quot;);</a>
+<a name="ln400">    write_attributes(TRUE, FALSE);</a>
+<a name="ln401">}</a>
+<a name="ln402"> </a>
+<a name="ln403">/*!</a>
+<a name="ln404"> * \internal</a>
+<a name="ln405"> * \brief Build the XML reply to a client query</a>
+<a name="ln406"> *</a>
+<a name="ln407"> * param[in] attr Name of requested attribute</a>
+<a name="ln408"> * param[in] host Name of requested host (or NULL for all hosts)</a>
+<a name="ln409"> *</a>
+<a name="ln410"> * \return New XML reply</a>
+<a name="ln411"> * \note Caller is responsible for freeing the resulting XML</a>
+<a name="ln412"> */</a>
+<a name="ln413">static xmlNode *build_query_reply(const char *attr, const char *host)</a>
+<a name="ln414">{</a>
+<a name="ln415">    xmlNode *reply = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln416">    attribute_t *a;</a>
+<a name="ln417"> </a>
+<a name="ln418">    if (reply == NULL) {</a>
+<a name="ln419">        return NULL;</a>
+<a name="ln420">    }</a>
+<a name="ln421">    crm_xml_add(reply, F_TYPE, T_ATTRD);</a>
+<a name="ln422">    crm_xml_add(reply, F_ATTRD_VERSION, ATTRD_PROTOCOL_VERSION);</a>
+<a name="ln423"> </a>
+<a name="ln424">    /* If desired attribute exists, add its value(s) to the reply */</a>
+<a name="ln425">    a = g_hash_table_lookup(attributes, attr);</a>
+<a name="ln426">    if (a) {</a>
+<a name="ln427">        attribute_value_t *v;</a>
+<a name="ln428">        xmlNode *host_value;</a>
+<a name="ln429"> </a>
+<a name="ln430">        crm_xml_add(reply, F_ATTRD_ATTRIBUTE, attr);</a>
+<a name="ln431"> </a>
+<a name="ln432">        /* Allow caller to use &quot;localhost&quot; to refer to local node */</a>
+<a name="ln433">        if (safe_str_eq(host, &quot;localhost&quot;)) {</a>
+<a name="ln434">            host = attrd_cluster-&gt;uname;</a>
+<a name="ln435">            crm_trace(&quot;Mapped localhost to %s&quot;, host);</a>
+<a name="ln436">        }</a>
+<a name="ln437"> </a>
+<a name="ln438">        /* If a specific node was requested, add its value */</a>
+<a name="ln439">        if (host) {</a>
+<a name="ln440">            v = g_hash_table_lookup(a-&gt;values, host);</a>
+<a name="ln441">            host_value = create_xml_node(reply, XML_CIB_TAG_NODE);</a>
+<a name="ln442">            if (host_value == NULL) {</a>
+<a name="ln443">                free_xml(reply);</a>
+<a name="ln444">                return NULL;</a>
+<a name="ln445">            }</a>
+<a name="ln446">            crm_xml_add(host_value, F_ATTRD_HOST, host);</a>
+<a name="ln447">            crm_xml_add(host_value, F_ATTRD_VALUE, (v? v-&gt;current : NULL));</a>
+<a name="ln448"> </a>
+<a name="ln449">        /* Otherwise, add all nodes' values */</a>
+<a name="ln450">        } else {</a>
+<a name="ln451">            GHashTableIter iter;</a>
+<a name="ln452"> </a>
+<a name="ln453">            g_hash_table_iter_init(&amp;iter, a-&gt;values);</a>
+<a name="ln454">            while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp;v)) {</a>
+<a name="ln455">                host_value = create_xml_node(reply, XML_CIB_TAG_NODE);</a>
+<a name="ln456">                if (host_value == NULL) {</a>
+<a name="ln457">                    free_xml(reply);</a>
+<a name="ln458">                    return NULL;</a>
+<a name="ln459">                }</a>
+<a name="ln460">                crm_xml_add(host_value, F_ATTRD_HOST, v-&gt;nodename);</a>
+<a name="ln461">                crm_xml_add(host_value, F_ATTRD_VALUE, v-&gt;current);</a>
+<a name="ln462">            }</a>
+<a name="ln463">        }</a>
+<a name="ln464">    }</a>
+<a name="ln465">    return reply;</a>
+<a name="ln466">}</a>
+<a name="ln467"> </a>
+<a name="ln468">/*!</a>
+<a name="ln469"> * \internal</a>
+<a name="ln470"> * \brief Respond to a client query</a>
+<a name="ln471"> *</a>
+<a name="ln472"> * \param[in] client Who queried us</a>
+<a name="ln473"> * \param[in] query  Root of query XML</a>
+<a name="ln474"> *</a>
+<a name="ln475"> * \return void</a>
+<a name="ln476"> */</a>
+<a name="ln477">void</a>
+<a name="ln478">attrd_client_query(crm_client_t *client, uint32_t id, uint32_t flags, xmlNode *query)</a>
+<a name="ln479">{</a>
+<a name="ln480">    const char *attr;</a>
+<a name="ln481">    const char *origin = crm_element_value(query, F_ORIG);</a>
+<a name="ln482">    ssize_t rc;</a>
+<a name="ln483">    xmlNode *reply;</a>
+<a name="ln484"> </a>
+<a name="ln485">    if (origin == NULL) {</a>
+<a name="ln486">        origin = &quot;unknown client&quot;;</a>
+<a name="ln487">    }</a>
+<a name="ln488">    crm_debug(&quot;Query arrived from %s&quot;, origin);</a>
+<a name="ln489"> </a>
+<a name="ln490">    /* Request must specify attribute name to query */</a>
+<a name="ln491">    attr = crm_element_value(query, F_ATTRD_ATTRIBUTE);</a>
+<a name="ln492">    if (attr == NULL) {</a>
+<a name="ln493">        crm_warn(&quot;Ignoring malformed query from %s (no attribute name given)&quot;,</a>
+<a name="ln494">                 origin);</a>
+<a name="ln495">        return;</a>
+<a name="ln496">    }</a>
+<a name="ln497"> </a>
+<a name="ln498">    /* Build the XML reply */</a>
+<a name="ln499">    reply = build_query_reply(attr, crm_element_value(query, F_ATTRD_HOST));</a>
+<a name="ln500">    if (reply == NULL) {</a>
+<a name="ln501">        crm_err(&quot;Could not respond to query from %s: could not create XML reply&quot;,</a>
+<a name="ln502">                 origin);</a>
+<a name="ln503">        return;</a>
+<a name="ln504">    }</a>
+<a name="ln505">    crm_log_xml_trace(reply, &quot;Reply&quot;);</a>
+<a name="ln506"> </a>
+<a name="ln507">    /* Send the reply to the client */</a>
+<a name="ln508">    client-&gt;request_id = 0;</a>
+<a name="ln509">    if ((rc = crm_ipcs_send(client, id, reply, flags)) &lt; 0) {</a>
+<a name="ln510">        crm_err(&quot;Could not respond to query from %s: %s (%d)&quot;,</a>
+<a name="ln511">                origin, pcmk_strerror(-rc), -rc);</a>
+<a name="ln512">    }</a>
+<a name="ln513">    free_xml(reply);</a>
+<a name="ln514">}</a>
+<a name="ln515"> </a>
+<a name="ln516">/*!</a>
+<a name="ln517"> * \internal</a>
+<a name="ln518"> * \brief Clear failure-related attributes</a>
+<a name="ln519"> *</a>
+<a name="ln520"> * \param[in] peer  Peer that sent clear request</a>
+<a name="ln521"> * \param[in] xml   Request XML</a>
+<a name="ln522"> */</a>
+<a name="ln523">static void</a>
+<a name="ln524">attrd_peer_clear_failure(crm_node_t *peer, xmlNode *xml)</a>
+<a name="ln525">{</a>
+<a name="ln526">    const char *rsc = crm_element_value(xml, F_ATTRD_RESOURCE);</a>
+<a name="ln527">    const char *host = crm_element_value(xml, F_ATTRD_HOST);</a>
+<a name="ln528">    const char *op = crm_element_value(xml, F_ATTRD_OPERATION);</a>
+<a name="ln529">    const char *interval_s = crm_element_value(xml, F_ATTRD_INTERVAL);</a>
+<a name="ln530">    int interval = crm_get_interval(interval_s);</a>
+<a name="ln531">    char *attr = NULL;</a>
+<a name="ln532">    GHashTableIter iter;</a>
+<a name="ln533">    regex_t regex;</a>
+<a name="ln534"> </a>
+<a name="ln535">    if (attrd_failure_regex(&amp;regex, rsc, op, interval) != pcmk_ok) {</a>
+<a name="ln536">        crm_info(&quot;Ignoring invalid request to clear failures for %s&quot;,</a>
+<a name="ln537">                 (rsc? rsc : &quot;all resources&quot;));</a>
+<a name="ln538">        return;</a>
+<a name="ln539">    }</a>
+<a name="ln540"> </a>
+<a name="ln541">    crm_xml_add(xml, F_ATTRD_TASK, ATTRD_OP_UPDATE);</a>
+<a name="ln542"> </a>
+<a name="ln543">    /* Make sure value is not set, so we delete */</a>
+<a name="ln544">    if (crm_element_value(xml, F_ATTRD_VALUE)) {</a>
+<a name="ln545">        crm_xml_replace(xml, F_ATTRD_VALUE, NULL);</a>
+<a name="ln546">    }</a>
+<a name="ln547"> </a>
+<a name="ln548">    g_hash_table_iter_init(&amp;iter, attributes);</a>
+<a name="ln549">    while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp;attr, NULL)) {</a>
+<a name="ln550">        if (regexec(&amp;regex, attr, 0, NULL, 0) == 0) {</a>
+<a name="ln551">            crm_trace(&quot;Matched %s when clearing %s&quot;,</a>
+<a name="ln552">                      attr, (rsc? rsc : &quot;all resources&quot;));</a>
+<a name="ln553">            crm_xml_add(xml, F_ATTRD_ATTRIBUTE, attr);</a>
+<a name="ln554">            attrd_peer_update(peer, xml, host, FALSE);</a>
+<a name="ln555">        }</a>
+<a name="ln556">    }</a>
+<a name="ln557">    regfree(&amp;regex);</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">void</a>
+<a name="ln561">attrd_peer_message(crm_node_t *peer, xmlNode *xml)</a>
+<a name="ln562">{</a>
+<a name="ln563">    int peer_state = 0;</a>
+<a name="ln564">    const char *v = crm_element_value(xml, F_ATTRD_VERSION);</a>
+<a name="ln565">    const char *op = crm_element_value(xml, F_ATTRD_TASK);</a>
+<a name="ln566">    const char *election_op = crm_element_value(xml, F_CRM_TASK);</a>
+<a name="ln567">    const char *host = crm_element_value(xml, F_ATTRD_HOST);</a>
+<a name="ln568"> </a>
+<a name="ln569">    if(election_op) {</a>
+<a name="ln570">        enum election_result rc = 0;</a>
+<a name="ln571"> </a>
+<a name="ln572">        crm_xml_add(xml, F_CRM_HOST_FROM, peer-&gt;uname);</a>
+<a name="ln573">        rc = election_count_vote(writer, xml, TRUE);</a>
+<a name="ln574">        switch(rc) {</a>
+<a name="ln575">            case election_start:</a>
+<a name="ln576">                free(peer_writer);</a>
+<a name="ln577">                peer_writer = NULL;</a>
+<a name="ln578">                election_vote(writer);</a>
+<a name="ln579">                break;</a>
+<a name="ln580">            case election_lost:</a>
+<a name="ln581">                free(peer_writer);</a>
+<a name="ln582">                peer_writer = strdup(peer-&gt;uname);</a>
+<a name="ln583">                break;</a>
+<a name="ln584">            default:</a>
+<a name="ln585">                election_check(writer);</a>
+<a name="ln586">                break;</a>
+<a name="ln587">        }</a>
+<a name="ln588">        return;</a>
+<a name="ln589"> </a>
+<a name="ln590">    } else if(v == NULL) {</a>
+<a name="ln591">        /* From the non-atomic version */</a>
+<a name="ln592">        if (safe_str_eq(op, ATTRD_OP_UPDATE)) {</a>
+<a name="ln593">            const char *name = crm_element_value(xml, F_ATTRD_ATTRIBUTE);</a>
+<a name="ln594"> </a>
+<a name="ln595">            crm_trace(&quot;Compatibility update of %s from %s&quot;, name, peer-&gt;uname);</a>
+<a name="ln596">            attrd_peer_update(peer, xml, host, FALSE);</a>
+<a name="ln597"> </a>
+<a name="ln598">        } else if (safe_str_eq(op, ATTRD_OP_FLUSH)) {</a>
+<a name="ln599">            const char *name = crm_element_value(xml, F_ATTRD_ATTRIBUTE);</a>
+<a name="ln600">            attribute_t *a = g_hash_table_lookup(attributes, name);</a>
+<a name="ln601"> </a>
+<a name="ln602">            if(a) {</a>
+<a name="ln603">                crm_trace(&quot;Compatibility write-out of %s for %s from %s&quot;, a-&gt;id, op, peer-&gt;uname);</a>
+<a name="ln604">                write_or_elect_attribute(a);</a>
+<a name="ln605">            }</a>
+<a name="ln606"> </a>
+<a name="ln607">        } else if (safe_str_eq(op, ATTRD_OP_REFRESH)) {</a>
+<a name="ln608">            GHashTableIter aIter;</a>
+<a name="ln609">            attribute_t *a = NULL;</a>
+<a name="ln610"> </a>
+<a name="ln611">            g_hash_table_iter_init(&amp;aIter, attributes);</a>
+<a name="ln612">            while (g_hash_table_iter_next(&amp;aIter, NULL, (gpointer *) &amp; a)) {</a>
+<a name="ln613">                crm_trace(&quot;Compatibility write-out of %s for %s from %s&quot;, a-&gt;id, op, peer-&gt;uname);</a>
+<a name="ln614">                write_or_elect_attribute(a);</a>
+<a name="ln615">            }</a>
+<a name="ln616">        }</a>
+<a name="ln617">    }</a>
+<a name="ln618"> </a>
+<a name="ln619">    crm_element_value_int(xml, F_ATTRD_WRITER, &amp;peer_state);</a>
+<a name="ln620">    if(election_state(writer) == election_won</a>
+<a name="ln621">       &amp;&amp; peer_state == election_won</a>
+<a name="ln622">       &amp;&amp; safe_str_neq(peer-&gt;uname, attrd_cluster-&gt;uname)) {</a>
+<a name="ln623">        crm_notice(&quot;Detected another attribute writer: %s&quot;, peer-&gt;uname);</a>
+<a name="ln624">        election_vote(writer);</a>
+<a name="ln625"> </a>
+<a name="ln626">    } else if(peer_state == election_won) {</a>
+<a name="ln627">        if(peer_writer == NULL) {</a>
+<a name="ln628">            peer_writer = strdup(peer-&gt;uname);</a>
+<a name="ln629">            crm_notice(&quot;Recorded attribute writer: %s&quot;, peer-&gt;uname);</a>
+<a name="ln630"> </a>
+<a name="ln631">        } else if(safe_str_neq(peer-&gt;uname, peer_writer)) {</a>
+<a name="ln632">            crm_notice(&quot;Recorded new attribute writer: %s (was %s)&quot;, peer-&gt;uname, peer_writer);</a>
+<a name="ln633">            free(peer_writer);</a>
+<a name="ln634">            peer_writer = strdup(peer-&gt;uname);</a>
+<a name="ln635">        }</a>
+<a name="ln636">    }</a>
+<a name="ln637"> </a>
+<a name="ln638">    if (safe_str_eq(op, ATTRD_OP_UPDATE) || safe_str_eq(op, ATTRD_OP_UPDATE_BOTH) || safe_str_eq(op, ATTRD_OP_UPDATE_DELAY)) {</a>
+<a name="ln639">        attrd_peer_update(peer, xml, host, FALSE);</a>
+<a name="ln640"> </a>
+<a name="ln641">    } else if (safe_str_eq(op, ATTRD_OP_SYNC)) {</a>
+<a name="ln642">        attrd_peer_sync(peer, xml);</a>
+<a name="ln643"> </a>
+<a name="ln644">    } else if (safe_str_eq(op, ATTRD_OP_PEER_REMOVE)) {</a>
+<a name="ln645">        attrd_peer_remove(host, TRUE, peer-&gt;uname);</a>
+<a name="ln646"> </a>
+<a name="ln647">    } else if (safe_str_eq(op, ATTRD_OP_CLEAR_FAILURE)) {</a>
+<a name="ln648">        /* It is not currently possible to receive this as a peer command,</a>
+<a name="ln649">         * but will be, if we one day enable propagating this operation.</a>
+<a name="ln650">         */</a>
+<a name="ln651">        attrd_peer_clear_failure(peer, xml);</a>
+<a name="ln652"> </a>
+<a name="ln653">    } else if (safe_str_eq(op, ATTRD_OP_SYNC_RESPONSE)</a>
+<a name="ln654">              &amp;&amp; safe_str_neq(peer-&gt;uname, attrd_cluster-&gt;uname)) {</a>
+<a name="ln655">        xmlNode *child = NULL;</a>
+<a name="ln656"> </a>
+<a name="ln657">        crm_info(&quot;Processing %s from %s&quot;, op, peer-&gt;uname);</a>
+<a name="ln658">        for (child = __xml_first_child(xml); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln659">            host = crm_element_value(child, F_ATTRD_HOST);</a>
+<a name="ln660">            attrd_peer_update(peer, child, host, TRUE);</a>
+<a name="ln661">        }</a>
+<a name="ln662">    }</a>
+<a name="ln663">}</a>
+<a name="ln664"> </a>
+<a name="ln665">void</a>
+<a name="ln666">attrd_peer_sync(crm_node_t *peer, xmlNode *xml)</a>
+<a name="ln667">{</a>
+<a name="ln668">    GHashTableIter aIter;</a>
+<a name="ln669">    GHashTableIter vIter;</a>
+<a name="ln670"> </a>
+<a name="ln671">    attribute_t *a = NULL;</a>
+<a name="ln672">    attribute_value_t *v = NULL;</a>
+<a name="ln673">    xmlNode *sync = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln674"> </a>
+<a name="ln675">    crm_xml_add(sync, F_ATTRD_TASK, ATTRD_OP_SYNC_RESPONSE);</a>
+<a name="ln676"> </a>
+<a name="ln677">    g_hash_table_iter_init(&amp;aIter, attributes);</a>
+<a name="ln678">    while (g_hash_table_iter_next(&amp;aIter, NULL, (gpointer *) &amp; a)) {</a>
+<a name="ln679">        g_hash_table_iter_init(&amp;vIter, a-&gt;values);</a>
+<a name="ln680">        while (g_hash_table_iter_next(&amp;vIter, NULL, (gpointer *) &amp; v)) {</a>
+<a name="ln681">            crm_debug(&quot;Syncing %s[%s] = %s to %s&quot;, a-&gt;id, v-&gt;nodename, v-&gt;current, peer?peer-&gt;uname:&quot;everyone&quot;);</a>
+<a name="ln682">            build_attribute_xml(sync, a-&gt;id, a-&gt;set, a-&gt;uuid, a-&gt;timeout_ms, a-&gt;user, a-&gt;is_private,</a>
+<a name="ln683">                                v-&gt;nodename, v-&gt;nodeid, v-&gt;current);</a>
+<a name="ln684">        }</a>
+<a name="ln685">    }</a>
+<a name="ln686"> </a>
+<a name="ln687">    crm_debug(&quot;Syncing values to %s&quot;, peer?peer-&gt;uname:&quot;everyone&quot;);</a>
+<a name="ln688">    send_attrd_message(peer, sync);</a>
+<a name="ln689">    free_xml(sync);</a>
+<a name="ln690">}</a>
+<a name="ln691"> </a>
+<a name="ln692">/*!</a>
+<a name="ln693"> * \internal</a>
+<a name="ln694"> * \brief Remove all attributes and optionally peer cache entries for a node</a>
+<a name="ln695"> *</a>
+<a name="ln696"> * \param[in] host     Name of node to purge</a>
+<a name="ln697"> * \param[in] uncache  If TRUE, remove node from peer caches</a>
+<a name="ln698"> * \param[in] source   Who requested removal (only used for logging)</a>
+<a name="ln699"> */</a>
+<a name="ln700">void</a>
+<a name="ln701">attrd_peer_remove(const char *host, gboolean uncache, const char *source)</a>
+<a name="ln702">{</a>
+<a name="ln703">    attribute_t *a = NULL;</a>
+<a name="ln704">    GHashTableIter aIter;</a>
+<a name="ln705"> </a>
+<a name="ln706">    CRM_CHECK(host != NULL, return);</a>
+<a name="ln707">    crm_notice(&quot;Removing all %s attributes for %s&quot;, host, source);</a>
+<a name="ln708"> </a>
+<a name="ln709">    g_hash_table_iter_init(&amp;aIter, attributes);</a>
+<a name="ln710">    while (g_hash_table_iter_next(&amp;aIter, NULL, (gpointer *) &amp; a)) {</a>
+<a name="ln711">        if(g_hash_table_remove(a-&gt;values, host)) {</a>
+<a name="ln712">            crm_debug(&quot;Removed %s[%s] for %s&quot;, a-&gt;id, host, source);</a>
+<a name="ln713">        }</a>
+<a name="ln714">    }</a>
+<a name="ln715"> </a>
+<a name="ln716">    if (uncache) {</a>
+<a name="ln717">        crm_remote_peer_cache_remove(host);</a>
+<a name="ln718">        reap_crm_member(0, host);</a>
+<a name="ln719">    }</a>
+<a name="ln720">}</a>
+<a name="ln721"> </a>
+<a name="ln722">/*!</a>
+<a name="ln723"> * \internal</a>
+<a name="ln724"> * \brief Return host's hash table entry (creating one if needed)</a>
+<a name="ln725"> *</a>
+<a name="ln726"> * \param[in] values Hash table of values</a>
+<a name="ln727"> * \param[in] host Name of peer to look up</a>
+<a name="ln728"> * \param[in] xml XML describing the attribute</a>
+<a name="ln729"> *</a>
+<a name="ln730"> * \return Pointer to new or existing hash table entry</a>
+<a name="ln731"> */</a>
+<a name="ln732">static attribute_value_t *</a>
+<a name="ln733">attrd_lookup_or_create_value(GHashTable *values, const char *host, xmlNode *xml)</a>
+<a name="ln734">{</a>
+<a name="ln735">    attribute_value_t *v = g_hash_table_lookup(values, host);</a>
+<a name="ln736">    int is_remote = 0;</a>
+<a name="ln737"> </a>
+<a name="ln738">    crm_element_value_int(xml, F_ATTRD_IS_REMOTE, &amp;is_remote);</a>
+<a name="ln739">    if (is_remote) {</a>
+<a name="ln740">        /* If we previously assumed this node was an unseen cluster node,</a>
+<a name="ln741">         * remove its entry from the cluster peer cache.</a>
+<a name="ln742">         */</a>
+<a name="ln743">        crm_node_t *dup = crm_find_peer(0, host);</a>
+<a name="ln744"> </a>
+<a name="ln745">        if (dup &amp;&amp; (dup-&gt;uuid == NULL)) {</a>
+<a name="ln746">            reap_crm_member(0, host);</a>
+<a name="ln747">        }</a>
+<a name="ln748"> </a>
+<a name="ln749">        /* Ensure this host is in the remote peer cache */</a>
+<a name="ln750">        crm_remote_peer_cache_add(host);</a>
+<a name="ln751">    }</a>
+<a name="ln752"> </a>
+<a name="ln753">    if (v == NULL) {</a>
+<a name="ln754">        v = calloc(1, sizeof(attribute_value_t));</a>
+<a name="ln755">        CRM_ASSERT(v != NULL);</a>
+<a name="ln756"> </a>
+<a name="ln757">        v-&gt;nodename = strdup(host);</a>
+<a name="ln758">        CRM_ASSERT(v-&gt;nodename != NULL);</a>
+<a name="ln759"> </a>
+<a name="ln760">        v-&gt;is_remote = is_remote;</a>
+<a name="ln761">        g_hash_table_replace(values, v-&gt;nodename, v);</a>
+<a name="ln762">    }</a>
+<a name="ln763">    return(v);</a>
+<a name="ln764">}</a>
+<a name="ln765"> </a>
+<a name="ln766">void</a>
+<a name="ln767">attrd_peer_update(crm_node_t *peer, xmlNode *xml, const char *host, bool filter)</a>
+<a name="ln768">{</a>
+<a name="ln769">    bool changed = FALSE;</a>
+<a name="ln770">    attribute_t *a;</a>
+<a name="ln771">    attribute_value_t *v = NULL;</a>
+<a name="ln772">    int dampen = 0;</a>
+<a name="ln773"> </a>
+<a name="ln774">    const char *op = crm_element_value(xml, F_ATTRD_TASK);</a>
+<a name="ln775">    const char *attr = crm_element_value(xml, F_ATTRD_ATTRIBUTE);</a>
+<a name="ln776">    const char *value = crm_element_value(xml, F_ATTRD_VALUE);</a>
+<a name="ln777">    const char *dvalue = crm_element_value(xml, F_ATTRD_DAMPEN);</a>
+<a name="ln778"> </a>
+<a name="ln779">    if (attr == NULL) {</a>
+<a name="ln780">        crm_warn(&quot;Peer update did not specify attribute&quot;);</a>
+<a name="ln781">        return;</a>
+<a name="ln782">    }</a>
+<a name="ln783"> </a>
+<a name="ln784">    a = g_hash_table_lookup(attributes, attr);</a>
+<a name="ln785">    if(a == NULL) {</a>
+<a name="ln786">        if (op == NULL /* The xml children from an ATTRD_OP_SYNC_RESPONSE have no F_ATTRD_TASK */</a>
+<a name="ln787">            || safe_str_eq(op, ATTRD_OP_UPDATE)</a>
+<a name="ln788">            || safe_str_eq(op, ATTRD_OP_UPDATE_BOTH)) {</a>
+<a name="ln789">            a = create_attribute(xml);</a>
+<a name="ln790">        } else {</a>
+<a name="ln791">            crm_warn(&quot;Update error (attribute %s not found)&quot;, attr);</a>
+<a name="ln792">            return;</a>
+<a name="ln793">        }</a>
+<a name="ln794">    }</a>
+<a name="ln795">    </a>
+<a name="ln796">    if (op == NULL /* The xml children from an ATTRD_OP_SYNC_RESPONSE have no F_ATTRD_TASK */</a>
+<a name="ln797">        || safe_str_eq(op, ATTRD_OP_UPDATE_BOTH)</a>
+<a name="ln798">        || safe_str_eq(op, ATTRD_OP_UPDATE_DELAY)) {</a>
+<a name="ln799">        if (dvalue) {</a>
+<a name="ln800">            dampen = crm_get_msec(dvalue); </a>
+<a name="ln801">            if (dampen &gt;= 0) {</a>
+<a name="ln802">                if (a-&gt;timeout_ms != dampen) {</a>
+<a name="ln803">                    mainloop_timer_stop(a-&gt;timer);</a>
+<a name="ln804">                    mainloop_timer_del(a-&gt;timer);</a>
+<a name="ln805">                    a-&gt;timeout_ms = dampen;</a>
+<a name="ln806">                    if (dampen &gt; 0) {</a>
+<a name="ln807">                        a-&gt;timer = mainloop_timer_add(a-&gt;id, a-&gt;timeout_ms, FALSE, attribute_timer_cb, a);</a>
+<a name="ln808">                        crm_info(&quot;Update attribute %s with delay %dms (%s)&quot;, a-&gt;id, dampen, dvalue);</a>
+<a name="ln809">                    } else {</a>
+<a name="ln810">                        a-&gt;timer = NULL;</a>
+<a name="ln811">                        crm_info(&quot;Update attribute %s with not delay&quot;, a-&gt;id);</a>
+<a name="ln812">                    }</a>
+<a name="ln813">                    //if dampen is changed, attrd writes in a current value immediately.</a>
+<a name="ln814">                    write_or_elect_attribute(a);</a>
+<a name="ln815">                    if (safe_str_eq(op, ATTRD_OP_UPDATE_DELAY)) {</a>
+<a name="ln816">                        return;</a>
+<a name="ln817">                    }</a>
+<a name="ln818">                } else {</a>
+<a name="ln819">                    if (safe_str_eq(op, ATTRD_OP_UPDATE_DELAY)) {</a>
+<a name="ln820">                        crm_trace(&quot;Unchanged attribute %s with delay %dms (%s).(ATTRD_OP_UPDATE_DELAY)&quot;, a-&gt;id, dampen, dvalue);</a>
+<a name="ln821">                        return;</a>
+<a name="ln822">                    }</a>
+<a name="ln823">                }</a>
+<a name="ln824">            } else {</a>
+<a name="ln825">                crm_warn(&quot;Update error (A positive number is necessary for delay parameter. attribute %s : %dms (%s))&quot;, a-&gt;id, dampen, dvalue);</a>
+<a name="ln826">                return;</a>
+<a name="ln827">            }</a>
+<a name="ln828">        } else {</a>
+<a name="ln829">            crm_warn(&quot;Update error (delay parameter is necessary for the update of the attribute %s)&quot;, a-&gt;id);</a>
+<a name="ln830">            return;</a>
+<a name="ln831">        }</a>
+<a name="ln832">    }</a>
+<a name="ln833"> </a>
+<a name="ln834">    if(host == NULL) {</a>
+<a name="ln835">        GHashTableIter vIter;</a>
+<a name="ln836">        g_hash_table_iter_init(&amp;vIter, a-&gt;values);</a>
+<a name="ln837"> </a>
+<a name="ln838">        crm_debug(&quot;Setting %s for all hosts to %s&quot;, attr, value);</a>
+<a name="ln839"> </a>
+<a name="ln840">        xml_remove_prop(xml, F_ATTRD_HOST_ID);</a>
+<a name="ln841">        while (g_hash_table_iter_next(&amp;vIter, (gpointer *) &amp; host, NULL)) {</a>
+<a name="ln842">            attrd_peer_update(peer, xml, host, filter);</a>
+<a name="ln843">        }</a>
+<a name="ln844">        return;</a>
+<a name="ln845">    }</a>
+<a name="ln846"> </a>
+<a name="ln847">    v = attrd_lookup_or_create_value(a-&gt;values, host, xml);</a>
+<a name="ln848"> </a>
+<a name="ln849">    if(filter</a>
+<a name="ln850">              &amp;&amp; safe_str_neq(v-&gt;current, value)</a>
+<a name="ln851">              &amp;&amp; safe_str_eq(host, attrd_cluster-&gt;uname)) {</a>
+<a name="ln852">        xmlNode *sync = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln853">        crm_notice(&quot;%s[%s]: local value '%s' takes priority over '%s' from %s&quot;,</a>
+<a name="ln854">                   a-&gt;id, host, v-&gt;current, value, peer-&gt;uname);</a>
+<a name="ln855"> </a>
+<a name="ln856">        crm_xml_add(sync, F_ATTRD_TASK, ATTRD_OP_SYNC_RESPONSE);</a>
+<a name="ln857">        v = g_hash_table_lookup(a-&gt;values, host);</a>
+<a name="ln858">        build_attribute_xml(sync, a-&gt;id, a-&gt;set, a-&gt;uuid, a-&gt;timeout_ms, a-&gt;user, a-&gt;is_private,</a>
+<a name="ln859">                            v-&gt;nodename, v-&gt;nodeid, v-&gt;current);</a>
+<a name="ln860"> </a>
+<a name="ln861">        crm_xml_add_int(sync, F_ATTRD_WRITER, election_state(writer));</a>
+<a name="ln862">        send_attrd_message(peer, sync);</a>
+<a name="ln863">        free_xml(sync);</a>
+<a name="ln864"> </a>
+<a name="ln865">    } else if(safe_str_neq(v-&gt;current, value)) {</a>
+<a name="ln866">        crm_info(&quot;Setting %s[%s]: %s -&gt; %s from %s&quot;, attr, host, v-&gt;current, value, peer-&gt;uname);</a>
+<a name="ln867">        free(v-&gt;current);</a>
+<a name="ln868">        if(value) {</a>
+<a name="ln869">            v-&gt;current = strdup(value);</a>
+<a name="ln870">        } else {</a>
+<a name="ln871">            v-&gt;current = NULL;</a>
+<a name="ln872">        }</a>
+<a name="ln873">        changed = TRUE;</a>
+<a name="ln874">    } else {</a>
+<a name="ln875">        crm_trace(&quot;Unchanged %s[%s] from %s is %s&quot;, attr, host, peer-&gt;uname, value);</a>
+<a name="ln876">    }</a>
+<a name="ln877"> </a>
+<a name="ln878">    a-&gt;changed |= changed;</a>
+<a name="ln879"> </a>
+<a name="ln880">    if(changed) {</a>
+<a name="ln881">        if(a-&gt;timer) {</a>
+<a name="ln882">            crm_trace(&quot;Delayed write out (%dms) for %s&quot;, a-&gt;timeout_ms, a-&gt;id);</a>
+<a name="ln883">            mainloop_timer_start(a-&gt;timer);</a>
+<a name="ln884">        } else {</a>
+<a name="ln885">            write_or_elect_attribute(a);</a>
+<a name="ln886">        }</a>
+<a name="ln887">    }</a>
+<a name="ln888"> </a>
+<a name="ln889">    /* If this is a cluster node whose node ID we are learning, remember it */</a>
+<a name="ln890">    if ((v-&gt;nodeid == 0) &amp;&amp; (v-&gt;is_remote == FALSE)</a>
+<a name="ln891">        &amp;&amp; (crm_element_value_int(xml, F_ATTRD_HOST_ID, (int*)&amp;v-&gt;nodeid) == 0)) {</a>
+<a name="ln892"> </a>
+<a name="ln893">        crm_node_t *known_peer = crm_get_peer(v-&gt;nodeid, host);</a>
+<a name="ln894"> </a>
+<a name="ln895">        crm_trace(&quot;We know %s's node id now: %s&quot;,</a>
+<a name="ln896">                  known_peer-&gt;uname, known_peer-&gt;uuid);</a>
+<a name="ln897">        if (election_state(writer) == election_won) {</a>
+<a name="ln898">            write_attributes(FALSE, TRUE);</a>
+<a name="ln899">            return;</a>
+<a name="ln900">        }</a>
+<a name="ln901">    }</a>
+<a name="ln902">}</a>
+<a name="ln903"> </a>
+<a name="ln904">void</a>
+<a name="ln905">write_or_elect_attribute(attribute_t *a)</a>
+<a name="ln906">{</a>
+<a name="ln907">    enum election_result rc = election_state(writer);</a>
+<a name="ln908">    if(rc == election_won) {</a>
+<a name="ln909">        write_attribute(a);</a>
+<a name="ln910"> </a>
+<a name="ln911">    } else if(rc == election_in_progress) {</a>
+<a name="ln912">        crm_trace(&quot;Election in progress to determine who will write out %s&quot;, a-&gt;id);</a>
+<a name="ln913"> </a>
+<a name="ln914">    } else if(peer_writer == NULL) {</a>
+<a name="ln915">        crm_info(&quot;Starting an election to determine who will write out %s&quot;, a-&gt;id);</a>
+<a name="ln916">        election_vote(writer);</a>
+<a name="ln917"> </a>
+<a name="ln918">    } else {</a>
+<a name="ln919">        crm_trace(&quot;%s will write out %s, we are in state %d&quot;, peer_writer, a-&gt;id, rc);</a>
+<a name="ln920">    }</a>
+<a name="ln921">}</a>
+<a name="ln922"> </a>
+<a name="ln923">gboolean</a>
+<a name="ln924">attrd_election_cb(gpointer user_data)</a>
+<a name="ln925">{</a>
+<a name="ln926">    crm_trace(&quot;Election complete&quot;);</a>
+<a name="ln927"> </a>
+<a name="ln928">    free(peer_writer);</a>
+<a name="ln929">    peer_writer = strdup(attrd_cluster-&gt;uname);</a>
+<a name="ln930"> </a>
+<a name="ln931">    /* Update the peers after an election */</a>
+<a name="ln932">    attrd_peer_sync(NULL, NULL);</a>
+<a name="ln933"> </a>
+<a name="ln934">    /* Update the CIB after an election */</a>
+<a name="ln935">    write_attributes(TRUE, FALSE);</a>
+<a name="ln936">    return FALSE;</a>
+<a name="ln937">}</a>
+<a name="ln938"> </a>
+<a name="ln939"> </a>
+<a name="ln940">void</a>
+<a name="ln941">attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *data)</a>
+<a name="ln942">{</a>
+<a name="ln943">    if ((kind == crm_status_nstate) || (kind == crm_status_rstate)) {</a>
+<a name="ln944">        if (safe_str_eq(peer-&gt;state, CRM_NODE_MEMBER)) {</a>
+<a name="ln945">            /* If we're the writer, send new peers a list of all attributes</a>
+<a name="ln946">             * (unless it's a remote node, which doesn't run its own attrd)</a>
+<a name="ln947">             */</a>
+<a name="ln948">            if ((election_state(writer) == election_won)</a>
+<a name="ln949">                &amp;&amp; !is_set(peer-&gt;flags, crm_remote_node)) {</a>
+<a name="ln950">                attrd_peer_sync(peer, NULL);</a>
+<a name="ln951">            }</a>
+<a name="ln952">        } else {</a>
+<a name="ln953">            /* Remove all attribute values associated with lost nodes */</a>
+<a name="ln954">            attrd_peer_remove(peer-&gt;uname, FALSE, &quot;peer loss&quot;);</a>
+<a name="ln955">            if (peer_writer &amp;&amp; safe_str_eq(peer-&gt;uname, peer_writer)) {</a>
+<a name="ln956">                free(peer_writer);</a>
+<a name="ln957">                peer_writer = NULL;</a>
+<a name="ln958">                crm_notice(&quot;Lost attribute writer %s&quot;, peer-&gt;uname);</a>
+<a name="ln959">            }</a>
+<a name="ln960">        }</a>
+<a name="ln961">    }</a>
+<a name="ln962">}</a>
+<a name="ln963"> </a>
+<a name="ln964">static void</a>
+<a name="ln965">attrd_cib_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln966">{</a>
+<a name="ln967">    int level = LOG_ERR;</a>
+<a name="ln968">    GHashTableIter iter;</a>
+<a name="ln969">    const char *peer = NULL;</a>
+<a name="ln970">    attribute_value_t *v = NULL;</a>
+<a name="ln971"> </a>
+<a name="ln972">    char *name = user_data;</a>
+<a name="ln973">    attribute_t *a = g_hash_table_lookup(attributes, name);</a>
+<a name="ln974"> </a>
+<a name="ln975">    if(a == NULL) {</a>
+<a name="ln976">        crm_info(&quot;Attribute %s no longer exists&quot;, name);</a>
+<a name="ln977">        goto done;</a>
+<a name="ln978">    }</a>
+<a name="ln979"> </a>
+<a name="ln980">    a-&gt;update = 0;</a>
+<a name="ln981">    if (rc == pcmk_ok &amp;&amp; call_id &lt; 0) {</a>
+<a name="ln982">        rc = call_id;</a>
+<a name="ln983">    }</a>
+<a name="ln984"> </a>
+<a name="ln985">    switch (rc) {</a>
+<a name="ln986">        case pcmk_ok:</a>
+<a name="ln987">            level = LOG_INFO;</a>
+<a name="ln988">            last_cib_op_done = call_id;</a>
+<a name="ln989">            break;</a>
+<a name="ln990">        case -pcmk_err_diff_failed:    /* When an attr changes while the CIB is syncing */</a>
+<a name="ln991">        case -ETIME:           /* When an attr changes while there is a DC election */</a>
+<a name="ln992">        case -ENXIO:           /* When an attr changes while the CIB is syncing a</a>
+<a name="ln993">                                *   newer config from a node that just came up</a>
+<a name="ln994">                                */</a>
+<a name="ln995">            level = LOG_WARNING;</a>
+<a name="ln996">            break;</a>
+<a name="ln997">    }</a>
+<a name="ln998"> </a>
+<a name="ln999">    do_crm_log(level, &quot;Update %d for %s: %s (%d)&quot;, call_id, name, pcmk_strerror(rc), rc);</a>
+<a name="ln1000"> </a>
+<a name="ln1001">    g_hash_table_iter_init(&amp;iter, a-&gt;values);</a>
+<a name="ln1002">    while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; peer, (gpointer *) &amp; v)) {</a>
+<a name="ln1003">        do_crm_log(level, &quot;Update %d for %s[%s]=%s: %s (%d)&quot;, call_id, a-&gt;id, peer, v-&gt;requested, pcmk_strerror(rc), rc);</a>
+<a name="ln1004">        free(v-&gt;requested);</a>
+<a name="ln1005">        v-&gt;requested = NULL;</a>
+<a name="ln1006">        if (rc != pcmk_ok) {</a>
+<a name="ln1007">            a-&gt;changed = TRUE; /* Attempt write out again */</a>
+<a name="ln1008">        }</a>
+<a name="ln1009">    }</a>
+<a name="ln1010">  done:</a>
+<a name="ln1011">    if(a &amp;&amp; a-&gt;changed &amp;&amp; election_state(writer) == election_won) {</a>
+<a name="ln1012">        write_attribute(a);</a>
+<a name="ln1013">    }</a>
+<a name="ln1014">}</a>
+<a name="ln1015"> </a>
+<a name="ln1016">void</a>
+<a name="ln1017">write_attributes(bool all, bool peer_discovered)</a>
+<a name="ln1018">{</a>
+<a name="ln1019">    GHashTableIter iter;</a>
+<a name="ln1020">    attribute_t *a = NULL;</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    g_hash_table_iter_init(&amp;iter, attributes);</a>
+<a name="ln1023">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp; a)) {</a>
+<a name="ln1024">        if (peer_discovered &amp;&amp; a-&gt;unknown_peer_uuids) {</a>
+<a name="ln1025">            /* a new peer uuid has been discovered, try writing this attribute again. */</a>
+<a name="ln1026">            a-&gt;changed = TRUE;</a>
+<a name="ln1027">        }</a>
+<a name="ln1028"> </a>
+<a name="ln1029">        if(all || a-&gt;changed) {</a>
+<a name="ln1030">            write_attribute(a);</a>
+<a name="ln1031">        } else {</a>
+<a name="ln1032">            crm_debug(&quot;Skipping unchanged attribute %s&quot;, a-&gt;id);</a>
+<a name="ln1033">        }</a>
+<a name="ln1034">    }</a>
+<a name="ln1035">}</a>
+<a name="ln1036"> </a>
+<a name="ln1037">static void</a>
+<a name="ln1038">build_update_element(xmlNode *parent, attribute_t *a, const char *nodeid, const char *value)</a>
+<a name="ln1039">{</a>
+<a name="ln1040">    const char *set = NULL;</a>
+<a name="ln1041">    xmlNode *xml_obj = NULL;</a>
+<a name="ln1042"> </a>
+<a name="ln1043">    xml_obj = create_xml_node(parent, XML_CIB_TAG_STATE);</a>
+<a name="ln1044">    crm_xml_add(xml_obj, XML_ATTR_ID, nodeid);</a>
+<a name="ln1045"> </a>
+<a name="ln1046">    xml_obj = create_xml_node(xml_obj, XML_TAG_TRANSIENT_NODEATTRS);</a>
+<a name="ln1047">    crm_xml_add(xml_obj, XML_ATTR_ID, nodeid);</a>
+<a name="ln1048"> </a>
+<a name="ln1049">    xml_obj = create_xml_node(xml_obj, XML_TAG_ATTR_SETS);</a>
+<a name="ln1050">    if (a-&gt;set) {</a>
+<a name="ln1051">        crm_xml_set_id(xml_obj, &quot;%s&quot;, a-&gt;set);</a>
+<a name="ln1052">    } else {</a>
+<a name="ln1053">        crm_xml_set_id(xml_obj, &quot;%s-%s&quot;, XML_CIB_TAG_STATUS, nodeid);</a>
+<a name="ln1054">    }</a>
+<a name="ln1055">    set = ID(xml_obj);</a>
+<a name="ln1056"> </a>
+<a name="ln1057">    xml_obj = create_xml_node(xml_obj, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln1058">    if (a-&gt;uuid) {</a>
+<a name="ln1059">        crm_xml_set_id(xml_obj, &quot;%s&quot;, a-&gt;uuid);</a>
+<a name="ln1060">    } else {</a>
+<a name="ln1061">        crm_xml_set_id(xml_obj, &quot;%s-%s&quot;, set, a-&gt;id);</a>
+<a name="ln1062">    }</a>
+<a name="ln1063">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, a-&gt;id);</a>
+<a name="ln1064"> </a>
+<a name="ln1065">    if(value) {</a>
+<a name="ln1066">        crm_xml_add(xml_obj, XML_NVPAIR_ATTR_VALUE, value);</a>
+<a name="ln1067"> </a>
+<a name="ln1068">    } else {</a>
+<a name="ln1069">        crm_xml_add(xml_obj, XML_NVPAIR_ATTR_VALUE, &quot;&quot;);</a>
+<a name="ln1070">        crm_xml_add(xml_obj, &quot;__delete__&quot;, XML_NVPAIR_ATTR_VALUE);</a>
+<a name="ln1071">    }</a>
+<a name="ln1072">}</a>
+<a name="ln1073"> </a>
+<a name="ln1074">void</a>
+<a name="ln1075">write_attribute(attribute_t *a)</a>
+<a name="ln1076">{</a>
+<a name="ln1077">    int private_updates = 0, cib_updates = 0;</a>
+<a name="ln1078">    xmlNode *xml_top = NULL;</a>
+<a name="ln1079">    attribute_value_t *v = NULL;</a>
+<a name="ln1080">    GHashTableIter iter;</a>
+<a name="ln1081">    enum cib_call_options flags = cib_quorum_override;</a>
+<a name="ln1082"> </a>
+<a name="ln1083">    if (a == NULL) {</a>
+<a name="ln1084">        return;</a>
+<a name="ln1085">    }</a>
+<a name="ln1086"> </a>
+<a name="ln1087">    /* If this attribute will be written to the CIB ... */</a>
+<a name="ln1088">    if (!a-&gt;is_private) {</a>
+<a name="ln1089"> </a>
+<a name="ln1090">        /* Defer the write if now's not a good time */</a>
+<a name="ln1091">        if (the_cib == NULL) {</a>
+<a name="ln1092">            crm_info(&quot;Write out of '%s' delayed: cib not connected&quot;, a-&gt;id);</a>
+<a name="ln1093">            return;</a>
+<a name="ln1094"> </a>
+<a name="ln1095">        } else if (a-&gt;update &amp;&amp; (a-&gt;update &lt; last_cib_op_done)) {</a>
+<a name="ln1096">            crm_info(&quot;Write out of '%s' continuing: update %d considered lost&quot;, a-&gt;id, a-&gt;update);</a>
+<a name="ln1097"> </a>
+<a name="ln1098">        } else if (a-&gt;update) {</a>
+<a name="ln1099">            crm_info(&quot;Write out of '%s' delayed: update %d in progress&quot;, a-&gt;id, a-&gt;update);</a>
+<a name="ln1100">            return;</a>
+<a name="ln1101"> </a>
+<a name="ln1102">        } else if (mainloop_timer_running(a-&gt;timer)) {</a>
+<a name="ln1103">            crm_info(&quot;Write out of '%s' delayed: timer is running&quot;, a-&gt;id);</a>
+<a name="ln1104">            return;</a>
+<a name="ln1105">        }</a>
+<a name="ln1106"> </a>
+<a name="ln1107">        /* Initialize the status update XML */</a>
+<a name="ln1108">        xml_top = create_xml_node(NULL, XML_CIB_TAG_STATUS);</a>
+<a name="ln1109">    }</a>
+<a name="ln1110"> </a>
+<a name="ln1111">    /* Attribute will be written shortly, so clear changed flag */</a>
+<a name="ln1112">    a-&gt;changed = FALSE;</a>
+<a name="ln1113"> </a>
+<a name="ln1114">    /* We will check all peers' uuids shortly, so initialize this to false */</a>
+<a name="ln1115">    a-&gt;unknown_peer_uuids = FALSE;</a>
+<a name="ln1116"> </a>
+<a name="ln1117">    /* Iterate over each peer value of this attribute */</a>
+<a name="ln1118">    g_hash_table_iter_init(&amp;iter, a-&gt;values);</a>
+<a name="ln1119">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp; v)) {</a>
+<a name="ln1120">        crm_node_t *peer = crm_get_peer_full(v-&gt;nodeid, v-&gt;nodename, CRM_GET_PEER_ANY);</a>
+<a name="ln1121"> </a>
+<a name="ln1122">        /* If the value's peer info does not correspond to a peer, ignore it */</a>
+<a name="ln1123">        if (peer == NULL) {</a>
+<a name="ln1124">            crm_notice(&quot;Update error (peer not found): %s[%s]=%s failed (host=%p)&quot;,</a>
+<a name="ln1125">                       v-&gt;nodename, a-&gt;id, v-&gt;current, peer);</a>
+<a name="ln1126">            continue;</a>
+<a name="ln1127">        }</a>
+<a name="ln1128"> </a>
+<a name="ln1129">        /* If we're just learning the peer's node id, remember it */</a>
+<a name="ln1130">        if (peer-&gt;id &amp;&amp; (v-&gt;nodeid == 0)) {</a>
+<a name="ln1131">            crm_trace(&quot;Updating value's nodeid&quot;);</a>
+<a name="ln1132">            v-&gt;nodeid = peer-&gt;id;</a>
+<a name="ln1133">        }</a>
+<a name="ln1134"> </a>
+<a name="ln1135">        /* If this is a private attribute, no update needs to be sent */</a>
+<a name="ln1136">        if (a-&gt;is_private) {</a>
+<a name="ln1137">            private_updates++;</a>
+<a name="ln1138">            continue;</a>
+<a name="ln1139">        }</a>
+<a name="ln1140"> </a>
+<a name="ln1141">        /* If the peer is found, but its uuid is unknown, defer write */</a>
+<a name="ln1142">        if (peer-&gt;uuid == NULL) {</a>
+<a name="ln1143">            a-&gt;unknown_peer_uuids = TRUE;</a>
+<a name="ln1144">            crm_notice(&quot;Update error (unknown peer uuid, retry will be attempted once uuid is discovered): %s[%s]=%s failed (host=%p)&quot;,</a>
+<a name="ln1145">                       v-&gt;nodename, a-&gt;id, v-&gt;current, peer);</a>
+<a name="ln1146">            continue;</a>
+<a name="ln1147">        }</a>
+<a name="ln1148"> </a>
+<a name="ln1149">        /* Add this value to status update XML */</a>
+<a name="ln1150">        crm_debug(&quot;Update: %s[%s]=%s (%s %u %u %s)&quot;, v-&gt;nodename, a-&gt;id,</a>
+<a name="ln1151">                  v-&gt;current, peer-&gt;uuid, peer-&gt;id, v-&gt;nodeid, peer-&gt;uname);</a>
+<a name="ln1152">        build_update_element(xml_top, a, peer-&gt;uuid, v-&gt;current);</a>
+<a name="ln1153">        cib_updates++;</a>
+<a name="ln1154"> </a>
+<a name="ln1155">        free(v-&gt;requested);</a>
+<a name="ln1156">        v-&gt;requested = NULL;</a>
+<a name="ln1157">        if (v-&gt;current) {</a>
+<a name="ln1158">            v-&gt;requested = strdup(v-&gt;current);</a>
+<a name="ln1159">        } else {</a>
+<a name="ln1160">            /* Older attrd versions don't know about the cib_mixed_update</a>
+<a name="ln1161">             * flag so make sure it goes to the local cib which does</a>
+<a name="ln1162">             */</a>
+<a name="ln1163">            flags |= cib_mixed_update|cib_scope_local;</a>
+<a name="ln1164">        }</a>
+<a name="ln1165">    }</a>
+<a name="ln1166"> </a>
+<a name="ln1167">    if (private_updates) {</a>
+<a name="ln1168">        crm_info(&quot;Processed %d private change%s for %s, id=%s, set=%s&quot;,</a>
+<a name="ln1169">                 private_updates, ((private_updates == 1)? &quot;&quot; : &quot;s&quot;),</a>
+<a name="ln1170">                 a-&gt;id, (a-&gt;uuid? a-&gt;uuid : &quot;&lt;n/a&gt;&quot;), a-&gt;set);</a>
+<a name="ln1171">    }</a>
+<a name="ln1172">    if (cib_updates) {</a>
+<a name="ln1173">        crm_log_xml_trace(xml_top, __FUNCTION__);</a>
+<a name="ln1174"> </a>
+<a name="ln1175">        a-&gt;update = cib_internal_op(the_cib, CIB_OP_MODIFY, NULL, XML_CIB_TAG_STATUS, xml_top, NULL,</a>
+<a name="ln1176">                                    flags, a-&gt;user);</a>
+<a name="ln1177"> </a>
+<a name="ln1178">        crm_info(&quot;Sent update %d with %d changes for %s, id=%s, set=%s&quot;,</a>
+<a name="ln1179">                 a-&gt;update, cib_updates, a-&gt;id, (a-&gt;uuid? a-&gt;uuid : &quot;&lt;n/a&gt;&quot;), a-&gt;set);</a>
+<a name="ln1180"> </a>
+<a name="ln1181">        the_cib-&gt;cmds-&gt;register_callback_full(the_cib, a-&gt;update, 120, FALSE,</a>
+<a name="ln1182">                                              strdup(a-&gt;id),</a>
+<a name="ln1183">                                              &quot;attrd_cib_callback&quot;,</a>
+<a name="ln1184">                                              attrd_cib_callback, free);</a>
+<a name="ln1185">    }</a>
+<a name="ln1186">    free_xml(xml_top);</a>
+<a name="ln1187">}</a>
+
+</code></pre>
+<div class="balloon" rel="171"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'a'. Check lines: 171, 169.</p></div>
+<div class="balloon" rel="248"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'regcomp' function. Inspect the first argument. Check lines: 248, 245.</p></div>
+<div class="balloon" rel="757"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'v'. Check lines: 757, 754.</p></div>
+<div class="balloon" rel="761"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 761, 757.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

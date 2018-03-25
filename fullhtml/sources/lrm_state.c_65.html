@@ -1,0 +1,828 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2012 David Vossel &lt;davidvossel@gmail.com&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;crm/crm.h&gt;</a>
+<a name="ln25">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln26">#include &lt;crm/common/iso8601.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;crmd.h&gt;</a>
+<a name="ln29">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln30">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln31">#include &lt;crmd_callbacks.h&gt;</a>
+<a name="ln32">#include &lt;crmd_lrm.h&gt;</a>
+<a name="ln33">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln34">#include &lt;crm/transition.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">GHashTable *lrm_state_table = NULL;</a>
+<a name="ln37">extern GHashTable *proxy_table;</a>
+<a name="ln38">int lrmd_internal_proxy_send(lrmd_t * lrmd, xmlNode *msg);</a>
+<a name="ln39">void lrmd_internal_set_proxy_callback(lrmd_t * lrmd, void *userdata, void (*callback)(lrmd_t *lrmd, void *userdata, xmlNode *msg));</a>
+<a name="ln40"> </a>
+<a name="ln41">static void</a>
+<a name="ln42">free_rsc_info(gpointer value)</a>
+<a name="ln43">{</a>
+<a name="ln44">    lrmd_rsc_info_t *rsc_info = value;</a>
+<a name="ln45"> </a>
+<a name="ln46">    lrmd_free_rsc_info(rsc_info);</a>
+<a name="ln47">}</a>
+<a name="ln48"> </a>
+<a name="ln49">static void</a>
+<a name="ln50">free_deletion_op(gpointer value)</a>
+<a name="ln51">{</a>
+<a name="ln52">    struct pending_deletion_op_s *op = value;</a>
+<a name="ln53"> </a>
+<a name="ln54">    free(op-&gt;rsc);</a>
+<a name="ln55">    delete_ha_msg_input(op-&gt;input);</a>
+<a name="ln56">    free(op);</a>
+<a name="ln57">}</a>
+<a name="ln58"> </a>
+<a name="ln59">static void</a>
+<a name="ln60">free_recurring_op(gpointer value)</a>
+<a name="ln61">{</a>
+<a name="ln62">    struct recurring_op_s *op = (struct recurring_op_s *)value;</a>
+<a name="ln63"> </a>
+<a name="ln64">    free(op-&gt;user_data);</a>
+<a name="ln65">    free(op-&gt;rsc_id);</a>
+<a name="ln66">    free(op-&gt;op_type);</a>
+<a name="ln67">    free(op-&gt;op_key);</a>
+<a name="ln68">    if (op-&gt;params) {</a>
+<a name="ln69">        g_hash_table_destroy(op-&gt;params);</a>
+<a name="ln70">    }</a>
+<a name="ln71">    free(op);</a>
+<a name="ln72">}</a>
+<a name="ln73"> </a>
+<a name="ln74">static gboolean</a>
+<a name="ln75">fail_pending_op(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln76">{</a>
+<a name="ln77">    lrmd_event_data_t event = { 0, };</a>
+<a name="ln78">    lrm_state_t *lrm_state = user_data;</a>
+<a name="ln79">    struct recurring_op_s *op = (struct recurring_op_s *)value;</a>
+<a name="ln80"> </a>
+<a name="ln81">    crm_trace(&quot;Pre-emptively failing %s_%s_%d on %s (call=%s, %s)&quot;,</a>
+<a name="ln82">              op-&gt;rsc_id, op-&gt;op_type, op-&gt;interval,</a>
+<a name="ln83">              lrm_state-&gt;node_name, (char*)key, op-&gt;user_data);</a>
+<a name="ln84"> </a>
+<a name="ln85">    event.type = lrmd_event_exec_complete;</a>
+<a name="ln86">    event.rsc_id = op-&gt;rsc_id;</a>
+<a name="ln87">    event.op_type = op-&gt;op_type;</a>
+<a name="ln88">    event.user_data = op-&gt;user_data;</a>
+<a name="ln89">    event.timeout = 0;</a>
+<a name="ln90">    event.interval = op-&gt;interval;</a>
+<a name="ln91">    event.rc = PCMK_OCF_CONNECTION_DIED;</a>
+<a name="ln92">    event.op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln93">    event.t_run = op-&gt;start_time;</a>
+<a name="ln94">    event.t_rcchange = op-&gt;start_time;</a>
+<a name="ln95"> </a>
+<a name="ln96">    event.call_id = op-&gt;call_id;</a>
+<a name="ln97">    event.remote_nodename = lrm_state-&gt;node_name;</a>
+<a name="ln98">    event.params = op-&gt;params;</a>
+<a name="ln99"> </a>
+<a name="ln100">    process_lrm_event(lrm_state, &amp;event, op);</a>
+<a name="ln101">    return TRUE;</a>
+<a name="ln102">}</a>
+<a name="ln103"> </a>
+<a name="ln104">gboolean</a>
+<a name="ln105">lrm_state_is_local(lrm_state_t *lrm_state)</a>
+<a name="ln106">{</a>
+<a name="ln107">    if (lrm_state == NULL || fsa_our_uname == NULL) {</a>
+<a name="ln108">        return FALSE;</a>
+<a name="ln109">    }</a>
+<a name="ln110"> </a>
+<a name="ln111">    if (strcmp(lrm_state-&gt;node_name, fsa_our_uname) != 0) {</a>
+<a name="ln112">        return FALSE;</a>
+<a name="ln113">    }</a>
+<a name="ln114"> </a>
+<a name="ln115">    return TRUE;</a>
+<a name="ln116"> </a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119">lrm_state_t *</a>
+<a name="ln120">lrm_state_create(const char *node_name)</a>
+<a name="ln121">{</a>
+<a name="ln122">    lrm_state_t *state = NULL;</a>
+<a name="ln123"> </a>
+<a name="ln124">    if (!node_name) {</a>
+<a name="ln125">        crm_err(&quot;No node name given for lrm state object&quot;);</a>
+<a name="ln126">        return NULL;</a>
+<a name="ln127">    }</a>
+<a name="ln128"> </a>
+<a name="ln129">    state = calloc(1, sizeof(lrm_state_t));</a>
+<a name="ln130">    if (!state) {</a>
+<a name="ln131">        return NULL;</a>
+<a name="ln132">    }</a>
+<a name="ln133"> </a>
+<a name="ln134">    state-&gt;node_name = strdup(node_name);</a>
+<a name="ln135"> </a>
+<a name="ln136">    state-&gt;rsc_info_cache = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln137">                                                g_str_equal, NULL, free_rsc_info);</a>
+<a name="ln138"> </a>
+<a name="ln139">    state-&gt;deletion_ops = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln140">                                                g_str_equal, g_hash_destroy_str, free_deletion_op);</a>
+<a name="ln141"> </a>
+<a name="ln142">    state-&gt;pending_ops = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln143">                                               g_str_equal, g_hash_destroy_str, free_recurring_op);</a>
+<a name="ln144"> </a>
+<a name="ln145">    state-&gt;resource_history = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln146">                                                    g_str_equal, NULL, history_free);</a>
+<a name="ln147"> </a>
+<a name="ln148">    state-&gt;metadata_cache = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln149">                                                  g_hash_destroy_str, crm_destroy_xml);</a>
+<a name="ln150"> </a>
+<a name="ln151">    g_hash_table_insert(lrm_state_table, (char *)state-&gt;node_name, state);</a>
+<a name="ln152">    return state;</a>
+<a name="ln153"> </a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">void</a>
+<a name="ln157">lrm_state_destroy(const char *node_name)</a>
+<a name="ln158">{</a>
+<a name="ln159">    g_hash_table_remove(lrm_state_table, node_name);</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">static gboolean</a>
+<a name="ln163">remote_proxy_remove_by_node(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln164">{</a>
+<a name="ln165">    remote_proxy_t *proxy = value;</a>
+<a name="ln166">    const char *node_name = user_data;</a>
+<a name="ln167"> </a>
+<a name="ln168">    if (safe_str_eq(node_name, proxy-&gt;node_name)) {</a>
+<a name="ln169">        return TRUE;</a>
+<a name="ln170">    }</a>
+<a name="ln171"> </a>
+<a name="ln172">    return FALSE;</a>
+<a name="ln173">}</a>
+<a name="ln174"> </a>
+<a name="ln175">static void</a>
+<a name="ln176">internal_lrm_state_destroy(gpointer data)</a>
+<a name="ln177">{</a>
+<a name="ln178">    lrm_state_t *lrm_state = data;</a>
+<a name="ln179"> </a>
+<a name="ln180">    if (!lrm_state) {</a>
+<a name="ln181">        return;</a>
+<a name="ln182">    }</a>
+<a name="ln183"> </a>
+<a name="ln184">    crm_trace(&quot;Destroying proxy table %s with %d members&quot;, lrm_state-&gt;node_name, g_hash_table_size(proxy_table));</a>
+<a name="ln185">    g_hash_table_foreach_remove(proxy_table, remote_proxy_remove_by_node, (char *) lrm_state-&gt;node_name);</a>
+<a name="ln186">    remote_ra_cleanup(lrm_state);</a>
+<a name="ln187">    lrmd_api_delete(lrm_state-&gt;conn);</a>
+<a name="ln188"> </a>
+<a name="ln189">    if (lrm_state-&gt;rsc_info_cache) {</a>
+<a name="ln190">        crm_trace(&quot;Destroying rsc info cache with %d members&quot;, g_hash_table_size(lrm_state-&gt;rsc_info_cache));</a>
+<a name="ln191">        g_hash_table_destroy(lrm_state-&gt;rsc_info_cache);</a>
+<a name="ln192">    }</a>
+<a name="ln193">    if (lrm_state-&gt;resource_history) {</a>
+<a name="ln194">        crm_trace(&quot;Destroying history op cache with %d members&quot;, g_hash_table_size(lrm_state-&gt;resource_history));</a>
+<a name="ln195">        g_hash_table_destroy(lrm_state-&gt;resource_history);</a>
+<a name="ln196">    }</a>
+<a name="ln197">    if (lrm_state-&gt;deletion_ops) {</a>
+<a name="ln198">        crm_trace(&quot;Destroying deletion op cache with %d members&quot;, g_hash_table_size(lrm_state-&gt;deletion_ops));</a>
+<a name="ln199">        g_hash_table_destroy(lrm_state-&gt;deletion_ops);</a>
+<a name="ln200">    }</a>
+<a name="ln201">    if (lrm_state-&gt;pending_ops) {</a>
+<a name="ln202">        crm_trace(&quot;Destroying pending op cache with %d members&quot;, g_hash_table_size(lrm_state-&gt;pending_ops));</a>
+<a name="ln203">        g_hash_table_destroy(lrm_state-&gt;pending_ops);</a>
+<a name="ln204">    }</a>
+<a name="ln205">    if (lrm_state-&gt;metadata_cache) {</a>
+<a name="ln206">        crm_trace(&quot;Destroying metadata cache with %d members&quot;, g_hash_table_size(lrm_state-&gt;metadata_cache));</a>
+<a name="ln207">        g_hash_table_destroy(lrm_state-&gt;metadata_cache);</a>
+<a name="ln208">    }</a>
+<a name="ln209"> </a>
+<a name="ln210">    free((char *)lrm_state-&gt;node_name);</a>
+<a name="ln211">    free(lrm_state);</a>
+<a name="ln212">}</a>
+<a name="ln213"> </a>
+<a name="ln214">void</a>
+<a name="ln215">lrm_state_reset_tables(lrm_state_t * lrm_state, gboolean reset_metadata)</a>
+<a name="ln216">{</a>
+<a name="ln217">    if (lrm_state-&gt;resource_history) {</a>
+<a name="ln218">        crm_trace(&quot;Re-setting history op cache with %d members&quot;,</a>
+<a name="ln219">                  g_hash_table_size(lrm_state-&gt;resource_history));</a>
+<a name="ln220">        g_hash_table_remove_all(lrm_state-&gt;resource_history);</a>
+<a name="ln221">    }</a>
+<a name="ln222">    if (lrm_state-&gt;deletion_ops) {</a>
+<a name="ln223">        crm_trace(&quot;Re-setting deletion op cache with %d members&quot;,</a>
+<a name="ln224">                  g_hash_table_size(lrm_state-&gt;deletion_ops));</a>
+<a name="ln225">        g_hash_table_remove_all(lrm_state-&gt;deletion_ops);</a>
+<a name="ln226">    }</a>
+<a name="ln227">    if (lrm_state-&gt;pending_ops) {</a>
+<a name="ln228">        crm_trace(&quot;Re-setting pending op cache with %d members&quot;,</a>
+<a name="ln229">                  g_hash_table_size(lrm_state-&gt;pending_ops));</a>
+<a name="ln230">        g_hash_table_remove_all(lrm_state-&gt;pending_ops);</a>
+<a name="ln231">    }</a>
+<a name="ln232">    if (lrm_state-&gt;rsc_info_cache) {</a>
+<a name="ln233">        crm_trace(&quot;Re-setting rsc info cache with %d members&quot;,</a>
+<a name="ln234">                  g_hash_table_size(lrm_state-&gt;rsc_info_cache));</a>
+<a name="ln235">        g_hash_table_remove_all(lrm_state-&gt;rsc_info_cache);</a>
+<a name="ln236">    }</a>
+<a name="ln237">    if (reset_metadata &amp;&amp; lrm_state-&gt;metadata_cache) {</a>
+<a name="ln238">        crm_trace(&quot;Re-setting metadata cache with %d members&quot;,</a>
+<a name="ln239">                  g_hash_table_size(lrm_state-&gt;metadata_cache));</a>
+<a name="ln240">        g_hash_table_remove_all(lrm_state-&gt;metadata_cache);</a>
+<a name="ln241">    }</a>
+<a name="ln242">}</a>
+<a name="ln243"> </a>
+<a name="ln244">static gboolean</a>
+<a name="ln245">has_cached_metadata_for(lrmd_rsc_info_t *rsc, const char *node_name)</a>
+<a name="ln246">{</a>
+<a name="ln247">    return lrm_state_get_rsc_metadata(lrm_state_find(node_name), rsc) != NULL;</a>
+<a name="ln248">}</a>
+<a name="ln249"> </a>
+<a name="ln250">gboolean</a>
+<a name="ln251">lrm_state_init_local(void)</a>
+<a name="ln252">{</a>
+<a name="ln253">    if (lrm_state_table) {</a>
+<a name="ln254">        return TRUE;</a>
+<a name="ln255">    }</a>
+<a name="ln256"> </a>
+<a name="ln257">    lrm_state_table =</a>
+<a name="ln258">        g_hash_table_new_full(crm_strcase_hash, crm_strcase_equal, NULL, internal_lrm_state_destroy);</a>
+<a name="ln259">    if (!lrm_state_table) {</a>
+<a name="ln260">        return FALSE;</a>
+<a name="ln261">    }</a>
+<a name="ln262"> </a>
+<a name="ln263">    proxy_table =</a>
+<a name="ln264">        g_hash_table_new_full(crm_strcase_hash, crm_strcase_equal, NULL, remote_proxy_free);</a>
+<a name="ln265">    if (!proxy_table) {</a>
+<a name="ln266">        g_hash_table_destroy(lrm_state_table);</a>
+<a name="ln267">        lrm_state_table = NULL;</a>
+<a name="ln268">        return FALSE;</a>
+<a name="ln269">    }</a>
+<a name="ln270"> </a>
+<a name="ln271">    crm_register_cache_check_fn(&amp;has_cached_metadata_for);</a>
+<a name="ln272"> </a>
+<a name="ln273">    return TRUE;</a>
+<a name="ln274">}</a>
+<a name="ln275"> </a>
+<a name="ln276">void</a>
+<a name="ln277">lrm_state_destroy_all(void)</a>
+<a name="ln278">{</a>
+<a name="ln279">    crm_unregister_cache_check_fn();</a>
+<a name="ln280"> </a>
+<a name="ln281">    if (lrm_state_table) {</a>
+<a name="ln282">        crm_trace(&quot;Destroying state table with %d members&quot;, g_hash_table_size(lrm_state_table));</a>
+<a name="ln283">        g_hash_table_destroy(lrm_state_table); lrm_state_table = NULL;</a>
+<a name="ln284">    }</a>
+<a name="ln285">    if(proxy_table) {</a>
+<a name="ln286">        crm_trace(&quot;Destroying proxy table with %d members&quot;, g_hash_table_size(proxy_table));</a>
+<a name="ln287">        g_hash_table_destroy(proxy_table); proxy_table = NULL;</a>
+<a name="ln288">    }</a>
+<a name="ln289">}</a>
+<a name="ln290"> </a>
+<a name="ln291">lrm_state_t *</a>
+<a name="ln292">lrm_state_find(const char *node_name)</a>
+<a name="ln293">{</a>
+<a name="ln294">    if (!node_name) {</a>
+<a name="ln295">        return NULL;</a>
+<a name="ln296">    }</a>
+<a name="ln297">    return g_hash_table_lookup(lrm_state_table, node_name);</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">lrm_state_t *</a>
+<a name="ln301">lrm_state_find_or_create(const char *node_name)</a>
+<a name="ln302">{</a>
+<a name="ln303">    lrm_state_t *lrm_state;</a>
+<a name="ln304"> </a>
+<a name="ln305">    lrm_state = g_hash_table_lookup(lrm_state_table, node_name);</a>
+<a name="ln306">    if (!lrm_state) {</a>
+<a name="ln307">        lrm_state = lrm_state_create(node_name);</a>
+<a name="ln308">    }</a>
+<a name="ln309"> </a>
+<a name="ln310">    return lrm_state;</a>
+<a name="ln311">}</a>
+<a name="ln312"> </a>
+<a name="ln313">GList *</a>
+<a name="ln314">lrm_state_get_list(void)</a>
+<a name="ln315">{</a>
+<a name="ln316">    return g_hash_table_get_values(lrm_state_table);</a>
+<a name="ln317">}</a>
+<a name="ln318"> </a>
+<a name="ln319">static remote_proxy_t *</a>
+<a name="ln320">find_connected_proxy_by_node(const char * node_name)</a>
+<a name="ln321">{</a>
+<a name="ln322">    GHashTableIter gIter;</a>
+<a name="ln323">    remote_proxy_t *proxy = NULL;</a>
+<a name="ln324"> </a>
+<a name="ln325">    CRM_CHECK(proxy_table != NULL, return NULL);</a>
+<a name="ln326"> </a>
+<a name="ln327">    g_hash_table_iter_init(&amp;gIter, proxy_table);</a>
+<a name="ln328"> </a>
+<a name="ln329">    while (g_hash_table_iter_next(&amp;gIter, NULL, (gpointer *) &amp;proxy)) {</a>
+<a name="ln330">        if (proxy-&gt;source</a>
+<a name="ln331">            &amp;&amp; safe_str_eq(node_name, proxy-&gt;node_name)) {</a>
+<a name="ln332">            return proxy;</a>
+<a name="ln333">        }</a>
+<a name="ln334">    }</a>
+<a name="ln335"> </a>
+<a name="ln336">    return NULL;</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">static void</a>
+<a name="ln340">remote_proxy_disconnect_by_node(const char * node_name)</a>
+<a name="ln341">{</a>
+<a name="ln342">    remote_proxy_t *proxy = NULL;</a>
+<a name="ln343"> </a>
+<a name="ln344">    CRM_CHECK(proxy_table != NULL, return);</a>
+<a name="ln345"> </a>
+<a name="ln346">    while ((proxy = find_connected_proxy_by_node(node_name)) != NULL) {</a>
+<a name="ln347">        /* mainloop_del_ipc_client() eventually calls remote_proxy_disconnected()</a>
+<a name="ln348">         * , which removes the entry from proxy_table.</a>
+<a name="ln349">         * Do not do this in a g_hash_table_iter_next() loop. */</a>
+<a name="ln350">        if (proxy-&gt;source) {</a>
+<a name="ln351">            mainloop_del_ipc_client(proxy-&gt;source);</a>
+<a name="ln352">        }</a>
+<a name="ln353">    }</a>
+<a name="ln354"> </a>
+<a name="ln355">    return;</a>
+<a name="ln356">}</a>
+<a name="ln357"> </a>
+<a name="ln358">void</a>
+<a name="ln359">lrm_state_disconnect_only(lrm_state_t * lrm_state)</a>
+<a name="ln360">{</a>
+<a name="ln361">    int removed = 0;</a>
+<a name="ln362"> </a>
+<a name="ln363">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln364">        return;</a>
+<a name="ln365">    }</a>
+<a name="ln366">    crm_trace(&quot;Disconnecting %s&quot;, lrm_state-&gt;node_name);</a>
+<a name="ln367"> </a>
+<a name="ln368">    remote_proxy_disconnect_by_node(lrm_state-&gt;node_name);</a>
+<a name="ln369"> </a>
+<a name="ln370">    ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;disconnect(lrm_state-&gt;conn);</a>
+<a name="ln371"> </a>
+<a name="ln372">    if (is_not_set(fsa_input_register, R_SHUTDOWN)) {</a>
+<a name="ln373">        removed = g_hash_table_foreach_remove(lrm_state-&gt;pending_ops, fail_pending_op, lrm_state);</a>
+<a name="ln374">        crm_trace(&quot;Synthesized %d operation failures for %s&quot;, removed, lrm_state-&gt;node_name);</a>
+<a name="ln375">    }</a>
+<a name="ln376">}</a>
+<a name="ln377"> </a>
+<a name="ln378">void</a>
+<a name="ln379">lrm_state_disconnect(lrm_state_t * lrm_state)</a>
+<a name="ln380">{</a>
+<a name="ln381">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln382">        return;</a>
+<a name="ln383">    }</a>
+<a name="ln384"> </a>
+<a name="ln385">    lrm_state_disconnect_only(lrm_state);</a>
+<a name="ln386"> </a>
+<a name="ln387">    lrmd_api_delete(lrm_state-&gt;conn);</a>
+<a name="ln388">    lrm_state-&gt;conn = NULL;</a>
+<a name="ln389">}</a>
+<a name="ln390"> </a>
+<a name="ln391">int</a>
+<a name="ln392">lrm_state_is_connected(lrm_state_t * lrm_state)</a>
+<a name="ln393">{</a>
+<a name="ln394">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln395">        return FALSE;</a>
+<a name="ln396">    }</a>
+<a name="ln397">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;is_connected(lrm_state-&gt;conn);</a>
+<a name="ln398">}</a>
+<a name="ln399"> </a>
+<a name="ln400">int</a>
+<a name="ln401">lrm_state_poke_connection(lrm_state_t * lrm_state)</a>
+<a name="ln402">{</a>
+<a name="ln403"> </a>
+<a name="ln404">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln405">        return -1;</a>
+<a name="ln406">    }</a>
+<a name="ln407">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;poke_connection(lrm_state-&gt;conn);</a>
+<a name="ln408">}</a>
+<a name="ln409"> </a>
+<a name="ln410">int</a>
+<a name="ln411">lrm_state_ipc_connect(lrm_state_t * lrm_state)</a>
+<a name="ln412">{</a>
+<a name="ln413">    int ret;</a>
+<a name="ln414"> </a>
+<a name="ln415">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln416">        lrm_state-&gt;conn = lrmd_api_new();</a>
+<a name="ln417">        ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;set_callback(lrm_state-&gt;conn, lrm_op_callback);</a>
+<a name="ln418">    }</a>
+<a name="ln419"> </a>
+<a name="ln420">    ret = ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;connect(lrm_state-&gt;conn, CRM_SYSTEM_CRMD, NULL);</a>
+<a name="ln421"> </a>
+<a name="ln422">    if (ret != pcmk_ok) {</a>
+<a name="ln423">        lrm_state-&gt;num_lrm_register_fails++;</a>
+<a name="ln424">    } else {</a>
+<a name="ln425">        lrm_state-&gt;num_lrm_register_fails = 0;</a>
+<a name="ln426">    }</a>
+<a name="ln427"> </a>
+<a name="ln428">    return ret;</a>
+<a name="ln429">}</a>
+<a name="ln430"> </a>
+<a name="ln431">static remote_proxy_t *</a>
+<a name="ln432">crmd_remote_proxy_new(lrmd_t *lrmd, const char *node_name, const char *session_id, const char *channel)</a>
+<a name="ln433">{</a>
+<a name="ln434">    static struct ipc_client_callbacks proxy_callbacks = {</a>
+<a name="ln435">        .dispatch = remote_proxy_dispatch,</a>
+<a name="ln436">        .destroy = remote_proxy_disconnected</a>
+<a name="ln437">    };</a>
+<a name="ln438">    remote_proxy_t *proxy = remote_proxy_new(lrmd, &amp;proxy_callbacks, node_name,</a>
+<a name="ln439">                                             session_id, channel);</a>
+<a name="ln440">    return proxy;</a>
+<a name="ln441">}</a>
+<a name="ln442"> </a>
+<a name="ln443">gboolean</a>
+<a name="ln444">crmd_is_proxy_session(const char *session)</a>
+<a name="ln445">{</a>
+<a name="ln446">    return g_hash_table_lookup(proxy_table, session) ? TRUE : FALSE;</a>
+<a name="ln447">}</a>
+<a name="ln448"> </a>
+<a name="ln449">void</a>
+<a name="ln450">crmd_proxy_send(const char *session, xmlNode *msg)</a>
+<a name="ln451">{</a>
+<a name="ln452">    remote_proxy_t *proxy = g_hash_table_lookup(proxy_table, session);</a>
+<a name="ln453">    lrm_state_t *lrm_state = NULL;</a>
+<a name="ln454"> </a>
+<a name="ln455">    if (!proxy) {</a>
+<a name="ln456">        return;</a>
+<a name="ln457">    }</a>
+<a name="ln458">    crm_log_xml_trace(msg, &quot;to-proxy&quot;);</a>
+<a name="ln459">    lrm_state = lrm_state_find(proxy-&gt;node_name);</a>
+<a name="ln460">    if (lrm_state) {</a>
+<a name="ln461">        crm_trace(&quot;Sending event to %.8s on %s&quot;, proxy-&gt;session_id, proxy-&gt;node_name);</a>
+<a name="ln462">        remote_proxy_relay_event(proxy, msg);</a>
+<a name="ln463">    }</a>
+<a name="ln464">}</a>
+<a name="ln465"> </a>
+<a name="ln466">static void</a>
+<a name="ln467">crmd_proxy_dispatch(const char *session, xmlNode *msg)</a>
+<a name="ln468">{</a>
+<a name="ln469"> </a>
+<a name="ln470">    crm_log_xml_trace(msg, &quot;CRMd-PROXY[inbound]&quot;);</a>
+<a name="ln471"> </a>
+<a name="ln472">    crm_xml_add(msg, F_CRM_SYS_FROM, session);</a>
+<a name="ln473">    if (crmd_authorize_message(msg, NULL, session)) {</a>
+<a name="ln474">        route_message(C_IPC_MESSAGE, msg);</a>
+<a name="ln475">    }</a>
+<a name="ln476"> </a>
+<a name="ln477">    trigger_fsa(fsa_source);</a>
+<a name="ln478">}</a>
+<a name="ln479"> </a>
+<a name="ln480">static void</a>
+<a name="ln481">remote_config_check(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln482">{</a>
+<a name="ln483">    if (rc != pcmk_ok) {</a>
+<a name="ln484">        crm_err(&quot;Query resulted in an error: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln485"> </a>
+<a name="ln486">        if (rc == -EACCES || rc == -pcmk_err_schema_validation) {</a>
+<a name="ln487">            crm_err(&quot;The cluster is mis-configured - shutting down and staying down&quot;);</a>
+<a name="ln488">        }</a>
+<a name="ln489"> </a>
+<a name="ln490">    } else {</a>
+<a name="ln491">        lrmd_t * lrmd = (lrmd_t *)user_data;</a>
+<a name="ln492">        crm_time_t *now = crm_time_new(NULL);</a>
+<a name="ln493">        GHashTable *config_hash = g_hash_table_new_full(</a>
+<a name="ln494">            crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln495"> </a>
+<a name="ln496">        crm_debug(&quot;Call %d : Parsing CIB options&quot;, call_id);</a>
+<a name="ln497"> </a>
+<a name="ln498">        unpack_instance_attributes(</a>
+<a name="ln499">            output, output, XML_CIB_TAG_PROPSET, NULL, config_hash, CIB_OPTIONS_FIRST, FALSE, now);</a>
+<a name="ln500"> </a>
+<a name="ln501">        /* Now send it to the remote peer */</a>
+<a name="ln502">        remote_proxy_check(lrmd, config_hash);</a>
+<a name="ln503"> </a>
+<a name="ln504">        g_hash_table_destroy(config_hash);</a>
+<a name="ln505">        crm_time_free(now);</a>
+<a name="ln506">    }</a>
+<a name="ln507">}</a>
+<a name="ln508"> </a>
+<a name="ln509">static void</a>
+<a name="ln510">crmd_remote_proxy_cb(lrmd_t *lrmd, void *userdata, xmlNode *msg)</a>
+<a name="ln511">{</a>
+<a name="ln512">    lrm_state_t *lrm_state = userdata;</a>
+<a name="ln513">    const char *session = crm_element_value(msg, F_LRMD_IPC_SESSION);</a>
+<a name="ln514">    remote_proxy_t *proxy = g_hash_table_lookup(proxy_table, session);</a>
+<a name="ln515"> </a>
+<a name="ln516">    const char *op = crm_element_value(msg, F_LRMD_IPC_OP);</a>
+<a name="ln517">    if (safe_str_eq(op, LRMD_IPC_OP_NEW)) {</a>
+<a name="ln518">        const char *channel = crm_element_value(msg, F_LRMD_IPC_IPC_SERVER);</a>
+<a name="ln519"> </a>
+<a name="ln520">        proxy = crmd_remote_proxy_new(lrmd, lrm_state-&gt;node_name, session, channel);</a>
+<a name="ln521">        if (proxy != NULL) {</a>
+<a name="ln522">            /* Look up stonith-watchdog-timeout and send to the remote peer for validation */</a>
+<a name="ln523">            int rc = fsa_cib_conn-&gt;cmds-&gt;query(fsa_cib_conn, XML_CIB_TAG_CRMCONFIG, NULL, cib_scope_local);</a>
+<a name="ln524">            fsa_cib_conn-&gt;cmds-&gt;register_callback_full(fsa_cib_conn, rc, 10, FALSE, lrmd,</a>
+<a name="ln525">                                                       &quot;remote_config_check&quot;, remote_config_check, NULL);</a>
+<a name="ln526">        }</a>
+<a name="ln527"> </a>
+<a name="ln528">    } else if (safe_str_eq(op, LRMD_IPC_OP_SHUTDOWN_REQ)) {</a>
+<a name="ln529">        char *now_s = NULL;</a>
+<a name="ln530">        time_t now = time(NULL);</a>
+<a name="ln531"> </a>
+<a name="ln532">        crm_notice(&quot;%s requested shutdown of its remote connection&quot;,</a>
+<a name="ln533">                   lrm_state-&gt;node_name);</a>
+<a name="ln534"> </a>
+<a name="ln535">        if (!remote_ra_is_in_maintenance(lrm_state)) {</a>
+<a name="ln536">            now_s = crm_itoa(now);</a>
+<a name="ln537">            update_attrd(lrm_state-&gt;node_name, XML_CIB_ATTR_SHUTDOWN, now_s, NULL, TRUE);</a>
+<a name="ln538">            free(now_s);</a>
+<a name="ln539"> </a>
+<a name="ln540">            remote_proxy_ack_shutdown(lrmd);</a>
+<a name="ln541"> </a>
+<a name="ln542">            crm_warn(&quot;Reconnection attempts to %s may result in failures that must be cleared&quot;,</a>
+<a name="ln543">                    lrm_state-&gt;node_name);</a>
+<a name="ln544">        } else {</a>
+<a name="ln545">            remote_proxy_nack_shutdown(lrmd);</a>
+<a name="ln546"> </a>
+<a name="ln547">            crm_notice(&quot;Remote resource for %s is not managed so no ordered shutdown happening&quot;,</a>
+<a name="ln548">                    lrm_state-&gt;node_name);</a>
+<a name="ln549">        }</a>
+<a name="ln550">        return;</a>
+<a name="ln551"> </a>
+<a name="ln552">    } else if (safe_str_eq(op, LRMD_IPC_OP_REQUEST) &amp;&amp; proxy &amp;&amp; proxy-&gt;is_local) {</a>
+<a name="ln553">        /* this is for the crmd, which we are, so don't try</a>
+<a name="ln554">         * and connect/send to ourselves over ipc. instead</a>
+<a name="ln555">         * do it directly.</a>
+<a name="ln556">         */</a>
+<a name="ln557">        int flags = 0;</a>
+<a name="ln558">        xmlNode *request = get_message_xml(msg, F_LRMD_IPC_MSG);</a>
+<a name="ln559"> </a>
+<a name="ln560">        CRM_CHECK(request != NULL, return);</a>
+<a name="ln561">#if ENABLE_ACL</a>
+<a name="ln562">        CRM_CHECK(lrm_state-&gt;node_name, return);</a>
+<a name="ln563">        crm_xml_add(request, XML_ACL_TAG_ROLE, &quot;pacemaker-remote&quot;);</a>
+<a name="ln564">        crm_acl_get_set_user(request, F_LRMD_IPC_USER, lrm_state-&gt;node_name);</a>
+<a name="ln565">#endif</a>
+<a name="ln566">        crmd_proxy_dispatch(session, request);</a>
+<a name="ln567"> </a>
+<a name="ln568">        crm_element_value_int(msg, F_LRMD_IPC_MSG_FLAGS, &amp;flags);</a>
+<a name="ln569">        if (flags &amp; crm_ipc_client_response) {</a>
+<a name="ln570">            int msg_id = 0;</a>
+<a name="ln571">            xmlNode *op_reply = create_xml_node(NULL, &quot;ack&quot;);</a>
+<a name="ln572"> </a>
+<a name="ln573">            crm_xml_add(op_reply, &quot;function&quot;, __FUNCTION__);</a>
+<a name="ln574">            crm_xml_add_int(op_reply, &quot;line&quot;, __LINE__);</a>
+<a name="ln575"> </a>
+<a name="ln576">            crm_element_value_int(msg, F_LRMD_IPC_MSG_ID, &amp;msg_id);</a>
+<a name="ln577">            remote_proxy_relay_response(proxy, op_reply, msg_id);</a>
+<a name="ln578"> </a>
+<a name="ln579">            free_xml(op_reply);</a>
+<a name="ln580">        }</a>
+<a name="ln581"> </a>
+<a name="ln582">    } else {</a>
+<a name="ln583">        remote_proxy_cb(lrmd, lrm_state-&gt;node_name, msg);</a>
+<a name="ln584">    }</a>
+<a name="ln585">}</a>
+<a name="ln586"> </a>
+<a name="ln587"> </a>
+<a name="ln588">int</a>
+<a name="ln589">lrm_state_remote_connect_async(lrm_state_t * lrm_state, const char *server, int port,</a>
+<a name="ln590">                               int timeout_ms)</a>
+<a name="ln591">{</a>
+<a name="ln592">    int ret;</a>
+<a name="ln593"> </a>
+<a name="ln594">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln595">        lrm_state-&gt;conn = lrmd_remote_api_new(lrm_state-&gt;node_name, server, port);</a>
+<a name="ln596">        if (!lrm_state-&gt;conn) {</a>
+<a name="ln597">            return -1;</a>
+<a name="ln598">        }</a>
+<a name="ln599">        ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;set_callback(lrm_state-&gt;conn, remote_lrm_op_callback);</a>
+<a name="ln600">        lrmd_internal_set_proxy_callback(lrm_state-&gt;conn, lrm_state, crmd_remote_proxy_cb);</a>
+<a name="ln601">    }</a>
+<a name="ln602"> </a>
+<a name="ln603">    crm_trace(&quot;initiating remote connection to %s at %d with timeout %d&quot;, server, port, timeout_ms);</a>
+<a name="ln604">    ret =</a>
+<a name="ln605">        ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;connect_async(lrm_state-&gt;conn, lrm_state-&gt;node_name,</a>
+<a name="ln606">                                                          timeout_ms);</a>
+<a name="ln607"> </a>
+<a name="ln608">    if (ret != pcmk_ok) {</a>
+<a name="ln609">        lrm_state-&gt;num_lrm_register_fails++;</a>
+<a name="ln610">    } else {</a>
+<a name="ln611">        lrm_state-&gt;num_lrm_register_fails = 0;</a>
+<a name="ln612">    }</a>
+<a name="ln613"> </a>
+<a name="ln614">    return ret;</a>
+<a name="ln615">}</a>
+<a name="ln616"> </a>
+<a name="ln617">int</a>
+<a name="ln618">lrm_state_get_metadata(lrm_state_t * lrm_state,</a>
+<a name="ln619">                       const char *class,</a>
+<a name="ln620">                       const char *provider,</a>
+<a name="ln621">                       const char *agent, char **output, enum lrmd_call_options options)</a>
+<a name="ln622">{</a>
+<a name="ln623">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln624">        return -ENOTCONN;</a>
+<a name="ln625">    }</a>
+<a name="ln626"> </a>
+<a name="ln627">    /* Optimize this... only retrieve metadata from local lrmd connection. Perhaps consider</a>
+<a name="ln628">     * caching result. */</a>
+<a name="ln629">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;get_metadata(lrm_state-&gt;conn, class, provider, agent,</a>
+<a name="ln630">                                                            output, options);</a>
+<a name="ln631">}</a>
+<a name="ln632"> </a>
+<a name="ln633">int</a>
+<a name="ln634">lrm_state_cancel(lrm_state_t * lrm_state, const char *rsc_id, const char *action, int interval)</a>
+<a name="ln635">{</a>
+<a name="ln636">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln637">        return -ENOTCONN;</a>
+<a name="ln638">    }</a>
+<a name="ln639"> </a>
+<a name="ln640">    /* Figure out a way to make this async?</a>
+<a name="ln641">     * NOTICE: Currently it's synced and directly acknowledged in do_lrm_invoke(). */</a>
+<a name="ln642">    if (is_remote_lrmd_ra(NULL, NULL, rsc_id)) {</a>
+<a name="ln643">        return remote_ra_cancel(lrm_state, rsc_id, action, interval);</a>
+<a name="ln644">    }</a>
+<a name="ln645">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;cancel(lrm_state-&gt;conn, rsc_id, action, interval);</a>
+<a name="ln646">}</a>
+<a name="ln647"> </a>
+<a name="ln648">lrmd_rsc_info_t *</a>
+<a name="ln649">lrm_state_get_rsc_info(lrm_state_t * lrm_state, const char *rsc_id, enum lrmd_call_options options)</a>
+<a name="ln650">{</a>
+<a name="ln651">    lrmd_rsc_info_t *rsc = NULL;</a>
+<a name="ln652"> </a>
+<a name="ln653">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln654">        return NULL;</a>
+<a name="ln655">    }</a>
+<a name="ln656">    if (is_remote_lrmd_ra(NULL, NULL, rsc_id)) {</a>
+<a name="ln657">        return remote_ra_get_rsc_info(lrm_state, rsc_id);</a>
+<a name="ln658">    }</a>
+<a name="ln659"> </a>
+<a name="ln660">    rsc = g_hash_table_lookup(lrm_state-&gt;rsc_info_cache, rsc_id);</a>
+<a name="ln661">    if (rsc == NULL) {</a>
+<a name="ln662">        /* only contact the lrmd if we don't already have a cached rsc info */</a>
+<a name="ln663">        rsc = ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;get_rsc_info(lrm_state-&gt;conn, rsc_id, options);</a>
+<a name="ln664">        if (rsc == NULL) {</a>
+<a name="ln665">		    return NULL;</a>
+<a name="ln666">        }</a>
+<a name="ln667">        /* cache the result */</a>
+<a name="ln668">        g_hash_table_insert(lrm_state-&gt;rsc_info_cache, rsc-&gt;id, rsc);</a>
+<a name="ln669">    }</a>
+<a name="ln670"> </a>
+<a name="ln671">    return lrmd_copy_rsc_info(rsc);</a>
+<a name="ln672"> </a>
+<a name="ln673">}</a>
+<a name="ln674"> </a>
+<a name="ln675">int</a>
+<a name="ln676">lrm_state_exec(lrm_state_t * lrm_state, const char *rsc_id, const char *action, const char *userdata, int interval,     /* ms */</a>
+<a name="ln677">               int timeout,     /* ms */</a>
+<a name="ln678">               int start_delay, /* ms */</a>
+<a name="ln679">               lrmd_key_value_t * params)</a>
+<a name="ln680">{</a>
+<a name="ln681"> </a>
+<a name="ln682">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln683">        lrmd_key_value_freeall(params);</a>
+<a name="ln684">        return -ENOTCONN;</a>
+<a name="ln685">    }</a>
+<a name="ln686"> </a>
+<a name="ln687">    if (is_remote_lrmd_ra(NULL, NULL, rsc_id)) {</a>
+<a name="ln688">        return remote_ra_exec(lrm_state,</a>
+<a name="ln689">                              rsc_id, action, userdata, interval, timeout, start_delay, params);</a>
+<a name="ln690">    }</a>
+<a name="ln691"> </a>
+<a name="ln692">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;exec(lrm_state-&gt;conn,</a>
+<a name="ln693">                                                    rsc_id,</a>
+<a name="ln694">                                                    action,</a>
+<a name="ln695">                                                    userdata,</a>
+<a name="ln696">                                                    interval,</a>
+<a name="ln697">                                                    timeout,</a>
+<a name="ln698">                                                    start_delay,</a>
+<a name="ln699">                                                    lrmd_opt_notify_changes_only, params);</a>
+<a name="ln700">}</a>
+<a name="ln701"> </a>
+<a name="ln702">int</a>
+<a name="ln703">lrm_state_register_rsc(lrm_state_t * lrm_state,</a>
+<a name="ln704">                       const char *rsc_id,</a>
+<a name="ln705">                       const char *class,</a>
+<a name="ln706">                       const char *provider, const char *agent, enum lrmd_call_options options)</a>
+<a name="ln707">{</a>
+<a name="ln708">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln709">        return -ENOTCONN;</a>
+<a name="ln710">    }</a>
+<a name="ln711"> </a>
+<a name="ln712">    /* optimize this... this function is a synced round trip from client to daemon.</a>
+<a name="ln713">     * The crmd/lrm.c code path should be re-factored to allow the register of resources</a>
+<a name="ln714">     * to be performed async. The lrmd client api needs to make an async version</a>
+<a name="ln715">     * of register available. */</a>
+<a name="ln716">    if (is_remote_lrmd_ra(agent, provider, NULL)) {</a>
+<a name="ln717">        return lrm_state_find_or_create(rsc_id) ? pcmk_ok : -1;</a>
+<a name="ln718">    }</a>
+<a name="ln719"> </a>
+<a name="ln720">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;register_rsc(lrm_state-&gt;conn, rsc_id, class,</a>
+<a name="ln721">                                                            provider, agent, options);</a>
+<a name="ln722">}</a>
+<a name="ln723"> </a>
+<a name="ln724">int</a>
+<a name="ln725">lrm_state_unregister_rsc(lrm_state_t * lrm_state,</a>
+<a name="ln726">                         const char *rsc_id, enum lrmd_call_options options)</a>
+<a name="ln727">{</a>
+<a name="ln728">    if (!lrm_state-&gt;conn) {</a>
+<a name="ln729">        return -ENOTCONN;</a>
+<a name="ln730">    }</a>
+<a name="ln731"> </a>
+<a name="ln732">    /* optimize this... this function is a synced round trip from client to daemon.</a>
+<a name="ln733">     * The crmd/lrm.c code path that uses this function should always treat it as an</a>
+<a name="ln734">     * async operation. The lrmd client api needs to make an async version unreg available. */</a>
+<a name="ln735">    if (is_remote_lrmd_ra(NULL, NULL, rsc_id)) {</a>
+<a name="ln736">        lrm_state_destroy(rsc_id);</a>
+<a name="ln737">        return pcmk_ok;</a>
+<a name="ln738">    }</a>
+<a name="ln739"> </a>
+<a name="ln740">    g_hash_table_remove(lrm_state-&gt;rsc_info_cache, rsc_id);</a>
+<a name="ln741"> </a>
+<a name="ln742">    return ((lrmd_t *) lrm_state-&gt;conn)-&gt;cmds-&gt;unregister_rsc(lrm_state-&gt;conn, rsc_id, options);</a>
+<a name="ln743">}</a>
+<a name="ln744"> </a>
+<a name="ln745">xmlNode *</a>
+<a name="ln746">lrm_state_update_rsc_metadata(lrm_state_t *lrm_state, lrmd_rsc_info_t *rsc, const char *metadata_str)</a>
+<a name="ln747">{</a>
+<a name="ln748">    char *key = NULL;</a>
+<a name="ln749">    xmlNode *metadata = NULL;</a>
+<a name="ln750"> </a>
+<a name="ln751">    CRM_CHECK(lrm_state &amp;&amp; rsc &amp;&amp; metadata_str, return NULL);</a>
+<a name="ln752"> </a>
+<a name="ln753">    key = crm_generate_ra_key(rsc-&gt;class, rsc-&gt;provider, rsc-&gt;type);</a>
+<a name="ln754">    if (!key) {</a>
+<a name="ln755">        return NULL;</a>
+<a name="ln756">    }</a>
+<a name="ln757"> </a>
+<a name="ln758">    metadata = string2xml(metadata_str);</a>
+<a name="ln759">    if (!metadata) {</a>
+<a name="ln760">        crm_err(&quot;Metadata for %s (%s:%s:%s) is not valid XML&quot;, rsc-&gt;id, rsc-&gt;class, rsc-&gt;provider, rsc-&gt;type);</a>
+<a name="ln761">        free(key);</a>
+<a name="ln762">        return NULL;</a>
+<a name="ln763">    }</a>
+<a name="ln764"> </a>
+<a name="ln765">    g_hash_table_replace(lrm_state-&gt;metadata_cache, key, metadata);</a>
+<a name="ln766"> </a>
+<a name="ln767">    return metadata;</a>
+<a name="ln768">}</a>
+<a name="ln769"> </a>
+<a name="ln770">xmlNode *</a>
+<a name="ln771">lrm_state_get_rsc_metadata(lrm_state_t *lrm_state, lrmd_rsc_info_t *rsc)</a>
+<a name="ln772">{</a>
+<a name="ln773">    char *key = NULL;</a>
+<a name="ln774">    xmlNode *metadata = NULL;</a>
+<a name="ln775"> </a>
+<a name="ln776">    CRM_CHECK(lrm_state &amp;&amp; rsc, return NULL);</a>
+<a name="ln777"> </a>
+<a name="ln778">    key = crm_generate_ra_key(rsc-&gt;class, rsc-&gt;provider, rsc-&gt;type);</a>
+<a name="ln779">    if (!key) {</a>
+<a name="ln780">        return NULL;</a>
+<a name="ln781">    }</a>
+<a name="ln782"> </a>
+<a name="ln783">    metadata = g_hash_table_lookup(lrm_state-&gt;metadata_cache, key);</a>
+<a name="ln784">    free(key);</a>
+<a name="ln785"> </a>
+<a name="ln786">    return metadata;</a>
+<a name="ln787">}</a>
+
+</code></pre>
+<div class="balloon" rel="151"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 151, 134.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

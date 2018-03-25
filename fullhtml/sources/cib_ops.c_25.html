@@ -1,0 +1,903 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27">#include &lt;stdlib.h&gt;</a>
+<a name="ln28">#include &lt;errno.h&gt;</a>
+<a name="ln29">#include &lt;fcntl.h&gt;</a>
+<a name="ln30">#include &lt;time.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;sys/param.h&gt;</a>
+<a name="ln33">#include &lt;sys/types.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;crm/crm.h&gt;</a>
+<a name="ln36">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln37">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln40"> </a>
+<a name="ln41">int</a>
+<a name="ln42">cib_process_query(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln43">                  xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln44">{</a>
+<a name="ln45">    xmlNode *obj_root = NULL;</a>
+<a name="ln46">    int result = pcmk_ok;</a>
+<a name="ln47"> </a>
+<a name="ln48">    crm_trace(&quot;Processing \&quot;%s\&quot; event for section=%s&quot;, op, crm_str(section));</a>
+<a name="ln49"> </a>
+<a name="ln50">    if (options &amp; cib_xpath) {</a>
+<a name="ln51">        return cib_process_xpath(op, options, section, req, input,</a>
+<a name="ln52">                                 existing_cib, result_cib, answer);</a>
+<a name="ln53">    }</a>
+<a name="ln54"> </a>
+<a name="ln55">    CRM_CHECK(*answer == NULL, free_xml(*answer));</a>
+<a name="ln56">    *answer = NULL;</a>
+<a name="ln57"> </a>
+<a name="ln58">    if (safe_str_eq(XML_CIB_TAG_SECTION_ALL, section)) {</a>
+<a name="ln59">        section = NULL;</a>
+<a name="ln60">    }</a>
+<a name="ln61"> </a>
+<a name="ln62">    obj_root = get_object_root(section, existing_cib);</a>
+<a name="ln63"> </a>
+<a name="ln64">    if (obj_root == NULL) {</a>
+<a name="ln65">        result = -ENXIO;</a>
+<a name="ln66"> </a>
+<a name="ln67">    } else if (options &amp; cib_no_children) {</a>
+<a name="ln68">        const char *tag = TYPE(obj_root);</a>
+<a name="ln69">        xmlNode *shallow = create_xml_node(*answer, tag);</a>
+<a name="ln70"> </a>
+<a name="ln71">        copy_in_properties(shallow, obj_root);</a>
+<a name="ln72">        *answer = shallow;</a>
+<a name="ln73"> </a>
+<a name="ln74">    } else {</a>
+<a name="ln75">        *answer = obj_root;</a>
+<a name="ln76">    }</a>
+<a name="ln77"> </a>
+<a name="ln78">    if (result == pcmk_ok &amp;&amp; *answer == NULL) {</a>
+<a name="ln79">        crm_err(&quot;Error creating query response&quot;);</a>
+<a name="ln80">        result = -ENOMSG;</a>
+<a name="ln81">    }</a>
+<a name="ln82"> </a>
+<a name="ln83">    return result;</a>
+<a name="ln84">}</a>
+<a name="ln85"> </a>
+<a name="ln86">int</a>
+<a name="ln87">cib_process_erase(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln88">                  xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln89">{</a>
+<a name="ln90">    int result = pcmk_ok;</a>
+<a name="ln91"> </a>
+<a name="ln92">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln93">    *answer = NULL;</a>
+<a name="ln94">    free_xml(*result_cib);</a>
+<a name="ln95">    *result_cib = createEmptyCib(0);</a>
+<a name="ln96"> </a>
+<a name="ln97">    copy_in_properties(*result_cib, existing_cib);</a>
+<a name="ln98">    cib_update_counter(*result_cib, XML_ATTR_GENERATION_ADMIN, FALSE);</a>
+<a name="ln99"> </a>
+<a name="ln100">    return result;</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">int</a>
+<a name="ln104">cib_process_upgrade(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln105">                    xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln106">                    xmlNode ** answer)</a>
+<a name="ln107">{</a>
+<a name="ln108">    int rc = 0;</a>
+<a name="ln109">    int new_version = 0;</a>
+<a name="ln110">    int current_version = 0;</a>
+<a name="ln111">    int max_version = 0;</a>
+<a name="ln112">    const char *max = crm_element_value(req, F_CIB_SCHEMA_MAX);</a>
+<a name="ln113">    const char *value = crm_element_value(existing_cib, XML_ATTR_VALIDATION);</a>
+<a name="ln114"> </a>
+<a name="ln115">    *answer = NULL;</a>
+<a name="ln116">    crm_trace(&quot;Processing \&quot;%s\&quot; event with max=%s&quot;, op, max);</a>
+<a name="ln117"> </a>
+<a name="ln118">    if (value != NULL) {</a>
+<a name="ln119">        current_version = get_schema_version(value);</a>
+<a name="ln120">    }</a>
+<a name="ln121"> </a>
+<a name="ln122">    if (max) {</a>
+<a name="ln123">        max_version = get_schema_version(max);</a>
+<a name="ln124">    }</a>
+<a name="ln125"> </a>
+<a name="ln126">    rc = update_validation(result_cib, &amp;new_version, max_version, TRUE, TRUE);</a>
+<a name="ln127">    if (new_version &gt; current_version) {</a>
+<a name="ln128">        cib_update_counter(*result_cib, XML_ATTR_GENERATION_ADMIN, FALSE);</a>
+<a name="ln129">        cib_update_counter(*result_cib, XML_ATTR_GENERATION, TRUE);</a>
+<a name="ln130">        cib_update_counter(*result_cib, XML_ATTR_NUMUPDATES, TRUE);</a>
+<a name="ln131">        return pcmk_ok;</a>
+<a name="ln132">    }</a>
+<a name="ln133"> </a>
+<a name="ln134">    return rc;</a>
+<a name="ln135">}</a>
+<a name="ln136"> </a>
+<a name="ln137">int</a>
+<a name="ln138">cib_process_bump(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln139">                 xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln140">{</a>
+<a name="ln141">    int result = pcmk_ok;</a>
+<a name="ln142"> </a>
+<a name="ln143">    crm_trace(&quot;Processing \&quot;%s\&quot; event for epoch=%s&quot;,</a>
+<a name="ln144">              op, crm_str(crm_element_value(existing_cib, XML_ATTR_GENERATION)));</a>
+<a name="ln145"> </a>
+<a name="ln146">    *answer = NULL;</a>
+<a name="ln147">    cib_update_counter(*result_cib, XML_ATTR_GENERATION, FALSE);</a>
+<a name="ln148"> </a>
+<a name="ln149">    return result;</a>
+<a name="ln150">}</a>
+<a name="ln151"> </a>
+<a name="ln152">int</a>
+<a name="ln153">cib_update_counter(xmlNode * xml_obj, const char *field, gboolean reset)</a>
+<a name="ln154">{</a>
+<a name="ln155">    char *new_value = NULL;</a>
+<a name="ln156">    char *old_value = NULL;</a>
+<a name="ln157">    int int_value = -1;</a>
+<a name="ln158"> </a>
+<a name="ln159">    if (reset == FALSE &amp;&amp; crm_element_value(xml_obj, field) != NULL) {</a>
+<a name="ln160">        old_value = crm_element_value_copy(xml_obj, field);</a>
+<a name="ln161">    }</a>
+<a name="ln162">    if (old_value != NULL) {</a>
+<a name="ln163">        new_value = calloc(1, 128);</a>
+<a name="ln164">        int_value = atoi(old_value);</a>
+<a name="ln165">        sprintf(new_value, &quot;%d&quot;, ++int_value);</a>
+<a name="ln166">    } else {</a>
+<a name="ln167">        new_value = strdup(&quot;1&quot;);</a>
+<a name="ln168">    }</a>
+<a name="ln169"> </a>
+<a name="ln170">    crm_trace(&quot;%s %d(%s)-&gt;%s&quot;, field, int_value, crm_str(old_value), crm_str(new_value));</a>
+<a name="ln171">    crm_xml_add(xml_obj, field, new_value);</a>
+<a name="ln172"> </a>
+<a name="ln173">    free(new_value);</a>
+<a name="ln174">    free(old_value);</a>
+<a name="ln175"> </a>
+<a name="ln176">    return pcmk_ok;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">int</a>
+<a name="ln180">cib_process_replace(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln181">                    xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln182">                    xmlNode ** answer)</a>
+<a name="ln183">{</a>
+<a name="ln184">    const char *tag = NULL;</a>
+<a name="ln185">    int result = pcmk_ok;</a>
+<a name="ln186"> </a>
+<a name="ln187">    crm_trace(&quot;Processing \&quot;%s\&quot; event for section=%s&quot;, op, crm_str(section));</a>
+<a name="ln188"> </a>
+<a name="ln189">    if (options &amp; cib_xpath) {</a>
+<a name="ln190">        return cib_process_xpath(op, options, section, req, input,</a>
+<a name="ln191">                                 existing_cib, result_cib, answer);</a>
+<a name="ln192">    }</a>
+<a name="ln193"> </a>
+<a name="ln194">    *answer = NULL;</a>
+<a name="ln195"> </a>
+<a name="ln196">    if (input == NULL) {</a>
+<a name="ln197">        return -EINVAL;</a>
+<a name="ln198">    }</a>
+<a name="ln199"> </a>
+<a name="ln200">    tag = crm_element_name(input);</a>
+<a name="ln201"> </a>
+<a name="ln202">    if (safe_str_eq(XML_CIB_TAG_SECTION_ALL, section)) {</a>
+<a name="ln203">        section = NULL;</a>
+<a name="ln204"> </a>
+<a name="ln205">    } else if (safe_str_eq(tag, section)) {</a>
+<a name="ln206">        section = NULL;</a>
+<a name="ln207">    }</a>
+<a name="ln208"> </a>
+<a name="ln209">    if (safe_str_eq(tag, XML_TAG_CIB)) {</a>
+<a name="ln210">        int updates = 0;</a>
+<a name="ln211">        int epoch = 0;</a>
+<a name="ln212">        int admin_epoch = 0;</a>
+<a name="ln213"> </a>
+<a name="ln214">        int replace_updates = 0;</a>
+<a name="ln215">        int replace_epoch = 0;</a>
+<a name="ln216">        int replace_admin_epoch = 0;</a>
+<a name="ln217"> </a>
+<a name="ln218">        const char *reason = NULL;</a>
+<a name="ln219">        const char *peer = crm_element_value(req, F_ORIG);</a>
+<a name="ln220">        const char *digest = crm_element_value(req, XML_ATTR_DIGEST);</a>
+<a name="ln221"> </a>
+<a name="ln222">        if (digest) {</a>
+<a name="ln223">            const char *version = crm_element_value(req, XML_ATTR_CRM_VERSION);</a>
+<a name="ln224">            char *digest_verify = calculate_xml_versioned_digest(input, FALSE, TRUE,</a>
+<a name="ln225">                                                                 version ? version :</a>
+<a name="ln226">                                                                 CRM_FEATURE_SET);</a>
+<a name="ln227"> </a>
+<a name="ln228">            if (safe_str_neq(digest_verify, digest)) {</a>
+<a name="ln229">                crm_err(&quot;Digest mis-match on replace from %s: %s vs. %s (expected)&quot;, peer,</a>
+<a name="ln230">                        digest_verify, digest);</a>
+<a name="ln231">                reason = &quot;digest mismatch&quot;;</a>
+<a name="ln232"> </a>
+<a name="ln233">            } else {</a>
+<a name="ln234">                crm_info(&quot;Digest matched on replace from %s: %s&quot;, peer, digest);</a>
+<a name="ln235">            }</a>
+<a name="ln236">            free(digest_verify);</a>
+<a name="ln237"> </a>
+<a name="ln238">        } else {</a>
+<a name="ln239">            crm_trace(&quot;No digest to verify&quot;);</a>
+<a name="ln240">        }</a>
+<a name="ln241"> </a>
+<a name="ln242">        cib_version_details(existing_cib, &amp;admin_epoch, &amp;epoch, &amp;updates);</a>
+<a name="ln243">        cib_version_details(input, &amp;replace_admin_epoch, &amp;replace_epoch, &amp;replace_updates);</a>
+<a name="ln244"> </a>
+<a name="ln245">        if (replace_admin_epoch &lt; admin_epoch) {</a>
+<a name="ln246">            reason = XML_ATTR_GENERATION_ADMIN;</a>
+<a name="ln247"> </a>
+<a name="ln248">        } else if (replace_admin_epoch &gt; admin_epoch) {</a>
+<a name="ln249">            /* no more checks */</a>
+<a name="ln250"> </a>
+<a name="ln251">        } else if (replace_epoch &lt; epoch) {</a>
+<a name="ln252">            reason = XML_ATTR_GENERATION;</a>
+<a name="ln253"> </a>
+<a name="ln254">        } else if (replace_epoch &gt; epoch) {</a>
+<a name="ln255">            /* no more checks */</a>
+<a name="ln256"> </a>
+<a name="ln257">        } else if (replace_updates &lt; updates) {</a>
+<a name="ln258">            reason = XML_ATTR_NUMUPDATES;</a>
+<a name="ln259">        }</a>
+<a name="ln260"> </a>
+<a name="ln261">        if (reason != NULL) {</a>
+<a name="ln262">            crm_info(&quot;Replacement %d.%d.%d from %s not applied to %d.%d.%d:&quot;</a>
+<a name="ln263">                     &quot; current %s is greater than the replacement&quot;,</a>
+<a name="ln264">                     replace_admin_epoch, replace_epoch,</a>
+<a name="ln265">                     replace_updates, peer, admin_epoch, epoch, updates, reason);</a>
+<a name="ln266">            result = -pcmk_err_old_data;</a>
+<a name="ln267">        } else {</a>
+<a name="ln268">            crm_info(&quot;Replaced %d.%d.%d with %d.%d.%d from %s&quot;,</a>
+<a name="ln269">                     admin_epoch, epoch, updates,</a>
+<a name="ln270">                     replace_admin_epoch, replace_epoch, replace_updates, peer);</a>
+<a name="ln271">        }</a>
+<a name="ln272"> </a>
+<a name="ln273">        free_xml(*result_cib);</a>
+<a name="ln274">        *result_cib = copy_xml(input);</a>
+<a name="ln275"> </a>
+<a name="ln276">    } else {</a>
+<a name="ln277">        xmlNode *obj_root = NULL;</a>
+<a name="ln278">        gboolean ok = TRUE;</a>
+<a name="ln279"> </a>
+<a name="ln280">        obj_root = get_object_root(section, *result_cib);</a>
+<a name="ln281">        ok = replace_xml_child(NULL, obj_root, input, FALSE);</a>
+<a name="ln282">        if (ok == FALSE) {</a>
+<a name="ln283">            crm_trace(&quot;No matching object to replace&quot;);</a>
+<a name="ln284">            result = -ENXIO;</a>
+<a name="ln285">        }</a>
+<a name="ln286">    }</a>
+<a name="ln287"> </a>
+<a name="ln288">    return result;</a>
+<a name="ln289">}</a>
+<a name="ln290"> </a>
+<a name="ln291">int</a>
+<a name="ln292">cib_process_delete(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln293">                   xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln294">{</a>
+<a name="ln295">    xmlNode *obj_root = NULL;</a>
+<a name="ln296"> </a>
+<a name="ln297">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln298"> </a>
+<a name="ln299">    if (options &amp; cib_xpath) {</a>
+<a name="ln300">        return cib_process_xpath(op, options, section, req, input,</a>
+<a name="ln301">                                 existing_cib, result_cib, answer);</a>
+<a name="ln302">    }</a>
+<a name="ln303"> </a>
+<a name="ln304">    if (input == NULL) {</a>
+<a name="ln305">        crm_err(&quot;Cannot perform modification with no data&quot;);</a>
+<a name="ln306">        return -EINVAL;</a>
+<a name="ln307">    }</a>
+<a name="ln308"> </a>
+<a name="ln309">    obj_root = get_object_root(section, *result_cib);</a>
+<a name="ln310">    if(safe_str_eq(crm_element_name(input), section)) {</a>
+<a name="ln311">        xmlNode *child = NULL;</a>
+<a name="ln312">        for(child = __xml_first_child(input); child; child = __xml_next(child)) {</a>
+<a name="ln313">            if (replace_xml_child(NULL, obj_root, child, TRUE) == FALSE) {</a>
+<a name="ln314">                crm_trace(&quot;No matching object to delete: %s=%s&quot;, child-&gt;name, ID(child));</a>
+<a name="ln315">            }</a>
+<a name="ln316">        }</a>
+<a name="ln317"> </a>
+<a name="ln318">    } else if (replace_xml_child(NULL, obj_root, input, TRUE) == FALSE) {</a>
+<a name="ln319">            crm_trace(&quot;No matching object to delete: %s=%s&quot;, input-&gt;name, ID(input));</a>
+<a name="ln320">    }</a>
+<a name="ln321"> </a>
+<a name="ln322">    return pcmk_ok;</a>
+<a name="ln323">}</a>
+<a name="ln324"> </a>
+<a name="ln325">int</a>
+<a name="ln326">cib_process_modify(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln327">                   xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln328">{</a>
+<a name="ln329">    xmlNode *obj_root = NULL;</a>
+<a name="ln330"> </a>
+<a name="ln331">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln332"> </a>
+<a name="ln333">    if (options &amp; cib_xpath) {</a>
+<a name="ln334">        return cib_process_xpath(op, options, section, req, input,</a>
+<a name="ln335">                                 existing_cib, result_cib, answer);</a>
+<a name="ln336">    }</a>
+<a name="ln337"> </a>
+<a name="ln338">    if (input == NULL) {</a>
+<a name="ln339">        crm_err(&quot;Cannot perform modification with no data&quot;);</a>
+<a name="ln340">        return -EINVAL;</a>
+<a name="ln341">    }</a>
+<a name="ln342"> </a>
+<a name="ln343">    obj_root = get_object_root(section, *result_cib);</a>
+<a name="ln344">    if (obj_root == NULL) {</a>
+<a name="ln345">        xmlNode *tmp_section = NULL;</a>
+<a name="ln346">        const char *path = get_object_parent(section);</a>
+<a name="ln347"> </a>
+<a name="ln348">        if (path == NULL) {</a>
+<a name="ln349">            return -EINVAL;</a>
+<a name="ln350">        }</a>
+<a name="ln351"> </a>
+<a name="ln352">        tmp_section = create_xml_node(NULL, section);</a>
+<a name="ln353">        cib_process_xpath(CIB_OP_CREATE, 0, path, NULL, tmp_section, NULL, result_cib, answer);</a>
+<a name="ln354">        free_xml(tmp_section);</a>
+<a name="ln355"> </a>
+<a name="ln356">        obj_root = get_object_root(section, *result_cib);</a>
+<a name="ln357">    }</a>
+<a name="ln358"> </a>
+<a name="ln359">    CRM_CHECK(obj_root != NULL, return -EINVAL);</a>
+<a name="ln360"> </a>
+<a name="ln361">    if (update_xml_child(obj_root, input) == FALSE) {</a>
+<a name="ln362">        if (options &amp; cib_can_create) {</a>
+<a name="ln363">            add_node_copy(obj_root, input);</a>
+<a name="ln364">        } else {</a>
+<a name="ln365">            return -ENXIO;</a>
+<a name="ln366">        }</a>
+<a name="ln367">    }</a>
+<a name="ln368"> </a>
+<a name="ln369">    if(options &amp; cib_mixed_update) {</a>
+<a name="ln370">        int max = 0, lpc;</a>
+<a name="ln371">        xmlXPathObjectPtr xpathObj = xpath_search(*result_cib, &quot;//@__delete__&quot;);</a>
+<a name="ln372"> </a>
+<a name="ln373">        if (xpathObj) {</a>
+<a name="ln374">            max = numXpathResults(xpathObj);</a>
+<a name="ln375">            crm_log_xml_trace(*result_cib, &quot;Mixed result&quot;);</a>
+<a name="ln376">        }</a>
+<a name="ln377"> </a>
+<a name="ln378">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln379">            xmlNode *match = getXpathResult(xpathObj, lpc);</a>
+<a name="ln380">            xmlChar *match_path = xmlGetNodePath(match);</a>
+<a name="ln381"> </a>
+<a name="ln382">            crm_debug(&quot;Destroying %s&quot;, match_path);</a>
+<a name="ln383">            free(match_path);</a>
+<a name="ln384">            free_xml(match);</a>
+<a name="ln385">        }</a>
+<a name="ln386"> </a>
+<a name="ln387">        freeXpathObject(xpathObj);</a>
+<a name="ln388">    }</a>
+<a name="ln389">    return pcmk_ok;</a>
+<a name="ln390">}</a>
+<a name="ln391"> </a>
+<a name="ln392">static int</a>
+<a name="ln393">update_cib_object(xmlNode * parent, xmlNode * update)</a>
+<a name="ln394">{</a>
+<a name="ln395">    int result = pcmk_ok;</a>
+<a name="ln396">    xmlNode *target = NULL;</a>
+<a name="ln397">    xmlNode *a_child = NULL;</a>
+<a name="ln398">    const char *replace = NULL;</a>
+<a name="ln399">    const char *object_id = NULL;</a>
+<a name="ln400">    const char *object_name = NULL;</a>
+<a name="ln401"> </a>
+<a name="ln402">    CRM_CHECK(update != NULL, return -EINVAL);</a>
+<a name="ln403">    CRM_CHECK(parent != NULL, return -EINVAL);</a>
+<a name="ln404"> </a>
+<a name="ln405">    object_name = crm_element_name(update);</a>
+<a name="ln406">    CRM_CHECK(object_name != NULL, return -EINVAL);</a>
+<a name="ln407"> </a>
+<a name="ln408">    object_id = ID(update);</a>
+<a name="ln409">    crm_trace(&quot;Processing: &lt;%s id=%s&gt;&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln410"> </a>
+<a name="ln411">    if (object_id == NULL) {</a>
+<a name="ln412">        /*  placeholder object */</a>
+<a name="ln413">        target = find_xml_node(parent, object_name, FALSE);</a>
+<a name="ln414"> </a>
+<a name="ln415">    } else {</a>
+<a name="ln416">        target = find_entity(parent, object_name, object_id);</a>
+<a name="ln417">    }</a>
+<a name="ln418"> </a>
+<a name="ln419">    if (target == NULL) {</a>
+<a name="ln420">        target = create_xml_node(parent, object_name);</a>
+<a name="ln421">    }</a>
+<a name="ln422"> </a>
+<a name="ln423">    crm_trace(&quot;Found node &lt;%s id=%s&gt; to update&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln424"> </a>
+<a name="ln425">    replace = crm_element_value(update, XML_CIB_ATTR_REPLACE);</a>
+<a name="ln426">    if (replace != NULL) {</a>
+<a name="ln427">        xmlNode *remove = NULL;</a>
+<a name="ln428">        int last = 0, lpc = 0, len = 0;</a>
+<a name="ln429"> </a>
+<a name="ln430">        len = strlen(replace);</a>
+<a name="ln431">        while (lpc &lt;= len) {</a>
+<a name="ln432">            if (replace[lpc] == ',' || replace[lpc] == 0) {</a>
+<a name="ln433">                char *replace_item = NULL;</a>
+<a name="ln434"> </a>
+<a name="ln435">                if (last == lpc) {</a>
+<a name="ln436">                    /* nothing to do */</a>
+<a name="ln437">                    last = lpc + 1;</a>
+<a name="ln438">                    goto incr;</a>
+<a name="ln439">                }</a>
+<a name="ln440"> </a>
+<a name="ln441">                replace_item = calloc(1, lpc - last + 1);</a>
+<a name="ln442">                memcpy(replace_item, replace + last, lpc - last);</a>
+<a name="ln443"> </a>
+<a name="ln444">                remove = find_xml_node(target, replace_item, FALSE);</a>
+<a name="ln445">                if (remove != NULL) {</a>
+<a name="ln446">                    crm_trace(&quot;Replacing node &lt;%s&gt; in &lt;%s&gt;&quot;,</a>
+<a name="ln447">                              replace_item, crm_element_name(target));</a>
+<a name="ln448">                    free_xml(remove);</a>
+<a name="ln449">                    remove = NULL;</a>
+<a name="ln450">                }</a>
+<a name="ln451">                free(replace_item);</a>
+<a name="ln452">                last = lpc + 1;</a>
+<a name="ln453">            }</a>
+<a name="ln454">  incr:</a>
+<a name="ln455">            lpc++;</a>
+<a name="ln456">        }</a>
+<a name="ln457">        xml_remove_prop(update, XML_CIB_ATTR_REPLACE);</a>
+<a name="ln458">        xml_remove_prop(target, XML_CIB_ATTR_REPLACE);</a>
+<a name="ln459">    }</a>
+<a name="ln460"> </a>
+<a name="ln461">    copy_in_properties(target, update);</a>
+<a name="ln462"> </a>
+<a name="ln463">    crm_trace(&quot;Processing children of &lt;%s id=%s&gt;&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln464"> </a>
+<a name="ln465">    for (a_child = __xml_first_child(update); a_child != NULL; a_child = __xml_next(a_child)) {</a>
+<a name="ln466">        int tmp_result = 0;</a>
+<a name="ln467"> </a>
+<a name="ln468">        crm_trace(&quot;Updating child &lt;%s id=%s&gt;&quot;, crm_element_name(a_child), ID(a_child));</a>
+<a name="ln469"> </a>
+<a name="ln470">        tmp_result = update_cib_object(target, a_child);</a>
+<a name="ln471"> </a>
+<a name="ln472">        /*  only the first error is likely to be interesting */</a>
+<a name="ln473">        if (tmp_result != pcmk_ok) {</a>
+<a name="ln474">            crm_err(&quot;Error updating child &lt;%s id=%s&gt;&quot;, crm_element_name(a_child), ID(a_child));</a>
+<a name="ln475"> </a>
+<a name="ln476">            if (result == pcmk_ok) {</a>
+<a name="ln477">                result = tmp_result;</a>
+<a name="ln478">            }</a>
+<a name="ln479">        }</a>
+<a name="ln480">    }</a>
+<a name="ln481"> </a>
+<a name="ln482">    crm_trace(&quot;Finished with &lt;%s id=%s&gt;&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln483"> </a>
+<a name="ln484">    return result;</a>
+<a name="ln485">}</a>
+<a name="ln486"> </a>
+<a name="ln487">static int</a>
+<a name="ln488">add_cib_object(xmlNode * parent, xmlNode * new_obj)</a>
+<a name="ln489">{</a>
+<a name="ln490">    int result = pcmk_ok;</a>
+<a name="ln491">    const char *object_name = NULL;</a>
+<a name="ln492">    const char *object_id = NULL;</a>
+<a name="ln493">    xmlNode *equiv_node = NULL;</a>
+<a name="ln494"> </a>
+<a name="ln495">    if (new_obj != NULL) {</a>
+<a name="ln496">        object_name = crm_element_name(new_obj);</a>
+<a name="ln497">    }</a>
+<a name="ln498">    object_id = crm_element_value(new_obj, XML_ATTR_ID);</a>
+<a name="ln499"> </a>
+<a name="ln500">    crm_trace(&quot;Processing: &lt;%s id=%s&gt;&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln501"> </a>
+<a name="ln502">    if (new_obj == NULL || object_name == NULL) {</a>
+<a name="ln503">        result = -EINVAL;</a>
+<a name="ln504"> </a>
+<a name="ln505">    } else if (parent == NULL) {</a>
+<a name="ln506">        result = -EINVAL;</a>
+<a name="ln507"> </a>
+<a name="ln508">    } else if (object_id == NULL) {</a>
+<a name="ln509">        /*  placeholder object */</a>
+<a name="ln510">        equiv_node = find_xml_node(parent, object_name, FALSE);</a>
+<a name="ln511"> </a>
+<a name="ln512">    } else {</a>
+<a name="ln513">        equiv_node = find_entity(parent, object_name, object_id);</a>
+<a name="ln514">    }</a>
+<a name="ln515"> </a>
+<a name="ln516">    if (result != pcmk_ok) {</a>
+<a name="ln517">        ;                       /* do nothing */</a>
+<a name="ln518"> </a>
+<a name="ln519">    } else if (equiv_node != NULL) {</a>
+<a name="ln520">        result = -ENOTUNIQ;</a>
+<a name="ln521"> </a>
+<a name="ln522">    } else {</a>
+<a name="ln523">        result = update_cib_object(parent, new_obj);</a>
+<a name="ln524">    }</a>
+<a name="ln525"> </a>
+<a name="ln526">    return result;</a>
+<a name="ln527">}</a>
+<a name="ln528"> </a>
+<a name="ln529">int</a>
+<a name="ln530">cib_process_create(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln531">                   xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln532">{</a>
+<a name="ln533">    xmlNode *failed = NULL;</a>
+<a name="ln534">    int result = pcmk_ok;</a>
+<a name="ln535">    xmlNode *update_section = NULL;</a>
+<a name="ln536"> </a>
+<a name="ln537">    crm_trace(&quot;Processing \&quot;%s\&quot; event for section=%s&quot;, op, crm_str(section));</a>
+<a name="ln538">    if (safe_str_eq(XML_CIB_TAG_SECTION_ALL, section)) {</a>
+<a name="ln539">        section = NULL;</a>
+<a name="ln540"> </a>
+<a name="ln541">    } else if (safe_str_eq(XML_TAG_CIB, section)) {</a>
+<a name="ln542">        section = NULL;</a>
+<a name="ln543"> </a>
+<a name="ln544">    } else if (safe_str_eq(crm_element_name(input), XML_TAG_CIB)) {</a>
+<a name="ln545">        section = NULL;</a>
+<a name="ln546">    }</a>
+<a name="ln547"> </a>
+<a name="ln548">    CRM_CHECK(strcasecmp(CIB_OP_CREATE, op) == 0, return -EINVAL);</a>
+<a name="ln549"> </a>
+<a name="ln550">    if (input == NULL) {</a>
+<a name="ln551">        crm_err(&quot;Cannot perform modification with no data&quot;);</a>
+<a name="ln552">        return -EINVAL;</a>
+<a name="ln553">    }</a>
+<a name="ln554"> </a>
+<a name="ln555">    if (section == NULL) {</a>
+<a name="ln556">        return cib_process_modify(op, options, section, req, input, existing_cib, result_cib,</a>
+<a name="ln557">                                  answer);</a>
+<a name="ln558">    }</a>
+<a name="ln559"> </a>
+<a name="ln560">    failed = create_xml_node(NULL, XML_TAG_FAILED);</a>
+<a name="ln561"> </a>
+<a name="ln562">    update_section = get_object_root(section, *result_cib);</a>
+<a name="ln563">    if (safe_str_eq(crm_element_name(input), section)) {</a>
+<a name="ln564">        xmlNode *a_child = NULL;</a>
+<a name="ln565"> </a>
+<a name="ln566">        for (a_child = __xml_first_child(input); a_child != NULL; a_child = __xml_next(a_child)) {</a>
+<a name="ln567">            result = add_cib_object(update_section, a_child);</a>
+<a name="ln568">            if (update_results(failed, a_child, op, result)) {</a>
+<a name="ln569">                break;</a>
+<a name="ln570">            }</a>
+<a name="ln571">        }</a>
+<a name="ln572"> </a>
+<a name="ln573">    } else {</a>
+<a name="ln574">        result = add_cib_object(update_section, input);</a>
+<a name="ln575">        update_results(failed, input, op, result);</a>
+<a name="ln576">    }</a>
+<a name="ln577"> </a>
+<a name="ln578">    if (xml_has_children(failed)) {</a>
+<a name="ln579">        CRM_CHECK(result != pcmk_ok, result = -EINVAL);</a>
+<a name="ln580">    }</a>
+<a name="ln581"> </a>
+<a name="ln582">    if (result != pcmk_ok) {</a>
+<a name="ln583">        crm_log_xml_err(failed, &quot;CIB Update failures&quot;);</a>
+<a name="ln584">        *answer = failed;</a>
+<a name="ln585"> </a>
+<a name="ln586">    } else {</a>
+<a name="ln587">        free_xml(failed);</a>
+<a name="ln588">    }</a>
+<a name="ln589"> </a>
+<a name="ln590">    return result;</a>
+<a name="ln591">}</a>
+<a name="ln592"> </a>
+<a name="ln593">int</a>
+<a name="ln594">cib_process_diff(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln595">                 xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln596">{</a>
+<a name="ln597">    const char *originator = NULL;</a>
+<a name="ln598"> </a>
+<a name="ln599">    if (req != NULL) {</a>
+<a name="ln600">        originator = crm_element_value(req, F_ORIG);</a>
+<a name="ln601">    }</a>
+<a name="ln602"> </a>
+<a name="ln603">    crm_trace(&quot;Processing \&quot;%s\&quot; event from %s %s&quot;,</a>
+<a name="ln604">              op, originator, is_set(options, cib_force_diff)?&quot;(global update)&quot;:&quot;&quot;);</a>
+<a name="ln605"> </a>
+<a name="ln606">    free_xml(*result_cib);</a>
+<a name="ln607">    *result_cib = copy_xml(existing_cib);</a>
+<a name="ln608">    return xml_apply_patchset(*result_cib, input, TRUE);</a>
+<a name="ln609">}</a>
+<a name="ln610"> </a>
+<a name="ln611">gboolean</a>
+<a name="ln612">cib_config_changed(xmlNode * last, xmlNode * next, xmlNode ** diff)</a>
+<a name="ln613">{</a>
+<a name="ln614">    int lpc = 0, max = 0;</a>
+<a name="ln615">    gboolean config_changes = FALSE;</a>
+<a name="ln616">    xmlXPathObject *xpathObj = NULL;</a>
+<a name="ln617">    int format = 1;</a>
+<a name="ln618"> </a>
+<a name="ln619">    CRM_ASSERT(diff != NULL);</a>
+<a name="ln620"> </a>
+<a name="ln621">    if (*diff == NULL &amp;&amp; last != NULL &amp;&amp; next != NULL) {</a>
+<a name="ln622">        *diff = diff_xml_object(last, next, FALSE);</a>
+<a name="ln623">    }</a>
+<a name="ln624"> </a>
+<a name="ln625">    if (*diff == NULL) {</a>
+<a name="ln626">        goto done;</a>
+<a name="ln627">    }</a>
+<a name="ln628"> </a>
+<a name="ln629">    crm_element_value_int(*diff, &quot;format&quot;, &amp;format);</a>
+<a name="ln630">    /* This function only applies to v1 diffs. */</a>
+<a name="ln631">    CRM_LOG_ASSERT(format == 1);</a>
+<a name="ln632"> </a>
+<a name="ln633">    xpathObj = xpath_search(*diff, &quot;//&quot; XML_CIB_TAG_CONFIGURATION);</a>
+<a name="ln634">    if (numXpathResults(xpathObj) &gt; 0) {</a>
+<a name="ln635">        config_changes = TRUE;</a>
+<a name="ln636">        goto done;</a>
+<a name="ln637">    }</a>
+<a name="ln638">    freeXpathObject(xpathObj);</a>
+<a name="ln639"> </a>
+<a name="ln640">    /*</a>
+<a name="ln641">     * Do not check XML_TAG_DIFF_ADDED &quot;//&quot; XML_TAG_CIB</a>
+<a name="ln642">     * This always contains every field and would produce a false positive</a>
+<a name="ln643">     * every time if the checked value existed</a>
+<a name="ln644">     */</a>
+<a name="ln645">    xpathObj = xpath_search(*diff, &quot;//&quot; XML_TAG_DIFF_REMOVED &quot;//&quot; XML_TAG_CIB);</a>
+<a name="ln646">    max = numXpathResults(xpathObj);</a>
+<a name="ln647"> </a>
+<a name="ln648">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln649">        xmlNode *top = getXpathResult(xpathObj, lpc);</a>
+<a name="ln650"> </a>
+<a name="ln651">        if (crm_element_value(top, XML_ATTR_GENERATION) != NULL) {</a>
+<a name="ln652">            config_changes = TRUE;</a>
+<a name="ln653">            goto done;</a>
+<a name="ln654">        }</a>
+<a name="ln655">        if (crm_element_value(top, XML_ATTR_GENERATION_ADMIN) != NULL) {</a>
+<a name="ln656">            config_changes = TRUE;</a>
+<a name="ln657">            goto done;</a>
+<a name="ln658">        }</a>
+<a name="ln659"> </a>
+<a name="ln660">        if (crm_element_value(top, XML_ATTR_VALIDATION) != NULL) {</a>
+<a name="ln661">            config_changes = TRUE;</a>
+<a name="ln662">            goto done;</a>
+<a name="ln663">        }</a>
+<a name="ln664">        if (crm_element_value(top, XML_ATTR_CRM_VERSION) != NULL) {</a>
+<a name="ln665">            config_changes = TRUE;</a>
+<a name="ln666">            goto done;</a>
+<a name="ln667">        }</a>
+<a name="ln668">        if (crm_element_value(top, &quot;remote-clear-port&quot;) != NULL) {</a>
+<a name="ln669">            config_changes = TRUE;</a>
+<a name="ln670">            goto done;</a>
+<a name="ln671">        }</a>
+<a name="ln672">        if (crm_element_value(top, &quot;remote-tls-port&quot;) != NULL) {</a>
+<a name="ln673">            config_changes = TRUE;</a>
+<a name="ln674">            goto done;</a>
+<a name="ln675">        }</a>
+<a name="ln676">    }</a>
+<a name="ln677"> </a>
+<a name="ln678">  done:</a>
+<a name="ln679">    freeXpathObject(xpathObj);</a>
+<a name="ln680">    return config_changes;</a>
+<a name="ln681">}</a>
+<a name="ln682"> </a>
+<a name="ln683">int</a>
+<a name="ln684">cib_process_xpath(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln685">                  xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln686">{</a>
+<a name="ln687">    int lpc = 0;</a>
+<a name="ln688">    int max = 0;</a>
+<a name="ln689">    int rc = pcmk_ok;</a>
+<a name="ln690">    gboolean is_query = safe_str_eq(op, CIB_OP_QUERY);</a>
+<a name="ln691"> </a>
+<a name="ln692">    xmlXPathObjectPtr xpathObj = NULL;</a>
+<a name="ln693"> </a>
+<a name="ln694">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln695"> </a>
+<a name="ln696">    if (is_query) {</a>
+<a name="ln697">        xpathObj = xpath_search(existing_cib, section);</a>
+<a name="ln698">    } else {</a>
+<a name="ln699">        xpathObj = xpath_search(*result_cib, section);</a>
+<a name="ln700">    }</a>
+<a name="ln701"> </a>
+<a name="ln702">    max = numXpathResults(xpathObj);</a>
+<a name="ln703"> </a>
+<a name="ln704">    if (max &lt; 1 &amp;&amp; safe_str_eq(op, CIB_OP_DELETE)) {</a>
+<a name="ln705">        crm_debug(&quot;%s was already removed&quot;, section);</a>
+<a name="ln706"> </a>
+<a name="ln707">    } else if (max &lt; 1) {</a>
+<a name="ln708">        crm_debug(&quot;%s: %s does not exist&quot;, op, section);</a>
+<a name="ln709">        rc = -ENXIO;</a>
+<a name="ln710"> </a>
+<a name="ln711">    } else if (is_query) {</a>
+<a name="ln712">        if (max &gt; 1) {</a>
+<a name="ln713">            *answer = create_xml_node(NULL, &quot;xpath-query&quot;);</a>
+<a name="ln714">        }</a>
+<a name="ln715">    }</a>
+<a name="ln716"> </a>
+<a name="ln717">    if (safe_str_eq(op, CIB_OP_DELETE) &amp;&amp; (options &amp; cib_multiple)) {</a>
+<a name="ln718">        dedupXpathResults(xpathObj);</a>
+<a name="ln719">    }</a>
+<a name="ln720"> </a>
+<a name="ln721">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln722">        xmlChar *path = NULL;</a>
+<a name="ln723">        xmlNode *match = getXpathResult(xpathObj, lpc);</a>
+<a name="ln724"> </a>
+<a name="ln725">        if (match == NULL) {</a>
+<a name="ln726">            continue;</a>
+<a name="ln727">        }</a>
+<a name="ln728"> </a>
+<a name="ln729">        path = xmlGetNodePath(match);</a>
+<a name="ln730">        crm_debug(&quot;Processing %s op for %s with %s&quot;, op, section, path);</a>
+<a name="ln731">        free(path);</a>
+<a name="ln732"> </a>
+<a name="ln733">        if (safe_str_eq(op, CIB_OP_DELETE)) {</a>
+<a name="ln734">            if (match == *result_cib) {</a>
+<a name="ln735">                /* Attempting to delete the whole &quot;/cib&quot; */</a>
+<a name="ln736">                crm_warn(&quot;Cannot perform %s for %s: The xpath is addressing the whole /cib&quot;, op, section);</a>
+<a name="ln737">                rc = -EINVAL;</a>
+<a name="ln738">                break;</a>
+<a name="ln739">            }</a>
+<a name="ln740"> </a>
+<a name="ln741">            free_xml(match);</a>
+<a name="ln742">            if ((options &amp; cib_multiple) == 0) {</a>
+<a name="ln743">                break;</a>
+<a name="ln744">            }</a>
+<a name="ln745"> </a>
+<a name="ln746">        } else if (safe_str_eq(op, CIB_OP_MODIFY)) {</a>
+<a name="ln747">            if (update_xml_child(match, input) == FALSE) {</a>
+<a name="ln748">                rc = -ENXIO;</a>
+<a name="ln749">            } else if ((options &amp; cib_multiple) == 0) {</a>
+<a name="ln750">                break;</a>
+<a name="ln751">            }</a>
+<a name="ln752"> </a>
+<a name="ln753">        } else if (safe_str_eq(op, CIB_OP_CREATE)) {</a>
+<a name="ln754">            add_node_copy(match, input);</a>
+<a name="ln755">            break;</a>
+<a name="ln756"> </a>
+<a name="ln757">        } else if (safe_str_eq(op, CIB_OP_QUERY)) {</a>
+<a name="ln758"> </a>
+<a name="ln759">            if (options &amp; cib_no_children) {</a>
+<a name="ln760">                const char *tag = TYPE(match);</a>
+<a name="ln761">                xmlNode *shallow = create_xml_node(*answer, tag);</a>
+<a name="ln762"> </a>
+<a name="ln763">                copy_in_properties(shallow, match);</a>
+<a name="ln764"> </a>
+<a name="ln765">                if (*answer == NULL) {</a>
+<a name="ln766">                    *answer = shallow;</a>
+<a name="ln767">                }</a>
+<a name="ln768"> </a>
+<a name="ln769">            } else if (options &amp; cib_xpath_address) {</a>
+<a name="ln770"> </a>
+<a name="ln771">                int path_len = 0;</a>
+<a name="ln772">                char *path = NULL;</a>
+<a name="ln773">                xmlNode *parent = match;</a>
+<a name="ln774"> </a>
+<a name="ln775">                while (parent &amp;&amp; parent-&gt;type == XML_ELEMENT_NODE) {</a>
+<a name="ln776">                    int extra = 1;</a>
+<a name="ln777">                    char *new_path = NULL;</a>
+<a name="ln778">                    const char *id = crm_element_value(parent, XML_ATTR_ID);</a>
+<a name="ln779"> </a>
+<a name="ln780">                    extra += strlen((const char *)parent-&gt;name);</a>
+<a name="ln781">                    if (id) {</a>
+<a name="ln782">                        extra += 8;     /* [@id=&quot;&quot;] */</a>
+<a name="ln783">                        extra += strlen(id);</a>
+<a name="ln784">                    }</a>
+<a name="ln785"> </a>
+<a name="ln786">                    path_len += extra;</a>
+<a name="ln787">                    new_path = malloc(path_len + 1);</a>
+<a name="ln788">                    if(new_path == NULL) {</a>
+<a name="ln789">                        break;</a>
+<a name="ln790"> </a>
+<a name="ln791">                    } else if (id) {</a>
+<a name="ln792">                        snprintf(new_path, path_len + 1, &quot;/%s[@id='%s']%s&quot;, parent-&gt;name, id,</a>
+<a name="ln793">                                 path ? path : &quot;&quot;);</a>
+<a name="ln794">                    } else {</a>
+<a name="ln795">                        snprintf(new_path, path_len + 1, &quot;/%s%s&quot;, parent-&gt;name, path ? path : &quot;&quot;);</a>
+<a name="ln796">                    }</a>
+<a name="ln797">                    free(path);</a>
+<a name="ln798">                    path = new_path;</a>
+<a name="ln799">                    parent = parent-&gt;parent;</a>
+<a name="ln800">                }</a>
+<a name="ln801">                crm_trace(&quot;Got: %s&quot;, path);</a>
+<a name="ln802"> </a>
+<a name="ln803">                if (*answer == NULL) {</a>
+<a name="ln804">                    *answer = create_xml_node(NULL, &quot;xpath-query&quot;);</a>
+<a name="ln805">                }</a>
+<a name="ln806">                parent = create_xml_node(*answer, &quot;xpath-query-path&quot;);</a>
+<a name="ln807">                crm_xml_add(parent, XML_ATTR_ID, path);</a>
+<a name="ln808">                free(path);</a>
+<a name="ln809"> </a>
+<a name="ln810">            } else if (*answer) {</a>
+<a name="ln811">                add_node_copy(*answer, match);</a>
+<a name="ln812"> </a>
+<a name="ln813">            } else {</a>
+<a name="ln814">                *answer = match;</a>
+<a name="ln815">            }</a>
+<a name="ln816"> </a>
+<a name="ln817">        } else if (safe_str_eq(op, CIB_OP_REPLACE)) {</a>
+<a name="ln818">            xmlNode *parent = match-&gt;parent;</a>
+<a name="ln819"> </a>
+<a name="ln820">            free_xml(match);</a>
+<a name="ln821">            if (input != NULL) {</a>
+<a name="ln822">                add_node_copy(parent, input);</a>
+<a name="ln823">            }</a>
+<a name="ln824"> </a>
+<a name="ln825">            if ((options &amp; cib_multiple) == 0) {</a>
+<a name="ln826">                break;</a>
+<a name="ln827">            }</a>
+<a name="ln828">        }</a>
+<a name="ln829">    }</a>
+<a name="ln830"> </a>
+<a name="ln831">    freeXpathObject(xpathObj);</a>
+<a name="ln832">    return rc;</a>
+<a name="ln833">}</a>
+<a name="ln834"> </a>
+<a name="ln835">/* remove this function */</a>
+<a name="ln836">gboolean</a>
+<a name="ln837">update_results(xmlNode * failed, xmlNode * target, const char *operation, int return_code)</a>
+<a name="ln838">{</a>
+<a name="ln839">    xmlNode *xml_node = NULL;</a>
+<a name="ln840">    gboolean was_error = FALSE;</a>
+<a name="ln841">    const char *error_msg = NULL;</a>
+<a name="ln842"> </a>
+<a name="ln843">    if (return_code != pcmk_ok) {</a>
+<a name="ln844">        error_msg = pcmk_strerror(return_code);</a>
+<a name="ln845"> </a>
+<a name="ln846">        was_error = TRUE;</a>
+<a name="ln847">        xml_node = create_xml_node(failed, XML_FAIL_TAG_CIB);</a>
+<a name="ln848">        add_node_copy(xml_node, target);</a>
+<a name="ln849"> </a>
+<a name="ln850">        crm_xml_add(xml_node, XML_FAILCIB_ATTR_ID, ID(target));</a>
+<a name="ln851">        crm_xml_add(xml_node, XML_FAILCIB_ATTR_OBJTYPE, TYPE(target));</a>
+<a name="ln852">        crm_xml_add(xml_node, XML_FAILCIB_ATTR_OP, operation);</a>
+<a name="ln853">        crm_xml_add(xml_node, XML_FAILCIB_ATTR_REASON, error_msg);</a>
+<a name="ln854"> </a>
+<a name="ln855">        crm_warn(&quot;Action %s failed: %s (cde=%d)&quot;, operation, error_msg, return_code);</a>
+<a name="ln856">    }</a>
+<a name="ln857"> </a>
+<a name="ln858">    return was_error;</a>
+<a name="ln859">}</a>
+
+</code></pre>
+<div class="balloon" rel="165"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 165, 163.</p></div>
+<div class="balloon" rel="442"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 442, 441.</p></div>
+<div class="balloon" rel="548"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+<div class="balloon" rel="631"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (format == 1) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

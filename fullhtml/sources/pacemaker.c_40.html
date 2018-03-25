@@ -1,0 +1,1206 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2010 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;pacemaker.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;pwd.h&gt;</a>
+<a name="ln27">#include &lt;grp.h&gt;</a>
+<a name="ln28">#include &lt;sys/stat.h&gt;</a>
+<a name="ln29">#include &lt;sys/types.h&gt;</a>
+<a name="ln30">#include &lt;sys/time.h&gt;</a>
+<a name="ln31">#include &lt;sys/resource.h&gt;</a>
+<a name="ln32">#include &lt;sys/reboot.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln35">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln36">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln37">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">#include &lt;dirent.h&gt;</a>
+<a name="ln41">#include &lt;ctype.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">gboolean pcmk_quorate = FALSE;</a>
+<a name="ln44">gboolean fatal_error = FALSE;</a>
+<a name="ln45">GMainLoop *mainloop = NULL;</a>
+<a name="ln46"> </a>
+<a name="ln47">#define PCMK_PROCESS_CHECK_INTERVAL 5</a>
+<a name="ln48"> </a>
+<a name="ln49">const char *local_name = NULL;</a>
+<a name="ln50">uint32_t local_nodeid = 0;</a>
+<a name="ln51">crm_trigger_t *shutdown_trigger = NULL;</a>
+<a name="ln52">const char *pid_file = &quot;/var/run/pacemaker.pid&quot;;</a>
+<a name="ln53"> </a>
+<a name="ln54">typedef struct pcmk_child_s {</a>
+<a name="ln55">    int pid;</a>
+<a name="ln56">    long flag;</a>
+<a name="ln57">    int start_seq;</a>
+<a name="ln58">    int respawn_count;</a>
+<a name="ln59">    gboolean respawn;</a>
+<a name="ln60">    const char *name;</a>
+<a name="ln61">    const char *uid;</a>
+<a name="ln62">    const char *command;</a>
+<a name="ln63"> </a>
+<a name="ln64">    gboolean active_before_startup;</a>
+<a name="ln65">} pcmk_child_t;</a>
+<a name="ln66"> </a>
+<a name="ln67">/* Index into the array below */</a>
+<a name="ln68">#define pcmk_child_crmd  4</a>
+<a name="ln69">#define pcmk_child_mgmtd 8</a>
+<a name="ln70">/* *INDENT-OFF* */</a>
+<a name="ln71">static pcmk_child_t pcmk_children[] = {</a>
+<a name="ln72">    { 0, crm_proc_none,       0, 0, FALSE, &quot;none&quot;,       NULL,            NULL },</a>
+<a name="ln73">    { 0, crm_proc_plugin,     0, 0, FALSE, &quot;ais&quot;,        NULL,            NULL },</a>
+<a name="ln74">    { 0, crm_proc_lrmd,       3, 0, TRUE,  &quot;lrmd&quot;,       NULL,            CRM_DAEMON_DIR&quot;/lrmd&quot; },</a>
+<a name="ln75">    { 0, crm_proc_cib,        1, 0, TRUE,  &quot;cib&quot;,        CRM_DAEMON_USER, CRM_DAEMON_DIR&quot;/cib&quot; },</a>
+<a name="ln76">    { 0, crm_proc_crmd,       6, 0, TRUE,  &quot;crmd&quot;,       CRM_DAEMON_USER, CRM_DAEMON_DIR&quot;/crmd&quot; },</a>
+<a name="ln77">    { 0, crm_proc_attrd,      4, 0, TRUE,  &quot;attrd&quot;,      CRM_DAEMON_USER, CRM_DAEMON_DIR&quot;/attrd&quot; },</a>
+<a name="ln78">    { 0, crm_proc_stonithd,   0, 0, TRUE,  &quot;stonithd&quot;,   NULL,            NULL },</a>
+<a name="ln79">    { 0, crm_proc_pe,         5, 0, TRUE,  &quot;pengine&quot;,    CRM_DAEMON_USER, CRM_DAEMON_DIR&quot;/pengine&quot; },</a>
+<a name="ln80">    { 0, crm_proc_mgmtd,      0, 0, TRUE,  &quot;mgmtd&quot;,      NULL,            HB_DAEMON_DIR&quot;/mgmtd&quot; },</a>
+<a name="ln81">    { 0, crm_proc_stonith_ng, 2, 0, TRUE,  &quot;stonith-ng&quot;, NULL,            CRM_DAEMON_DIR&quot;/stonithd&quot; },</a>
+<a name="ln82">};</a>
+<a name="ln83">/* *INDENT-ON* */</a>
+<a name="ln84"> </a>
+<a name="ln85">static gboolean start_child(pcmk_child_t * child);</a>
+<a name="ln86">static gboolean check_active_before_startup_processes(gpointer user_data);</a>
+<a name="ln87">void update_process_clients(crm_client_t *client);</a>
+<a name="ln88">void update_process_peers(void);</a>
+<a name="ln89"> </a>
+<a name="ln90">void</a>
+<a name="ln91">enable_crmd_as_root(gboolean enable)</a>
+<a name="ln92">{</a>
+<a name="ln93">    if (enable) {</a>
+<a name="ln94">        pcmk_children[pcmk_child_crmd].uid = NULL;</a>
+<a name="ln95">    } else {</a>
+<a name="ln96">        pcmk_children[pcmk_child_crmd].uid = CRM_DAEMON_USER;</a>
+<a name="ln97">    }</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">void</a>
+<a name="ln101">enable_mgmtd(gboolean enable)</a>
+<a name="ln102">{</a>
+<a name="ln103">    if (enable) {</a>
+<a name="ln104">        pcmk_children[pcmk_child_mgmtd].start_seq = 7;</a>
+<a name="ln105">    } else {</a>
+<a name="ln106">        pcmk_children[pcmk_child_mgmtd].start_seq = 0;</a>
+<a name="ln107">    }</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">static uint32_t</a>
+<a name="ln111">get_process_list(void)</a>
+<a name="ln112">{</a>
+<a name="ln113">    int lpc = 0;</a>
+<a name="ln114">    uint32_t procs = crm_get_cluster_proc();</a>
+<a name="ln115"> </a>
+<a name="ln116">    for (lpc = 0; lpc &lt; SIZEOF(pcmk_children); lpc++) {</a>
+<a name="ln117">        if (pcmk_children[lpc].pid != 0) {</a>
+<a name="ln118">            procs |= pcmk_children[lpc].flag;</a>
+<a name="ln119">        }</a>
+<a name="ln120">    }</a>
+<a name="ln121">    return procs;</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">static void</a>
+<a name="ln125">pcmk_process_exit(pcmk_child_t * child)</a>
+<a name="ln126">{</a>
+<a name="ln127">    child-&gt;pid = 0;</a>
+<a name="ln128">    child-&gt;active_before_startup = FALSE;</a>
+<a name="ln129"> </a>
+<a name="ln130">    /* Broadcast the fact that one of our processes died ASAP</a>
+<a name="ln131">     *</a>
+<a name="ln132">     * Try to get some logging of the cause out first though</a>
+<a name="ln133">     * because we're probably about to get fenced</a>
+<a name="ln134">     *</a>
+<a name="ln135">     * Potentially do this only if respawn_count &gt; N</a>
+<a name="ln136">     * to allow for local recovery</a>
+<a name="ln137">     */</a>
+<a name="ln138">    update_node_processes(local_nodeid, NULL, get_process_list());</a>
+<a name="ln139"> </a>
+<a name="ln140">    child-&gt;respawn_count += 1;</a>
+<a name="ln141">    if (child-&gt;respawn_count &gt; MAX_RESPAWN) {</a>
+<a name="ln142">        crm_err(&quot;Child respawn count exceeded by %s&quot;, child-&gt;name);</a>
+<a name="ln143">        child-&gt;respawn = FALSE;</a>
+<a name="ln144">    }</a>
+<a name="ln145"> </a>
+<a name="ln146">    if (shutdown_trigger) {</a>
+<a name="ln147">        mainloop_set_trigger(shutdown_trigger);</a>
+<a name="ln148">        update_node_processes(local_nodeid, NULL, get_process_list());</a>
+<a name="ln149"> </a>
+<a name="ln150">    } else if (child-&gt;respawn &amp;&amp; crm_is_true(getenv(&quot;PCMK_fail_fast&quot;))) {</a>
+<a name="ln151">        crm_err(&quot;Rebooting system because of %s&quot;, child-&gt;name);</a>
+<a name="ln152">        pcmk_panic(__FUNCTION__);</a>
+<a name="ln153"> </a>
+<a name="ln154">    } else if (child-&gt;respawn) {</a>
+<a name="ln155">        crm_notice(&quot;Respawning failed child process: %s&quot;, child-&gt;name);</a>
+<a name="ln156">        start_child(child);</a>
+<a name="ln157">    }</a>
+<a name="ln158">}</a>
+<a name="ln159"> </a>
+<a name="ln160">static void</a>
+<a name="ln161">pcmk_child_exit(mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode)</a>
+<a name="ln162">{</a>
+<a name="ln163">    pcmk_child_t *child = mainloop_child_userdata(p);</a>
+<a name="ln164">    const char *name = mainloop_child_name(p);</a>
+<a name="ln165"> </a>
+<a name="ln166">    if (signo &amp;&amp; signo == SIGKILL) {</a>
+<a name="ln167">        crm_warn(&quot;The %s process (%d) terminated with signal %d (core=%d)&quot;, name, pid, signo, core);</a>
+<a name="ln168"> </a>
+<a name="ln169">    } else if (signo) {</a>
+<a name="ln170">        crm_err(&quot;The %s process (%d) terminated with signal %d (core=%d)&quot;, name, pid, signo, core);</a>
+<a name="ln171"> </a>
+<a name="ln172">    } else {</a>
+<a name="ln173">        switch(exitcode) {</a>
+<a name="ln174">            case pcmk_ok:</a>
+<a name="ln175">                crm_info(&quot;The %s process (%d) exited: %s (%d)&quot;, name, pid, pcmk_strerror(exitcode), exitcode);</a>
+<a name="ln176">                break;</a>
+<a name="ln177"> </a>
+<a name="ln178">            case DAEMON_RESPAWN_STOP:</a>
+<a name="ln179">                crm_warn(&quot;The %s process (%d) can no longer be respawned, shutting the cluster down.&quot;, name, pid);</a>
+<a name="ln180">                child-&gt;respawn = FALSE;</a>
+<a name="ln181">                fatal_error = TRUE;</a>
+<a name="ln182">                pcmk_shutdown(SIGTERM);</a>
+<a name="ln183">                break;</a>
+<a name="ln184"> </a>
+<a name="ln185">            case pcmk_err_panic:</a>
+<a name="ln186">                do_crm_log_always(LOG_EMERG, &quot;The %s process (%d) instructed the machine to reset&quot;, name, pid);</a>
+<a name="ln187">                child-&gt;respawn = FALSE;</a>
+<a name="ln188">                fatal_error = TRUE;</a>
+<a name="ln189">                pcmk_panic(__FUNCTION__);</a>
+<a name="ln190">                pcmk_shutdown(SIGTERM);</a>
+<a name="ln191">                break;</a>
+<a name="ln192"> </a>
+<a name="ln193">            default:</a>
+<a name="ln194">                crm_err(&quot;The %s process (%d) exited: %s (%d)&quot;, name, pid, pcmk_strerror(exitcode), exitcode);</a>
+<a name="ln195">                break;</a>
+<a name="ln196">        }</a>
+<a name="ln197">    }</a>
+<a name="ln198"> </a>
+<a name="ln199">    pcmk_process_exit(child);</a>
+<a name="ln200">}</a>
+<a name="ln201"> </a>
+<a name="ln202">static gboolean</a>
+<a name="ln203">stop_child(pcmk_child_t * child, int signal)</a>
+<a name="ln204">{</a>
+<a name="ln205">    if (signal == 0) {</a>
+<a name="ln206">        signal = SIGTERM;</a>
+<a name="ln207">    }</a>
+<a name="ln208"> </a>
+<a name="ln209">    if (child-&gt;command == NULL) {</a>
+<a name="ln210">        crm_debug(&quot;Nothing to do for child \&quot;%s\&quot;&quot;, child-&gt;name);</a>
+<a name="ln211">        return TRUE;</a>
+<a name="ln212">    }</a>
+<a name="ln213"> </a>
+<a name="ln214">    if (child-&gt;pid &lt;= 0) {</a>
+<a name="ln215">        crm_trace(&quot;Client %s not running&quot;, child-&gt;name);</a>
+<a name="ln216">        return TRUE;</a>
+<a name="ln217">    }</a>
+<a name="ln218"> </a>
+<a name="ln219">    errno = 0;</a>
+<a name="ln220">    if (kill(child-&gt;pid, signal) == 0) {</a>
+<a name="ln221">        crm_notice(&quot;Stopping %s &quot;CRM_XS&quot; sent signal %d to process %d&quot;,</a>
+<a name="ln222">                   child-&gt;name, signal, child-&gt;pid);</a>
+<a name="ln223"> </a>
+<a name="ln224">    } else {</a>
+<a name="ln225">        crm_perror(LOG_ERR, &quot;Could not stop %s (process %d) with signal %d&quot;,</a>
+<a name="ln226">                   child-&gt;name, child-&gt;pid, signal);</a>
+<a name="ln227">    }</a>
+<a name="ln228"> </a>
+<a name="ln229">    return TRUE;</a>
+<a name="ln230">}</a>
+<a name="ln231"> </a>
+<a name="ln232">static char *opts_default[] = { NULL, NULL };</a>
+<a name="ln233">static char *opts_vgrind[] = { NULL, NULL, NULL, NULL, NULL };</a>
+<a name="ln234"> </a>
+<a name="ln235">static gboolean</a>
+<a name="ln236">start_child(pcmk_child_t * child)</a>
+<a name="ln237">{</a>
+<a name="ln238">    int lpc = 0;</a>
+<a name="ln239">    uid_t uid = 0;</a>
+<a name="ln240">    gid_t gid = 0;</a>
+<a name="ln241">    struct rlimit oflimits;</a>
+<a name="ln242">    gboolean use_valgrind = FALSE;</a>
+<a name="ln243">    gboolean use_callgrind = FALSE;</a>
+<a name="ln244">    const char *devnull = &quot;/dev/null&quot;;</a>
+<a name="ln245">    const char *env_valgrind = getenv(&quot;PCMK_valgrind_enabled&quot;);</a>
+<a name="ln246">    const char *env_callgrind = getenv(&quot;PCMK_callgrind_enabled&quot;);</a>
+<a name="ln247">    enum cluster_type_e stack = get_cluster_type();</a>
+<a name="ln248"> </a>
+<a name="ln249">    child-&gt;active_before_startup = FALSE;</a>
+<a name="ln250"> </a>
+<a name="ln251">    if (child-&gt;command == NULL) {</a>
+<a name="ln252">        crm_info(&quot;Nothing to do for child \&quot;%s\&quot;&quot;, child-&gt;name);</a>
+<a name="ln253">        return TRUE;</a>
+<a name="ln254">    }</a>
+<a name="ln255"> </a>
+<a name="ln256">    if (env_callgrind != NULL &amp;&amp; crm_is_true(env_callgrind)) {</a>
+<a name="ln257">        use_callgrind = TRUE;</a>
+<a name="ln258">        use_valgrind = TRUE;</a>
+<a name="ln259"> </a>
+<a name="ln260">    } else if (env_callgrind != NULL &amp;&amp; strstr(env_callgrind, child-&gt;name)) {</a>
+<a name="ln261">        use_callgrind = TRUE;</a>
+<a name="ln262">        use_valgrind = TRUE;</a>
+<a name="ln263"> </a>
+<a name="ln264">    } else if (env_valgrind != NULL &amp;&amp; crm_is_true(env_valgrind)) {</a>
+<a name="ln265">        use_valgrind = TRUE;</a>
+<a name="ln266"> </a>
+<a name="ln267">    } else if (env_valgrind != NULL &amp;&amp; strstr(env_valgrind, child-&gt;name)) {</a>
+<a name="ln268">        use_valgrind = TRUE;</a>
+<a name="ln269">    }</a>
+<a name="ln270"> </a>
+<a name="ln271">    if (use_valgrind &amp;&amp; strlen(VALGRIND_BIN) == 0) {</a>
+<a name="ln272">        crm_warn(&quot;Cannot enable valgrind for %s:&quot;</a>
+<a name="ln273">                 &quot; The location of the valgrind binary is unknown&quot;, child-&gt;name);</a>
+<a name="ln274">        use_valgrind = FALSE;</a>
+<a name="ln275">    }</a>
+<a name="ln276"> </a>
+<a name="ln277">    if (child-&gt;uid) {</a>
+<a name="ln278">        if (crm_user_lookup(child-&gt;uid, &amp;uid, &amp;gid) &lt; 0) {</a>
+<a name="ln279">            crm_err(&quot;Invalid user (%s) for %s: not found&quot;, child-&gt;uid, child-&gt;name);</a>
+<a name="ln280">            return FALSE;</a>
+<a name="ln281">        }</a>
+<a name="ln282">        crm_info(&quot;Using uid=%u and group=%u for process %s&quot;, uid, gid, child-&gt;name);</a>
+<a name="ln283">    }</a>
+<a name="ln284"> </a>
+<a name="ln285">    child-&gt;pid = fork();</a>
+<a name="ln286">    CRM_ASSERT(child-&gt;pid != -1);</a>
+<a name="ln287"> </a>
+<a name="ln288">    if (child-&gt;pid &gt; 0) {</a>
+<a name="ln289">        /* parent */</a>
+<a name="ln290">        mainloop_child_add(child-&gt;pid, 0, child-&gt;name, child, pcmk_child_exit);</a>
+<a name="ln291"> </a>
+<a name="ln292">        crm_info(&quot;Forked child %d for process %s%s&quot;, child-&gt;pid, child-&gt;name,</a>
+<a name="ln293">                 use_valgrind ? &quot; (valgrind enabled: &quot; VALGRIND_BIN &quot;)&quot; : &quot;&quot;);</a>
+<a name="ln294">        update_node_processes(local_nodeid, NULL, get_process_list());</a>
+<a name="ln295">        return TRUE;</a>
+<a name="ln296"> </a>
+<a name="ln297">    } else {</a>
+<a name="ln298">        /* Start a new session */</a>
+<a name="ln299">        (void)setsid();</a>
+<a name="ln300"> </a>
+<a name="ln301">        /* Setup the two alternate arg arrays */</a>
+<a name="ln302">        opts_vgrind[0] = strdup(VALGRIND_BIN);</a>
+<a name="ln303">        if (use_callgrind) {</a>
+<a name="ln304">            opts_vgrind[1] = strdup(&quot;--tool=callgrind&quot;);</a>
+<a name="ln305">            opts_vgrind[2] = strdup(&quot;--callgrind-out-file=&quot; CRM_STATE_DIR &quot;/callgrind.out.%p&quot;);</a>
+<a name="ln306">            opts_vgrind[3] = strdup(child-&gt;command);</a>
+<a name="ln307">            opts_vgrind[4] = NULL;</a>
+<a name="ln308">        } else {</a>
+<a name="ln309">            opts_vgrind[1] = strdup(child-&gt;command);</a>
+<a name="ln310">            opts_vgrind[2] = NULL;</a>
+<a name="ln311">            opts_vgrind[3] = NULL;</a>
+<a name="ln312">            opts_vgrind[4] = NULL;</a>
+<a name="ln313">        }</a>
+<a name="ln314">        opts_default[0] = strdup(child-&gt;command);;</a>
+<a name="ln315"> </a>
+<a name="ln316">        if(gid) {</a>
+<a name="ln317">            if(stack == pcmk_cluster_corosync) {</a>
+<a name="ln318">                /* Drop root privileges completely</a>
+<a name="ln319">                 *</a>
+<a name="ln320">                 * We can do this because we set uidgid.gid.${gid}=1</a>
+<a name="ln321">                 * via CMAP which allows these processes to connect to</a>
+<a name="ln322">                 * corosync</a>
+<a name="ln323">                 */</a>
+<a name="ln324">                if (setgid(gid) &lt; 0) {</a>
+<a name="ln325">                    crm_perror(LOG_ERR, &quot;Could not set group to %d&quot;, gid);</a>
+<a name="ln326">                }</a>
+<a name="ln327"> </a>
+<a name="ln328">                /* Keep the root group (so we can access corosync), but add the haclient group (so we can access ipc) */</a>
+<a name="ln329">            } else if (initgroups(child-&gt;uid, gid) &lt; 0) {</a>
+<a name="ln330">                crm_err(&quot;Cannot initialize groups for %s: %s (%d)&quot;, child-&gt;uid, pcmk_strerror(errno), errno);</a>
+<a name="ln331">            }</a>
+<a name="ln332">        }</a>
+<a name="ln333"> </a>
+<a name="ln334">        if (uid &amp;&amp; setuid(uid) &lt; 0) {</a>
+<a name="ln335">            crm_perror(LOG_ERR, &quot;Could not set user to %d (%s)&quot;, uid, child-&gt;uid);</a>
+<a name="ln336">        }</a>
+<a name="ln337"> </a>
+<a name="ln338">        /* Close all open file descriptors */</a>
+<a name="ln339">        getrlimit(RLIMIT_NOFILE, &amp;oflimits);</a>
+<a name="ln340">        for (lpc = 0; lpc &lt; oflimits.rlim_cur; lpc++) {</a>
+<a name="ln341">            close(lpc);</a>
+<a name="ln342">        }</a>
+<a name="ln343"> </a>
+<a name="ln344">        (void)open(devnull, O_RDONLY);  /* Stdin:  fd 0 */</a>
+<a name="ln345">        (void)open(devnull, O_WRONLY);  /* Stdout: fd 1 */</a>
+<a name="ln346">        (void)open(devnull, O_WRONLY);  /* Stderr: fd 2 */</a>
+<a name="ln347"> </a>
+<a name="ln348">        if (use_valgrind) {</a>
+<a name="ln349">            (void)execvp(VALGRIND_BIN, opts_vgrind);</a>
+<a name="ln350">        } else {</a>
+<a name="ln351">            (void)execvp(child-&gt;command, opts_default);</a>
+<a name="ln352">        }</a>
+<a name="ln353">        crm_perror(LOG_ERR, &quot;FATAL: Cannot exec %s&quot;, child-&gt;command);</a>
+<a name="ln354">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln355">    }</a>
+<a name="ln356">    return TRUE;                /* never reached */</a>
+<a name="ln357">}</a>
+<a name="ln358"> </a>
+<a name="ln359">static gboolean</a>
+<a name="ln360">escalate_shutdown(gpointer data)</a>
+<a name="ln361">{</a>
+<a name="ln362"> </a>
+<a name="ln363">    pcmk_child_t *child = data;</a>
+<a name="ln364"> </a>
+<a name="ln365">    if (child-&gt;pid) {</a>
+<a name="ln366">        /* Use SIGSEGV instead of SIGKILL to create a core so we can see what it was up to */</a>
+<a name="ln367">        crm_err(&quot;Child %s not terminating in a timely manner, forcing&quot;, child-&gt;name);</a>
+<a name="ln368">        stop_child(child, SIGSEGV);</a>
+<a name="ln369">    }</a>
+<a name="ln370">    return FALSE;</a>
+<a name="ln371">}</a>
+<a name="ln372"> </a>
+<a name="ln373">static gboolean</a>
+<a name="ln374">pcmk_shutdown_worker(gpointer user_data)</a>
+<a name="ln375">{</a>
+<a name="ln376">    static int phase = 0;</a>
+<a name="ln377">    static time_t next_log = 0;</a>
+<a name="ln378">    static int max = SIZEOF(pcmk_children);</a>
+<a name="ln379"> </a>
+<a name="ln380">    int lpc = 0;</a>
+<a name="ln381"> </a>
+<a name="ln382">    if (phase == 0) {</a>
+<a name="ln383">        crm_notice(&quot;Shutting down Pacemaker&quot;);</a>
+<a name="ln384">        phase = max;</a>
+<a name="ln385"> </a>
+<a name="ln386">        /* Add a second, more frequent, check to speed up shutdown */</a>
+<a name="ln387">        g_timeout_add_seconds(5, check_active_before_startup_processes, NULL);</a>
+<a name="ln388">    }</a>
+<a name="ln389"> </a>
+<a name="ln390">    for (; phase &gt; 0; phase--) {</a>
+<a name="ln391">        /* Don't stop anything with start_seq &lt; 1 */</a>
+<a name="ln392"> </a>
+<a name="ln393">        for (lpc = max - 1; lpc &gt;= 0; lpc--) {</a>
+<a name="ln394">            pcmk_child_t *child = &amp;(pcmk_children[lpc]);</a>
+<a name="ln395"> </a>
+<a name="ln396">            if (phase != child-&gt;start_seq) {</a>
+<a name="ln397">                continue;</a>
+<a name="ln398">            }</a>
+<a name="ln399"> </a>
+<a name="ln400">            if (child-&gt;pid) {</a>
+<a name="ln401">                time_t now = time(NULL);</a>
+<a name="ln402"> </a>
+<a name="ln403">                if (child-&gt;respawn) {</a>
+<a name="ln404">                    next_log = now + 30;</a>
+<a name="ln405">                    child-&gt;respawn = FALSE;</a>
+<a name="ln406">                    stop_child(child, SIGTERM);</a>
+<a name="ln407">                    if (phase &lt; pcmk_children[pcmk_child_crmd].start_seq) {</a>
+<a name="ln408">                        g_timeout_add(180000 /* 3m */ , escalate_shutdown, child);</a>
+<a name="ln409">                    }</a>
+<a name="ln410"> </a>
+<a name="ln411">                } else if (now &gt;= next_log) {</a>
+<a name="ln412">                    next_log = now + 30;</a>
+<a name="ln413">                    crm_notice(&quot;Still waiting for %s to terminate &quot;</a>
+<a name="ln414">                               CRM_XS &quot; pid=%d seq=%d&quot;,</a>
+<a name="ln415">                               child-&gt;name, child-&gt;pid, child-&gt;start_seq);</a>
+<a name="ln416">                }</a>
+<a name="ln417">                return TRUE;</a>
+<a name="ln418">            }</a>
+<a name="ln419"> </a>
+<a name="ln420">            /* cleanup */</a>
+<a name="ln421">            crm_debug(&quot;%s confirmed stopped&quot;, child-&gt;name);</a>
+<a name="ln422">            child-&gt;pid = 0;</a>
+<a name="ln423">        }</a>
+<a name="ln424">    }</a>
+<a name="ln425"> </a>
+<a name="ln426">    /* send_cluster_id(); */</a>
+<a name="ln427">    crm_notice(&quot;Shutdown complete&quot;);</a>
+<a name="ln428"> </a>
+<a name="ln429">    {</a>
+<a name="ln430">        const char *delay = daemon_option(&quot;shutdown_delay&quot;);</a>
+<a name="ln431">        if(delay) {</a>
+<a name="ln432">            sync();</a>
+<a name="ln433">            sleep(crm_get_msec(delay) / 1000);</a>
+<a name="ln434">        }</a>
+<a name="ln435">    }</a>
+<a name="ln436"> </a>
+<a name="ln437">    g_main_loop_quit(mainloop);</a>
+<a name="ln438"> </a>
+<a name="ln439">    if (fatal_error) {</a>
+<a name="ln440">        crm_notice(&quot;Attempting to inhibit respawning after fatal error&quot;);</a>
+<a name="ln441">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln442">    }</a>
+<a name="ln443"> </a>
+<a name="ln444">    return TRUE;</a>
+<a name="ln445">}</a>
+<a name="ln446"> </a>
+<a name="ln447">static void</a>
+<a name="ln448">pcmk_ignore(int nsig)</a>
+<a name="ln449">{</a>
+<a name="ln450">    crm_info(&quot;Ignoring signal %s (%d)&quot;, strsignal(nsig), nsig);</a>
+<a name="ln451">}</a>
+<a name="ln452"> </a>
+<a name="ln453">static void</a>
+<a name="ln454">pcmk_sigquit(int nsig)</a>
+<a name="ln455">{</a>
+<a name="ln456">    pcmk_panic(__FUNCTION__);</a>
+<a name="ln457">}</a>
+<a name="ln458"> </a>
+<a name="ln459">void</a>
+<a name="ln460">pcmk_shutdown(int nsig)</a>
+<a name="ln461">{</a>
+<a name="ln462">    if (shutdown_trigger == NULL) {</a>
+<a name="ln463">        shutdown_trigger = mainloop_add_trigger(G_PRIORITY_HIGH, pcmk_shutdown_worker, NULL);</a>
+<a name="ln464">    }</a>
+<a name="ln465">    mainloop_set_trigger(shutdown_trigger);</a>
+<a name="ln466">}</a>
+<a name="ln467"> </a>
+<a name="ln468">static int32_t</a>
+<a name="ln469">pcmk_ipc_accept(qb_ipcs_connection_t * c, uid_t uid, gid_t gid)</a>
+<a name="ln470">{</a>
+<a name="ln471">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln472">    if (crm_client_new(c, uid, gid) == NULL) {</a>
+<a name="ln473">        return -EIO;</a>
+<a name="ln474">    }</a>
+<a name="ln475">    return 0;</a>
+<a name="ln476">}</a>
+<a name="ln477"> </a>
+<a name="ln478">static void</a>
+<a name="ln479">pcmk_ipc_created(qb_ipcs_connection_t * c)</a>
+<a name="ln480">{</a>
+<a name="ln481">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln482">}</a>
+<a name="ln483"> </a>
+<a name="ln484">/* Exit code means? */</a>
+<a name="ln485">static int32_t</a>
+<a name="ln486">pcmk_ipc_dispatch(qb_ipcs_connection_t * qbc, void *data, size_t size)</a>
+<a name="ln487">{</a>
+<a name="ln488">    uint32_t id = 0;</a>
+<a name="ln489">    uint32_t flags = 0;</a>
+<a name="ln490">    const char *task = NULL;</a>
+<a name="ln491">    crm_client_t *c = crm_client_get(qbc);</a>
+<a name="ln492">    xmlNode *msg = crm_ipcs_recv(c, data, size, &amp;id, &amp;flags);</a>
+<a name="ln493"> </a>
+<a name="ln494">    crm_ipcs_send_ack(c, id, flags, &quot;ack&quot;, __FUNCTION__, __LINE__);</a>
+<a name="ln495">    if (msg == NULL) {</a>
+<a name="ln496">        return 0;</a>
+<a name="ln497">    }</a>
+<a name="ln498"> </a>
+<a name="ln499">    task = crm_element_value(msg, F_CRM_TASK);</a>
+<a name="ln500">    if (crm_str_eq(task, CRM_OP_QUIT, TRUE)) {</a>
+<a name="ln501">        /* Time to quit */</a>
+<a name="ln502">        crm_notice(&quot;Shutting down in response to ticket %s (%s)&quot;,</a>
+<a name="ln503">                   crm_element_value(msg, F_CRM_REFERENCE), crm_element_value(msg, F_CRM_ORIGIN));</a>
+<a name="ln504">        pcmk_shutdown(15);</a>
+<a name="ln505"> </a>
+<a name="ln506">    } else if (crm_str_eq(task, CRM_OP_RM_NODE_CACHE, TRUE)) {</a>
+<a name="ln507">        /* Send to everyone */</a>
+<a name="ln508">        struct iovec *iov;</a>
+<a name="ln509">        int id = 0;</a>
+<a name="ln510">        const char *name = NULL;</a>
+<a name="ln511"> </a>
+<a name="ln512">        crm_element_value_int(msg, XML_ATTR_ID, &amp;id);</a>
+<a name="ln513">        name = crm_element_value(msg, XML_ATTR_UNAME);</a>
+<a name="ln514">        crm_notice(&quot;Instructing peers to remove references to node %s/%u&quot;, name, id);</a>
+<a name="ln515"> </a>
+<a name="ln516">        iov = calloc(1, sizeof(struct iovec));</a>
+<a name="ln517">        iov-&gt;iov_base = dump_xml_unformatted(msg);</a>
+<a name="ln518">        iov-&gt;iov_len = 1 + strlen(iov-&gt;iov_base);</a>
+<a name="ln519">        send_cpg_iov(iov);</a>
+<a name="ln520"> </a>
+<a name="ln521">    } else {</a>
+<a name="ln522">        update_process_clients(c);</a>
+<a name="ln523">    }</a>
+<a name="ln524"> </a>
+<a name="ln525">    free_xml(msg);</a>
+<a name="ln526">    return 0;</a>
+<a name="ln527">}</a>
+<a name="ln528"> </a>
+<a name="ln529">/* Error code means? */</a>
+<a name="ln530">static int32_t</a>
+<a name="ln531">pcmk_ipc_closed(qb_ipcs_connection_t * c)</a>
+<a name="ln532">{</a>
+<a name="ln533">    crm_client_t *client = crm_client_get(c);</a>
+<a name="ln534"> </a>
+<a name="ln535">    if (client == NULL) {</a>
+<a name="ln536">        return 0;</a>
+<a name="ln537">    }</a>
+<a name="ln538">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln539">    crm_client_destroy(client);</a>
+<a name="ln540">    return 0;</a>
+<a name="ln541">}</a>
+<a name="ln542"> </a>
+<a name="ln543">static void</a>
+<a name="ln544">pcmk_ipc_destroy(qb_ipcs_connection_t * c)</a>
+<a name="ln545">{</a>
+<a name="ln546">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln547">    pcmk_ipc_closed(c);</a>
+<a name="ln548">}</a>
+<a name="ln549"> </a>
+<a name="ln550">struct qb_ipcs_service_handlers mcp_ipc_callbacks = {</a>
+<a name="ln551">    .connection_accept = pcmk_ipc_accept,</a>
+<a name="ln552">    .connection_created = pcmk_ipc_created,</a>
+<a name="ln553">    .msg_process = pcmk_ipc_dispatch,</a>
+<a name="ln554">    .connection_closed = pcmk_ipc_closed,</a>
+<a name="ln555">    .connection_destroyed = pcmk_ipc_destroy</a>
+<a name="ln556">};</a>
+<a name="ln557"> </a>
+<a name="ln558">/*!</a>
+<a name="ln559"> * \internal</a>
+<a name="ln560"> * \brief Send an XML message with process list of all known peers to client(s)</a>
+<a name="ln561"> *</a>
+<a name="ln562"> * \param[in] client  Send message to this client, or all clients if NULL</a>
+<a name="ln563"> */</a>
+<a name="ln564">void</a>
+<a name="ln565">update_process_clients(crm_client_t *client)</a>
+<a name="ln566">{</a>
+<a name="ln567">    GHashTableIter iter;</a>
+<a name="ln568">    crm_node_t *node = NULL;</a>
+<a name="ln569">    xmlNode *update = create_xml_node(NULL, &quot;nodes&quot;);</a>
+<a name="ln570"> </a>
+<a name="ln571">    if (is_corosync_cluster()) {</a>
+<a name="ln572">        crm_xml_add_int(update, &quot;quorate&quot;, pcmk_quorate);</a>
+<a name="ln573">    }</a>
+<a name="ln574"> </a>
+<a name="ln575">    g_hash_table_iter_init(&amp;iter, crm_peer_cache);</a>
+<a name="ln576">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp; node)) {</a>
+<a name="ln577">        xmlNode *xml = create_xml_node(update, &quot;node&quot;);</a>
+<a name="ln578"> </a>
+<a name="ln579">        crm_xml_add_int(xml, &quot;id&quot;, node-&gt;id);</a>
+<a name="ln580">        crm_xml_add(xml, &quot;uname&quot;, node-&gt;uname);</a>
+<a name="ln581">        crm_xml_add(xml, &quot;state&quot;, node-&gt;state);</a>
+<a name="ln582">        crm_xml_add_int(xml, &quot;processes&quot;, node-&gt;processes);</a>
+<a name="ln583">    }</a>
+<a name="ln584"> </a>
+<a name="ln585">    if(client) {</a>
+<a name="ln586">        crm_trace(&quot;Sending process list to client %s&quot;, client-&gt;id);</a>
+<a name="ln587">        crm_ipcs_send(client, 0, update, crm_ipc_server_event);</a>
+<a name="ln588"> </a>
+<a name="ln589">    } else {</a>
+<a name="ln590">        crm_trace(&quot;Sending process list to %d clients&quot;, crm_hash_table_size(client_connections));</a>
+<a name="ln591">        g_hash_table_iter_init(&amp;iter, client_connections);</a>
+<a name="ln592">        while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp; client)) {</a>
+<a name="ln593">            crm_ipcs_send(client, 0, update, crm_ipc_server_event);</a>
+<a name="ln594">        }</a>
+<a name="ln595">    }</a>
+<a name="ln596"> </a>
+<a name="ln597">    free_xml(update);</a>
+<a name="ln598">}</a>
+<a name="ln599"> </a>
+<a name="ln600">/*!</a>
+<a name="ln601"> * \internal</a>
+<a name="ln602"> * \brief Send a CPG message with local node's process list to all peers</a>
+<a name="ln603"> */</a>
+<a name="ln604">void</a>
+<a name="ln605">update_process_peers(void)</a>
+<a name="ln606">{</a>
+<a name="ln607">    /* Do nothing for corosync-2 based clusters */</a>
+<a name="ln608"> </a>
+<a name="ln609">    char buffer[1024];</a>
+<a name="ln610">    struct iovec *iov;</a>
+<a name="ln611">    int rc = 0;</a>
+<a name="ln612"> </a>
+<a name="ln613">    memset(buffer, 0, SIZEOF(buffer));</a>
+<a name="ln614"> </a>
+<a name="ln615">    if (local_name) {</a>
+<a name="ln616">        rc = snprintf(buffer, SIZEOF(buffer) - 1, &quot;&lt;node uname=\&quot;%s\&quot; proclist=\&quot;%u\&quot;/&gt;&quot;,</a>
+<a name="ln617">                      local_name, get_process_list());</a>
+<a name="ln618">    } else {</a>
+<a name="ln619">        rc = snprintf(buffer, SIZEOF(buffer) - 1, &quot;&lt;node proclist=\&quot;%u\&quot;/&gt;&quot;, get_process_list());</a>
+<a name="ln620">    }</a>
+<a name="ln621"> </a>
+<a name="ln622">    crm_trace(&quot;Sending %s&quot;, buffer);</a>
+<a name="ln623">    iov = calloc(1, sizeof(struct iovec));</a>
+<a name="ln624">    iov-&gt;iov_base = strdup(buffer);</a>
+<a name="ln625">    iov-&gt;iov_len = rc + 1;</a>
+<a name="ln626">    send_cpg_iov(iov);</a>
+<a name="ln627">}</a>
+<a name="ln628"> </a>
+<a name="ln629">/*!</a>
+<a name="ln630"> * \internal</a>
+<a name="ln631"> * \brief Update a node's process list, notifying clients and peers if needed</a>
+<a name="ln632"> *</a>
+<a name="ln633"> * \param[in] id     Node ID of affected node</a>
+<a name="ln634"> * \param[in] uname  Uname of affected node</a>
+<a name="ln635"> * \param[in] procs  Affected node's process list mask</a>
+<a name="ln636"> *</a>
+<a name="ln637"> * \return TRUE if the process list changed, FALSE otherwise</a>
+<a name="ln638"> */</a>
+<a name="ln639">gboolean</a>
+<a name="ln640">update_node_processes(uint32_t id, const char *uname, uint32_t procs)</a>
+<a name="ln641">{</a>
+<a name="ln642">    gboolean changed = FALSE;</a>
+<a name="ln643">    crm_node_t *node = crm_get_peer(id, uname);</a>
+<a name="ln644"> </a>
+<a name="ln645">    if (procs != 0) {</a>
+<a name="ln646">        if (procs != node-&gt;processes) {</a>
+<a name="ln647">            crm_debug(&quot;Node %s now has process list: %.32x (was %.32x)&quot;,</a>
+<a name="ln648">                      node-&gt;uname, procs, node-&gt;processes);</a>
+<a name="ln649">            node-&gt;processes = procs;</a>
+<a name="ln650">            changed = TRUE;</a>
+<a name="ln651"> </a>
+<a name="ln652">            /* If local node's processes have changed, notify clients/peers */</a>
+<a name="ln653">            if (id == local_nodeid) {</a>
+<a name="ln654">                update_process_clients(NULL);</a>
+<a name="ln655">                update_process_peers();</a>
+<a name="ln656">            }</a>
+<a name="ln657"> </a>
+<a name="ln658">        } else {</a>
+<a name="ln659">            crm_trace(&quot;Node %s still has process list: %.32x&quot;, node-&gt;uname, procs);</a>
+<a name="ln660">        }</a>
+<a name="ln661">    }</a>
+<a name="ln662">    return changed;</a>
+<a name="ln663">}</a>
+<a name="ln664"> </a>
+<a name="ln665"> </a>
+<a name="ln666">/* *INDENT-OFF* */</a>
+<a name="ln667">static struct crm_option long_options[] = {</a>
+<a name="ln668">    /* Top-level Options */</a>
+<a name="ln669">    {&quot;help&quot;,           0, 0, '?', &quot;\tThis text&quot;},</a>
+<a name="ln670">    {&quot;version&quot;,        0, 0, '$', &quot;\tVersion information&quot;  },</a>
+<a name="ln671">    {&quot;verbose&quot;,        0, 0, 'V', &quot;\tIncrease debug output&quot;},</a>
+<a name="ln672">    {&quot;shutdown&quot;,       0, 0, 'S', &quot;\tInstruct Pacemaker to shutdown on this machine&quot;},</a>
+<a name="ln673">    {&quot;features&quot;,       0, 0, 'F', &quot;\tDisplay the full version and list of features Pacemaker was built with&quot;},</a>
+<a name="ln674"> </a>
+<a name="ln675">    {&quot;-spacer-&quot;,       1, 0, '-', &quot;\nAdditional Options:&quot;},</a>
+<a name="ln676">    {&quot;foreground&quot;,     0, 0, 'f', &quot;\t(Ignored) Pacemaker always runs in the foreground&quot;},</a>
+<a name="ln677">    {&quot;pid-file&quot;,       1, 0, 'p', &quot;\t(Ignored) Daemon pid file location&quot;},</a>
+<a name="ln678">    {&quot;standby&quot;,        0, 0, 's', &quot;\tStart node in standby state&quot;},</a>
+<a name="ln679"> </a>
+<a name="ln680">    {NULL, 0, 0, 0}</a>
+<a name="ln681">};</a>
+<a name="ln682">/* *INDENT-ON* */</a>
+<a name="ln683"> </a>
+<a name="ln684">static void</a>
+<a name="ln685">mcp_chown(const char *path, uid_t uid, gid_t gid)</a>
+<a name="ln686">{</a>
+<a name="ln687">    int rc = chown(path, uid, gid);</a>
+<a name="ln688"> </a>
+<a name="ln689">    if (rc &lt; 0) {</a>
+<a name="ln690">        crm_warn(&quot;Cannot change the ownership of %s to user %s and gid %d: %s&quot;,</a>
+<a name="ln691">                 path, CRM_DAEMON_USER, gid, pcmk_strerror(errno));</a>
+<a name="ln692">    }</a>
+<a name="ln693">}</a>
+<a name="ln694"> </a>
+<a name="ln695">static gboolean</a>
+<a name="ln696">check_active_before_startup_processes(gpointer user_data)</a>
+<a name="ln697">{</a>
+<a name="ln698">    int start_seq = 1, lpc = 0;</a>
+<a name="ln699">    static int max = SIZEOF(pcmk_children);</a>
+<a name="ln700">    gboolean keep_tracking = FALSE;</a>
+<a name="ln701"> </a>
+<a name="ln702">    for (start_seq = 1; start_seq &lt; max; start_seq++) {</a>
+<a name="ln703">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln704">            if (pcmk_children[lpc].active_before_startup == FALSE) {</a>
+<a name="ln705">                /* we are already tracking it as a child process. */</a>
+<a name="ln706">                continue;</a>
+<a name="ln707">            } else if (start_seq != pcmk_children[lpc].start_seq) {</a>
+<a name="ln708">                continue;</a>
+<a name="ln709">            } else {</a>
+<a name="ln710">                const char *name = pcmk_children[lpc].name;</a>
+<a name="ln711">                if (pcmk_children[lpc].flag == crm_proc_stonith_ng) {</a>
+<a name="ln712">                    name = &quot;stonithd&quot;;</a>
+<a name="ln713">                }</a>
+<a name="ln714"> </a>
+<a name="ln715">                if (crm_pid_active(pcmk_children[lpc].pid, name) != 1) {</a>
+<a name="ln716">                    crm_notice(&quot;Process %s terminated (pid=%d)&quot;,</a>
+<a name="ln717">                           name, pcmk_children[lpc].pid);</a>
+<a name="ln718">                    pcmk_process_exit(&amp;(pcmk_children[lpc]));</a>
+<a name="ln719">                    continue;</a>
+<a name="ln720">                }</a>
+<a name="ln721">            }</a>
+<a name="ln722">            /* at least one of the processes found at startup</a>
+<a name="ln723">             * is still going, so keep this recurring timer around */</a>
+<a name="ln724">            keep_tracking = TRUE;</a>
+<a name="ln725">        }</a>
+<a name="ln726">    }</a>
+<a name="ln727"> </a>
+<a name="ln728">    return keep_tracking;</a>
+<a name="ln729">}</a>
+<a name="ln730"> </a>
+<a name="ln731">static bool</a>
+<a name="ln732">find_and_track_existing_processes(void)</a>
+<a name="ln733">{</a>
+<a name="ln734">    DIR *dp;</a>
+<a name="ln735">    struct dirent *entry;</a>
+<a name="ln736">    int start_tracker = 0;</a>
+<a name="ln737">    char entry_name[64];</a>
+<a name="ln738"> </a>
+<a name="ln739">    dp = opendir(&quot;/proc&quot;);</a>
+<a name="ln740">    if (!dp) {</a>
+<a name="ln741">        /* no proc directory to search through */</a>
+<a name="ln742">        crm_notice(&quot;Can not read /proc directory to track existing components&quot;);</a>
+<a name="ln743">        return FALSE;</a>
+<a name="ln744">    }</a>
+<a name="ln745"> </a>
+<a name="ln746">    while ((entry = readdir(dp)) != NULL) {</a>
+<a name="ln747">        int pid;</a>
+<a name="ln748">        int max = SIZEOF(pcmk_children);</a>
+<a name="ln749">        int i;</a>
+<a name="ln750"> </a>
+<a name="ln751">        if (crm_procfs_process_info(entry, entry_name, &amp;pid) &lt; 0) {</a>
+<a name="ln752">            continue;</a>
+<a name="ln753">        }</a>
+<a name="ln754">        for (i = 0; i &lt; max; i++) {</a>
+<a name="ln755">            const char *name = pcmk_children[i].name;</a>
+<a name="ln756"> </a>
+<a name="ln757">            if (pcmk_children[i].start_seq == 0) {</a>
+<a name="ln758">                continue;</a>
+<a name="ln759">            }</a>
+<a name="ln760">            if (pcmk_children[i].flag == crm_proc_stonith_ng) {</a>
+<a name="ln761">                name = &quot;stonithd&quot;;</a>
+<a name="ln762">            }</a>
+<a name="ln763">            if (safe_str_eq(entry_name, name) &amp;&amp; (crm_pid_active(pid, NULL) == 1)) {</a>
+<a name="ln764">                crm_notice(&quot;Tracking existing %s process (pid=%d)&quot;, name, pid);</a>
+<a name="ln765">                pcmk_children[i].pid = pid;</a>
+<a name="ln766">                pcmk_children[i].active_before_startup = TRUE;</a>
+<a name="ln767">                start_tracker = 1;</a>
+<a name="ln768">                break;</a>
+<a name="ln769">            }</a>
+<a name="ln770">        }</a>
+<a name="ln771">    }</a>
+<a name="ln772"> </a>
+<a name="ln773">    if (start_tracker) {</a>
+<a name="ln774">        g_timeout_add_seconds(PCMK_PROCESS_CHECK_INTERVAL, check_active_before_startup_processes,</a>
+<a name="ln775">                              NULL);</a>
+<a name="ln776">    }</a>
+<a name="ln777">    closedir(dp);</a>
+<a name="ln778"> </a>
+<a name="ln779">    return start_tracker;</a>
+<a name="ln780">}</a>
+<a name="ln781"> </a>
+<a name="ln782">static void</a>
+<a name="ln783">init_children_processes(void)</a>
+<a name="ln784">{</a>
+<a name="ln785">    int start_seq = 1, lpc = 0;</a>
+<a name="ln786">    static int max = SIZEOF(pcmk_children);</a>
+<a name="ln787"> </a>
+<a name="ln788">    /* start any children that have not been detected */</a>
+<a name="ln789">    for (start_seq = 1; start_seq &lt; max; start_seq++) {</a>
+<a name="ln790">        /* don't start anything with start_seq &lt; 1 */</a>
+<a name="ln791">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln792">            if (pcmk_children[lpc].pid) {</a>
+<a name="ln793">                /* we are already tracking it */</a>
+<a name="ln794">                continue;</a>
+<a name="ln795">            }</a>
+<a name="ln796"> </a>
+<a name="ln797">            if (start_seq == pcmk_children[lpc].start_seq) {</a>
+<a name="ln798">                start_child(&amp;(pcmk_children[lpc]));</a>
+<a name="ln799">            }</a>
+<a name="ln800">        }</a>
+<a name="ln801">    }</a>
+<a name="ln802"> </a>
+<a name="ln803">    /* From this point on, any daemons being started will be due to</a>
+<a name="ln804">     * respawning rather than node start.</a>
+<a name="ln805">     *</a>
+<a name="ln806">     * This may be useful for the daemons to know</a>
+<a name="ln807">     */</a>
+<a name="ln808">    setenv(&quot;PCMK_respawned&quot;, &quot;true&quot;, 1);</a>
+<a name="ln809">}</a>
+<a name="ln810"> </a>
+<a name="ln811">static void</a>
+<a name="ln812">mcp_cpg_destroy(gpointer user_data)</a>
+<a name="ln813">{</a>
+<a name="ln814">    crm_err(&quot;Connection destroyed&quot;);</a>
+<a name="ln815">    crm_exit(ENOTCONN);</a>
+<a name="ln816">}</a>
+<a name="ln817"> </a>
+<a name="ln818">/*!</a>
+<a name="ln819"> * \internal</a>
+<a name="ln820"> * \brief Process a CPG message (process list or manual peer cache removal)</a>
+<a name="ln821"> *</a>
+<a name="ln822"> * \param[in] handle     CPG connection (ignored)</a>
+<a name="ln823"> * \param[in] groupName  CPG group name (ignored)</a>
+<a name="ln824"> * \param[in] nodeid     ID of affected node</a>
+<a name="ln825"> * \param[in] pid        Process ID (ignored)</a>
+<a name="ln826"> * \param[in] msg        CPG XML message</a>
+<a name="ln827"> * \param[in] msg_len    Length of msg in bytes (ignored)</a>
+<a name="ln828"> */</a>
+<a name="ln829">static void</a>
+<a name="ln830">mcp_cpg_deliver(cpg_handle_t handle,</a>
+<a name="ln831">                 const struct cpg_name *groupName,</a>
+<a name="ln832">                 uint32_t nodeid, uint32_t pid, void *msg, size_t msg_len)</a>
+<a name="ln833">{</a>
+<a name="ln834">    xmlNode *xml = string2xml(msg);</a>
+<a name="ln835">    const char *task = crm_element_value(xml, F_CRM_TASK);</a>
+<a name="ln836"> </a>
+<a name="ln837">    crm_trace(&quot;Received CPG message (%s): %.200s&quot;,</a>
+<a name="ln838">              (task? task : &quot;process list&quot;), (char*)msg);</a>
+<a name="ln839"> </a>
+<a name="ln840">    if (task == NULL) {</a>
+<a name="ln841">        if (nodeid == local_nodeid) {</a>
+<a name="ln842">            crm_info(&quot;Ignoring process list sent by peer for local node&quot;);</a>
+<a name="ln843">        } else {</a>
+<a name="ln844">            uint32_t procs = 0;</a>
+<a name="ln845">            const char *uname = crm_element_value(xml, &quot;uname&quot;);</a>
+<a name="ln846"> </a>
+<a name="ln847">            crm_element_value_int(xml, &quot;proclist&quot;, (int *)&amp;procs);</a>
+<a name="ln848">            if (update_node_processes(nodeid, uname, procs)) {</a>
+<a name="ln849">                update_process_clients(NULL);</a>
+<a name="ln850">            }</a>
+<a name="ln851">        }</a>
+<a name="ln852"> </a>
+<a name="ln853">    } else if (crm_str_eq(task, CRM_OP_RM_NODE_CACHE, TRUE)) {</a>
+<a name="ln854">        int id = 0;</a>
+<a name="ln855">        const char *name = NULL;</a>
+<a name="ln856"> </a>
+<a name="ln857">        crm_element_value_int(xml, XML_ATTR_ID, &amp;id);</a>
+<a name="ln858">        name = crm_element_value(xml, XML_ATTR_UNAME);</a>
+<a name="ln859">        reap_crm_member(id, name);</a>
+<a name="ln860">    }</a>
+<a name="ln861"> </a>
+<a name="ln862">    if (xml != NULL) {</a>
+<a name="ln863">        free_xml(xml);</a>
+<a name="ln864">    }</a>
+<a name="ln865">}</a>
+<a name="ln866"> </a>
+<a name="ln867">static void</a>
+<a name="ln868">mcp_cpg_membership(cpg_handle_t handle,</a>
+<a name="ln869">                    const struct cpg_name *groupName,</a>
+<a name="ln870">                    const struct cpg_address *member_list, size_t member_list_entries,</a>
+<a name="ln871">                    const struct cpg_address *left_list, size_t left_list_entries,</a>
+<a name="ln872">                    const struct cpg_address *joined_list, size_t joined_list_entries)</a>
+<a name="ln873">{</a>
+<a name="ln874">    /* Update peer cache if needed */</a>
+<a name="ln875">    pcmk_cpg_membership(handle, groupName, member_list, member_list_entries,</a>
+<a name="ln876">                        left_list, left_list_entries,</a>
+<a name="ln877">                        joined_list, joined_list_entries);</a>
+<a name="ln878"> </a>
+<a name="ln879">    /* Always broadcast our own presence after any membership change */</a>
+<a name="ln880">    update_process_peers();</a>
+<a name="ln881">}</a>
+<a name="ln882"> </a>
+<a name="ln883">static gboolean</a>
+<a name="ln884">mcp_quorum_callback(unsigned long long seq, gboolean quorate)</a>
+<a name="ln885">{</a>
+<a name="ln886">    pcmk_quorate = quorate;</a>
+<a name="ln887">    return TRUE;</a>
+<a name="ln888">}</a>
+<a name="ln889"> </a>
+<a name="ln890">static void</a>
+<a name="ln891">mcp_quorum_destroy(gpointer user_data)</a>
+<a name="ln892">{</a>
+<a name="ln893">    crm_info(&quot;connection lost&quot;);</a>
+<a name="ln894">}</a>
+<a name="ln895"> </a>
+<a name="ln896">#if SUPPORT_CMAN</a>
+<a name="ln897">static gboolean</a>
+<a name="ln898">mcp_cman_dispatch(unsigned long long seq, gboolean quorate)</a>
+<a name="ln899">{</a>
+<a name="ln900">    pcmk_quorate = quorate;</a>
+<a name="ln901">    return TRUE;</a>
+<a name="ln902">}</a>
+<a name="ln903"> </a>
+<a name="ln904">static void</a>
+<a name="ln905">mcp_cman_destroy(gpointer user_data)</a>
+<a name="ln906">{</a>
+<a name="ln907">    crm_info(&quot;connection closed&quot;);</a>
+<a name="ln908">}</a>
+<a name="ln909">#endif</a>
+<a name="ln910"> </a>
+<a name="ln911">int</a>
+<a name="ln912">main(int argc, char **argv)</a>
+<a name="ln913">{</a>
+<a name="ln914">    int rc;</a>
+<a name="ln915">    int flag;</a>
+<a name="ln916">    int argerr = 0;</a>
+<a name="ln917"> </a>
+<a name="ln918">    int option_index = 0;</a>
+<a name="ln919">    gboolean shutdown = FALSE;</a>
+<a name="ln920"> </a>
+<a name="ln921">    uid_t pcmk_uid = 0;</a>
+<a name="ln922">    gid_t pcmk_gid = 0;</a>
+<a name="ln923">    struct rlimit cores;</a>
+<a name="ln924">    crm_ipc_t *old_instance = NULL;</a>
+<a name="ln925">    qb_ipcs_service_t *ipcs = NULL;</a>
+<a name="ln926">    const char *facility = daemon_option(&quot;logfacility&quot;);</a>
+<a name="ln927">    static crm_cluster_t cluster;</a>
+<a name="ln928"> </a>
+<a name="ln929">    crm_log_preinit(NULL, argc, argv);</a>
+<a name="ln930">    crm_set_options(NULL, &quot;mode [options]&quot;, long_options, &quot;Start/Stop Pacemaker\n&quot;);</a>
+<a name="ln931">    mainloop_add_signal(SIGHUP, pcmk_ignore);</a>
+<a name="ln932">    mainloop_add_signal(SIGQUIT, pcmk_sigquit);</a>
+<a name="ln933"> </a>
+<a name="ln934">    while (1) {</a>
+<a name="ln935">        flag = crm_get_option(argc, argv, &amp;option_index);</a>
+<a name="ln936">        if (flag == -1)</a>
+<a name="ln937">            break;</a>
+<a name="ln938"> </a>
+<a name="ln939">        switch (flag) {</a>
+<a name="ln940">            case 'V':</a>
+<a name="ln941">                crm_bump_log_level(argc, argv);</a>
+<a name="ln942">                break;</a>
+<a name="ln943">            case 'f':</a>
+<a name="ln944">                /* Legacy */</a>
+<a name="ln945">                break;</a>
+<a name="ln946">            case 'p':</a>
+<a name="ln947">                pid_file = optarg;</a>
+<a name="ln948">                break;</a>
+<a name="ln949">            case 's':</a>
+<a name="ln950">                set_daemon_option(&quot;node_start_state&quot;, &quot;standby&quot;);</a>
+<a name="ln951">                break;</a>
+<a name="ln952">            case '$':</a>
+<a name="ln953">            case '?':</a>
+<a name="ln954">                crm_help(flag, EX_OK);</a>
+<a name="ln955">                break;</a>
+<a name="ln956">            case 'S':</a>
+<a name="ln957">                shutdown = TRUE;</a>
+<a name="ln958">                break;</a>
+<a name="ln959">            case 'F':</a>
+<a name="ln960">                printf(&quot;Pacemaker %s (Build: %s)\n Supporting v%s: %s\n&quot;, PACEMAKER_VERSION, BUILD_VERSION,</a>
+<a name="ln961">                       CRM_FEATURE_SET, CRM_FEATURES);</a>
+<a name="ln962">                crm_exit(pcmk_ok);</a>
+<a name="ln963">            default:</a>
+<a name="ln964">                printf(&quot;Argument code 0%o (%c) is not (?yet?) supported\n&quot;, flag, flag);</a>
+<a name="ln965">                ++argerr;</a>
+<a name="ln966">                break;</a>
+<a name="ln967">        }</a>
+<a name="ln968">    }</a>
+<a name="ln969"> </a>
+<a name="ln970">    if (optind &lt; argc) {</a>
+<a name="ln971">        printf(&quot;non-option ARGV-elements: &quot;);</a>
+<a name="ln972">        while (optind &lt; argc)</a>
+<a name="ln973">            printf(&quot;%s &quot;, argv[optind++]);</a>
+<a name="ln974">        printf(&quot;\n&quot;);</a>
+<a name="ln975">    }</a>
+<a name="ln976">    if (argerr) {</a>
+<a name="ln977">        crm_help('?', EX_USAGE);</a>
+<a name="ln978">    }</a>
+<a name="ln979"> </a>
+<a name="ln980"> </a>
+<a name="ln981">    setenv(&quot;LC_ALL&quot;, &quot;C&quot;, 1);</a>
+<a name="ln982">    setenv(&quot;HA_LOGD&quot;, &quot;no&quot;, 1);</a>
+<a name="ln983"> </a>
+<a name="ln984">    set_daemon_option(&quot;mcp&quot;, &quot;true&quot;);</a>
+<a name="ln985">    set_daemon_option(&quot;use_logd&quot;, &quot;off&quot;);</a>
+<a name="ln986"> </a>
+<a name="ln987">    crm_log_init(NULL, LOG_INFO, TRUE, FALSE, argc, argv, FALSE);</a>
+<a name="ln988"> </a>
+<a name="ln989">    /* Restore the original facility so that mcp_read_config() does the right thing */</a>
+<a name="ln990">    set_daemon_option(&quot;logfacility&quot;, facility);</a>
+<a name="ln991"> </a>
+<a name="ln992">    crm_debug(&quot;Checking for old instances of %s&quot;, CRM_SYSTEM_MCP);</a>
+<a name="ln993">    old_instance = crm_ipc_new(CRM_SYSTEM_MCP, 0);</a>
+<a name="ln994">    crm_ipc_connect(old_instance);</a>
+<a name="ln995"> </a>
+<a name="ln996">    if (shutdown) {</a>
+<a name="ln997">        crm_debug(&quot;Terminating previous instance&quot;);</a>
+<a name="ln998">        while (crm_ipc_connected(old_instance)) {</a>
+<a name="ln999">            xmlNode *cmd =</a>
+<a name="ln1000">                create_request(CRM_OP_QUIT, NULL, NULL, CRM_SYSTEM_MCP, CRM_SYSTEM_MCP, NULL);</a>
+<a name="ln1001"> </a>
+<a name="ln1002">            crm_debug(&quot;.&quot;);</a>
+<a name="ln1003">            crm_ipc_send(old_instance, cmd, 0, 0, NULL);</a>
+<a name="ln1004">            free_xml(cmd);</a>
+<a name="ln1005"> </a>
+<a name="ln1006">            sleep(2);</a>
+<a name="ln1007">        }</a>
+<a name="ln1008">        crm_ipc_close(old_instance);</a>
+<a name="ln1009">        crm_ipc_destroy(old_instance);</a>
+<a name="ln1010">        crm_exit(pcmk_ok);</a>
+<a name="ln1011"> </a>
+<a name="ln1012">    } else if (crm_ipc_connected(old_instance)) {</a>
+<a name="ln1013">        crm_ipc_close(old_instance);</a>
+<a name="ln1014">        crm_ipc_destroy(old_instance);</a>
+<a name="ln1015">        crm_err(&quot;Pacemaker is already active, aborting startup&quot;);</a>
+<a name="ln1016">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln1017">    }</a>
+<a name="ln1018"> </a>
+<a name="ln1019">    crm_ipc_close(old_instance);</a>
+<a name="ln1020">    crm_ipc_destroy(old_instance);</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    if (mcp_read_config() == FALSE) {</a>
+<a name="ln1023">        crm_notice(&quot;Could not obtain corosync config data, exiting&quot;);</a>
+<a name="ln1024">        crm_exit(ENODATA);</a>
+<a name="ln1025">    }</a>
+<a name="ln1026"> </a>
+<a name="ln1027">    crm_notice(&quot;Starting Pacemaker %s &quot;CRM_XS&quot; build=%s features:%s&quot;,</a>
+<a name="ln1028">               PACEMAKER_VERSION, BUILD_VERSION, CRM_FEATURES);</a>
+<a name="ln1029">    mainloop = g_main_new(FALSE);</a>
+<a name="ln1030">    sysrq_init();</a>
+<a name="ln1031"> </a>
+<a name="ln1032">    rc = getrlimit(RLIMIT_CORE, &amp;cores);</a>
+<a name="ln1033">    if (rc &lt; 0) {</a>
+<a name="ln1034">        crm_perror(LOG_ERR, &quot;Cannot determine current maximum core size.&quot;);</a>
+<a name="ln1035">    } else {</a>
+<a name="ln1036">        if (cores.rlim_max == 0 &amp;&amp; geteuid() == 0) {</a>
+<a name="ln1037">            cores.rlim_max = RLIM_INFINITY;</a>
+<a name="ln1038">        } else {</a>
+<a name="ln1039">            crm_info(&quot;Maximum core file size is: %lu&quot;, (unsigned long)cores.rlim_max);</a>
+<a name="ln1040">        }</a>
+<a name="ln1041">        cores.rlim_cur = cores.rlim_max;</a>
+<a name="ln1042"> </a>
+<a name="ln1043">        rc = setrlimit(RLIMIT_CORE, &amp;cores);</a>
+<a name="ln1044">        if (rc &lt; 0) {</a>
+<a name="ln1045">            crm_perror(LOG_ERR,</a>
+<a name="ln1046">                       &quot;Core file generation will remain disabled.&quot;</a>
+<a name="ln1047">                       &quot; Core files are an important diagnositic tool,&quot;</a>
+<a name="ln1048">                       &quot; please consider enabling them by default.&quot;);</a>
+<a name="ln1049">        }</a>
+<a name="ln1050">#if 0</a>
+<a name="ln1051">        /* system() is not thread-safe, can't call from here</a>
+<a name="ln1052">         * Actually, it's a pretty hacky way to try and achieve this anyway</a>
+<a name="ln1053">         */</a>
+<a name="ln1054">        if (system(&quot;echo 1 &gt; /proc/sys/kernel/core_uses_pid&quot;) != 0) {</a>
+<a name="ln1055">            crm_perror(LOG_ERR, &quot;Could not enable /proc/sys/kernel/core_uses_pid&quot;);</a>
+<a name="ln1056">        }</a>
+<a name="ln1057">#endif</a>
+<a name="ln1058">    }</a>
+<a name="ln1059">    rc = pcmk_ok;</a>
+<a name="ln1060"> </a>
+<a name="ln1061">    if (crm_user_lookup(CRM_DAEMON_USER, &amp;pcmk_uid, &amp;pcmk_gid) &lt; 0) {</a>
+<a name="ln1062">        crm_err(&quot;Cluster user %s does not exist, aborting Pacemaker startup&quot;, CRM_DAEMON_USER);</a>
+<a name="ln1063">        crm_exit(ENOKEY);</a>
+<a name="ln1064">    }</a>
+<a name="ln1065"> </a>
+<a name="ln1066">    mkdir(CRM_STATE_DIR, 0750);</a>
+<a name="ln1067">    mcp_chown(CRM_STATE_DIR, pcmk_uid, pcmk_gid);</a>
+<a name="ln1068"> </a>
+<a name="ln1069">    /* Used to store core/blackbox/pengine/cib files in */</a>
+<a name="ln1070">    crm_build_path(CRM_PACEMAKER_DIR, 0750);</a>
+<a name="ln1071">    mcp_chown(CRM_PACEMAKER_DIR, pcmk_uid, pcmk_gid);</a>
+<a name="ln1072"> </a>
+<a name="ln1073">    /* Used to store core files in */</a>
+<a name="ln1074">    crm_build_path(CRM_CORE_DIR, 0750);</a>
+<a name="ln1075">    mcp_chown(CRM_CORE_DIR, pcmk_uid, pcmk_gid);</a>
+<a name="ln1076"> </a>
+<a name="ln1077">    /* Used to store blackbox dumps in */</a>
+<a name="ln1078">    crm_build_path(CRM_BLACKBOX_DIR, 0750);</a>
+<a name="ln1079">    mcp_chown(CRM_BLACKBOX_DIR, pcmk_uid, pcmk_gid);</a>
+<a name="ln1080"> </a>
+<a name="ln1081">    /* Used to store policy engine inputs in */</a>
+<a name="ln1082">    crm_build_path(PE_STATE_DIR, 0750);</a>
+<a name="ln1083">    mcp_chown(PE_STATE_DIR, pcmk_uid, pcmk_gid);</a>
+<a name="ln1084"> </a>
+<a name="ln1085">    /* Used to store the cluster configuration */</a>
+<a name="ln1086">    crm_build_path(CRM_CONFIG_DIR, 0750);</a>
+<a name="ln1087">    mcp_chown(CRM_CONFIG_DIR, pcmk_uid, pcmk_gid);</a>
+<a name="ln1088"> </a>
+<a name="ln1089">    /* Resource agent paths are constructed by the lrmd */</a>
+<a name="ln1090"> </a>
+<a name="ln1091">    ipcs = mainloop_add_ipc_server(CRM_SYSTEM_MCP, QB_IPC_NATIVE, &amp;mcp_ipc_callbacks);</a>
+<a name="ln1092">    if (ipcs == NULL) {</a>
+<a name="ln1093">        crm_err(&quot;Couldn't start IPC server&quot;);</a>
+<a name="ln1094">        crm_exit(EIO);</a>
+<a name="ln1095">    }</a>
+<a name="ln1096"> </a>
+<a name="ln1097">    /* Allows us to block shutdown */</a>
+<a name="ln1098">    if (cluster_connect_cfg(&amp;local_nodeid) == FALSE) {</a>
+<a name="ln1099">        crm_err(&quot;Couldn't connect to Corosync's CFG service&quot;);</a>
+<a name="ln1100">        crm_exit(ENOPROTOOPT);</a>
+<a name="ln1101">    }</a>
+<a name="ln1102"> </a>
+<a name="ln1103">    if(pcmk_locate_sbd() &gt; 0) {</a>
+<a name="ln1104">        setenv(&quot;PCMK_watchdog&quot;, &quot;true&quot;, 1);</a>
+<a name="ln1105">    } else {</a>
+<a name="ln1106">        setenv(&quot;PCMK_watchdog&quot;, &quot;false&quot;, 1);</a>
+<a name="ln1107">    }</a>
+<a name="ln1108"> </a>
+<a name="ln1109">    find_and_track_existing_processes();</a>
+<a name="ln1110"> </a>
+<a name="ln1111">    cluster.destroy = mcp_cpg_destroy;</a>
+<a name="ln1112">    cluster.cpg.cpg_deliver_fn = mcp_cpg_deliver;</a>
+<a name="ln1113">    cluster.cpg.cpg_confchg_fn = mcp_cpg_membership;</a>
+<a name="ln1114"> </a>
+<a name="ln1115">    crm_set_autoreap(FALSE);</a>
+<a name="ln1116"> </a>
+<a name="ln1117">    if(cluster_connect_cpg(&amp;cluster) == FALSE) {</a>
+<a name="ln1118">        crm_err(&quot;Couldn't connect to Corosync's CPG service&quot;);</a>
+<a name="ln1119">        rc = -ENOPROTOOPT;</a>
+<a name="ln1120">    }</a>
+<a name="ln1121"> </a>
+<a name="ln1122">    if (rc == pcmk_ok &amp;&amp; is_corosync_cluster()) {</a>
+<a name="ln1123">        /* Keep the membership list up-to-date for crm_node to query */</a>
+<a name="ln1124">        if(cluster_connect_quorum(mcp_quorum_callback, mcp_quorum_destroy) == FALSE) {</a>
+<a name="ln1125">            rc = -ENOTCONN;</a>
+<a name="ln1126">        }</a>
+<a name="ln1127">    }</a>
+<a name="ln1128"> </a>
+<a name="ln1129">#if SUPPORT_CMAN</a>
+<a name="ln1130">    if (rc == pcmk_ok &amp;&amp; is_cman_cluster()) {</a>
+<a name="ln1131">        init_cman_connection(mcp_cman_dispatch, mcp_cman_destroy);</a>
+<a name="ln1132">    }</a>
+<a name="ln1133">#endif</a>
+<a name="ln1134"> </a>
+<a name="ln1135">    if(rc == pcmk_ok) {</a>
+<a name="ln1136">        local_name = get_local_node_name();</a>
+<a name="ln1137">        update_node_processes(local_nodeid, local_name, get_process_list());</a>
+<a name="ln1138"> </a>
+<a name="ln1139">        mainloop_add_signal(SIGTERM, pcmk_shutdown);</a>
+<a name="ln1140">        mainloop_add_signal(SIGINT, pcmk_shutdown);</a>
+<a name="ln1141"> </a>
+<a name="ln1142">        init_children_processes();</a>
+<a name="ln1143"> </a>
+<a name="ln1144">        crm_info(&quot;Starting mainloop&quot;);</a>
+<a name="ln1145"> </a>
+<a name="ln1146">        g_main_run(mainloop);</a>
+<a name="ln1147">    }</a>
+<a name="ln1148"> </a>
+<a name="ln1149">    if (ipcs) {</a>
+<a name="ln1150">        crm_trace(&quot;Closing IPC server&quot;);</a>
+<a name="ln1151">        mainloop_del_ipc_server(ipcs);</a>
+<a name="ln1152">        ipcs = NULL;</a>
+<a name="ln1153">    }</a>
+<a name="ln1154"> </a>
+<a name="ln1155">    g_main_destroy(mainloop);</a>
+<a name="ln1156"> </a>
+<a name="ln1157">    cluster_disconnect_cpg(&amp;cluster);</a>
+<a name="ln1158">    cluster_disconnect_cfg();</a>
+<a name="ln1159"> </a>
+<a name="ln1160">    crm_info(&quot;Exiting %s&quot;, crm_system_name);</a>
+<a name="ln1161"> </a>
+<a name="ln1162">    return crm_exit(rc);</a>
+<a name="ln1163">}</a>
+
+</code></pre>
+<div class="balloon" rel="271"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always false: strlen("/usr/bin/valgrind") == 0.</p></div>
+<div class="balloon" rel="517"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'iov'. Check lines: 517, 516.</p></div>
+<div class="balloon" rel="624"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'iov'. Check lines: 624, 623.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

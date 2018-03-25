@@ -1,0 +1,1012 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln26">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln27">#include &lt;crm/pengine/complex.h&gt;</a>
+<a name="ln28">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln29">#include &lt;unpack.h&gt;</a>
+<a name="ln30">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#define VARIANT_NATIVE 1</a>
+<a name="ln33">#include &quot;./variant.h&quot;</a>
+<a name="ln34"> </a>
+<a name="ln35">void</a>
+<a name="ln36">native_add_running(resource_t * rsc, node_t * node, pe_working_set_t * data_set)</a>
+<a name="ln37">{</a>
+<a name="ln38">    GListPtr gIter = rsc-&gt;running_on;</a>
+<a name="ln39"> </a>
+<a name="ln40">    CRM_CHECK(node != NULL, return);</a>
+<a name="ln41">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln42">        node_t *a_node = (node_t *) gIter-&gt;data;</a>
+<a name="ln43"> </a>
+<a name="ln44">        CRM_CHECK(a_node != NULL, return);</a>
+<a name="ln45">        if (safe_str_eq(a_node-&gt;details-&gt;id, node-&gt;details-&gt;id)) {</a>
+<a name="ln46">            return;</a>
+<a name="ln47">        }</a>
+<a name="ln48">    }</a>
+<a name="ln49"> </a>
+<a name="ln50">    pe_rsc_trace(rsc, &quot;Adding %s to %s %s&quot;, rsc-&gt;id, node-&gt;details-&gt;uname,</a>
+<a name="ln51">                 is_set(rsc-&gt;flags, pe_rsc_managed)?&quot;&quot;:&quot;(unmanaged)&quot;);</a>
+<a name="ln52"> </a>
+<a name="ln53">    rsc-&gt;running_on = g_list_append(rsc-&gt;running_on, node);</a>
+<a name="ln54">    if (rsc-&gt;variant == pe_native) {</a>
+<a name="ln55">        node-&gt;details-&gt;running_rsc = g_list_append(node-&gt;details-&gt;running_rsc, rsc);</a>
+<a name="ln56">    }</a>
+<a name="ln57"> </a>
+<a name="ln58">    if (rsc-&gt;variant == pe_native &amp;&amp; node-&gt;details-&gt;maintenance) {</a>
+<a name="ln59">        clear_bit(rsc-&gt;flags, pe_rsc_managed);</a>
+<a name="ln60">    }</a>
+<a name="ln61"> </a>
+<a name="ln62">    if (is_not_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln63">        resource_t *p = rsc-&gt;parent;</a>
+<a name="ln64"> </a>
+<a name="ln65">        pe_rsc_info(rsc, &quot;resource %s isn't managed&quot;, rsc-&gt;id);</a>
+<a name="ln66">        resource_location(rsc, node, INFINITY, &quot;not_managed_default&quot;, data_set);</a>
+<a name="ln67"> </a>
+<a name="ln68">        while(p &amp;&amp; node-&gt;details-&gt;online) {</a>
+<a name="ln69">            /* add without the additional location constraint */</a>
+<a name="ln70">            p-&gt;running_on = g_list_append(p-&gt;running_on, node);</a>
+<a name="ln71">            p = p-&gt;parent;</a>
+<a name="ln72">        }</a>
+<a name="ln73">        return;</a>
+<a name="ln74">    }</a>
+<a name="ln75"> </a>
+<a name="ln76">    if (rsc-&gt;variant == pe_native &amp;&amp; g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln77">        switch (rsc-&gt;recovery_type) {</a>
+<a name="ln78">            case recovery_stop_only:</a>
+<a name="ln79">                {</a>
+<a name="ln80">                    GHashTableIter gIter;</a>
+<a name="ln81">                    node_t *local_node = NULL;</a>
+<a name="ln82"> </a>
+<a name="ln83">                    /* make sure it doesn't come up again */</a>
+<a name="ln84">                    g_hash_table_destroy(rsc-&gt;allowed_nodes);</a>
+<a name="ln85">                    rsc-&gt;allowed_nodes = node_hash_from_list(data_set-&gt;nodes);</a>
+<a name="ln86">                    g_hash_table_iter_init(&amp;gIter, rsc-&gt;allowed_nodes);</a>
+<a name="ln87">                    while (g_hash_table_iter_next(&amp;gIter, NULL, (void **)&amp;local_node)) {</a>
+<a name="ln88">                        local_node-&gt;weight = -INFINITY;</a>
+<a name="ln89">                    }</a>
+<a name="ln90">                }</a>
+<a name="ln91">                break;</a>
+<a name="ln92">            case recovery_stop_start:</a>
+<a name="ln93">                break;</a>
+<a name="ln94">            case recovery_block:</a>
+<a name="ln95">                clear_bit(rsc-&gt;flags, pe_rsc_managed);</a>
+<a name="ln96">                set_bit(rsc-&gt;flags, pe_rsc_block);</a>
+<a name="ln97"> </a>
+<a name="ln98">                /* If the group that the resource belongs to is configured with multiple-active=block, */</a>
+<a name="ln99">                /* block the whole group. */</a>
+<a name="ln100">                if (rsc-&gt;parent</a>
+<a name="ln101">                    &amp;&amp; rsc-&gt;parent-&gt;variant == pe_group</a>
+<a name="ln102">                    &amp;&amp; rsc-&gt;parent-&gt;recovery_type == recovery_block) {</a>
+<a name="ln103">                    GListPtr gIter = rsc-&gt;parent-&gt;children;</a>
+<a name="ln104"> </a>
+<a name="ln105">                    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln106">                        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln107"> </a>
+<a name="ln108">                        clear_bit(child-&gt;flags, pe_rsc_managed);</a>
+<a name="ln109">                        set_bit(child-&gt;flags, pe_rsc_block);</a>
+<a name="ln110">                    }</a>
+<a name="ln111">                }</a>
+<a name="ln112">                break;</a>
+<a name="ln113">        }</a>
+<a name="ln114">        crm_debug(&quot;%s is active on %d nodes including %s: %s&quot;,</a>
+<a name="ln115">                  rsc-&gt;id, g_list_length(rsc-&gt;running_on), node-&gt;details-&gt;uname,</a>
+<a name="ln116">                  recovery2text(rsc-&gt;recovery_type));</a>
+<a name="ln117"> </a>
+<a name="ln118">    } else {</a>
+<a name="ln119">        pe_rsc_trace(rsc, &quot;Resource %s is active on: %s&quot;, rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln120">    }</a>
+<a name="ln121"> </a>
+<a name="ln122">    if (rsc-&gt;parent != NULL) {</a>
+<a name="ln123">        native_add_running(rsc-&gt;parent, node, data_set);</a>
+<a name="ln124">    }</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">extern void force_non_unique_clone(resource_t * rsc, const char *rid, pe_working_set_t * data_set);</a>
+<a name="ln128"> </a>
+<a name="ln129">gboolean</a>
+<a name="ln130">native_unpack(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln131">{</a>
+<a name="ln132">    resource_t *parent = uber_parent(rsc);</a>
+<a name="ln133">    native_variant_data_t *native_data = NULL;</a>
+<a name="ln134">    const char *class = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln135"> </a>
+<a name="ln136">    pe_rsc_trace(rsc, &quot;Processing resource %s...&quot;, rsc-&gt;id);</a>
+<a name="ln137"> </a>
+<a name="ln138">    native_data = calloc(1, sizeof(native_variant_data_t));</a>
+<a name="ln139">    rsc-&gt;variant_opaque = native_data;</a>
+<a name="ln140"> </a>
+<a name="ln141">    if (is_set(rsc-&gt;flags, pe_rsc_unique) &amp;&amp; rsc-&gt;parent) {</a>
+<a name="ln142"> </a>
+<a name="ln143">        if (safe_str_eq(class, PCMK_RESOURCE_CLASS_LSB)) {</a>
+<a name="ln144">            resource_t *top = uber_parent(rsc);</a>
+<a name="ln145"> </a>
+<a name="ln146">            force_non_unique_clone(top, rsc-&gt;id, data_set);</a>
+<a name="ln147">        }</a>
+<a name="ln148">    }</a>
+<a name="ln149"> </a>
+<a name="ln150">    if (safe_str_eq(class, PCMK_RESOURCE_CLASS_OCF) == FALSE) {</a>
+<a name="ln151">        const char *stateful = g_hash_table_lookup(parent-&gt;meta, &quot;stateful&quot;);</a>
+<a name="ln152"> </a>
+<a name="ln153">        if (safe_str_eq(stateful, XML_BOOLEAN_TRUE)) {</a>
+<a name="ln154">            pe_err</a>
+<a name="ln155">                (&quot;Resource %s is of type %s and therefore cannot be used as a master/slave resource&quot;,</a>
+<a name="ln156">                 rsc-&gt;id, class);</a>
+<a name="ln157">            return FALSE;</a>
+<a name="ln158">        }</a>
+<a name="ln159">    }</a>
+<a name="ln160"> </a>
+<a name="ln161">    return TRUE;</a>
+<a name="ln162">}</a>
+<a name="ln163"> </a>
+<a name="ln164">resource_t *</a>
+<a name="ln165">native_find_rsc(resource_t * rsc, const char *id, node_t * on_node, int flags)</a>
+<a name="ln166">{</a>
+<a name="ln167">    gboolean match = FALSE;</a>
+<a name="ln168">    resource_t *result = NULL;</a>
+<a name="ln169">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln170"> </a>
+<a name="ln171">    CRM_ASSERT(id != NULL);</a>
+<a name="ln172"> </a>
+<a name="ln173">    if (flags &amp; pe_find_clone) {</a>
+<a name="ln174">        const char *rid = ID(rsc-&gt;xml);</a>
+<a name="ln175"> </a>
+<a name="ln176">        if (rsc-&gt;parent == NULL) {</a>
+<a name="ln177">            match = FALSE;</a>
+<a name="ln178"> </a>
+<a name="ln179">        } else if (safe_str_eq(rsc-&gt;id, id)) {</a>
+<a name="ln180">            match = TRUE;</a>
+<a name="ln181"> </a>
+<a name="ln182">        } else if (safe_str_eq(rid, id)) {</a>
+<a name="ln183">            match = TRUE;</a>
+<a name="ln184">        }</a>
+<a name="ln185"> </a>
+<a name="ln186">    } else {</a>
+<a name="ln187">        if (strcmp(rsc-&gt;id, id) == 0) {</a>
+<a name="ln188">            match = TRUE;</a>
+<a name="ln189"> </a>
+<a name="ln190">        } else if (is_set(flags, pe_find_renamed)</a>
+<a name="ln191">                   &amp;&amp; rsc-&gt;clone_name &amp;&amp; strcmp(rsc-&gt;clone_name, id) == 0) {</a>
+<a name="ln192">            match = TRUE;</a>
+<a name="ln193">        }</a>
+<a name="ln194">    }</a>
+<a name="ln195"> </a>
+<a name="ln196">    if (match &amp;&amp; on_node) {</a>
+<a name="ln197">        pe_rsc_trace(rsc, &quot;Now checking %s is on %s&quot;, rsc-&gt;id, on_node-&gt;details-&gt;uname);</a>
+<a name="ln198">        if (is_set(flags, pe_find_current) &amp;&amp; rsc-&gt;running_on) {</a>
+<a name="ln199"> </a>
+<a name="ln200">            GListPtr gIter = rsc-&gt;running_on;</a>
+<a name="ln201"> </a>
+<a name="ln202">            for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln203">                node_t *loc = (node_t *) gIter-&gt;data;</a>
+<a name="ln204"> </a>
+<a name="ln205">                if (loc-&gt;details == on_node-&gt;details) {</a>
+<a name="ln206">                    return rsc;</a>
+<a name="ln207">                }</a>
+<a name="ln208">            }</a>
+<a name="ln209"> </a>
+<a name="ln210">        } else if (is_set(flags, pe_find_inactive) &amp;&amp; rsc-&gt;running_on == NULL) {</a>
+<a name="ln211">            return rsc;</a>
+<a name="ln212"> </a>
+<a name="ln213">        } else if (is_not_set(flags, pe_find_current) &amp;&amp; rsc-&gt;allocated_to</a>
+<a name="ln214">                   &amp;&amp; rsc-&gt;allocated_to-&gt;details == on_node-&gt;details) {</a>
+<a name="ln215">            return rsc;</a>
+<a name="ln216">        }</a>
+<a name="ln217"> </a>
+<a name="ln218">    } else if (match) {</a>
+<a name="ln219">        return rsc;</a>
+<a name="ln220">    }</a>
+<a name="ln221"> </a>
+<a name="ln222">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln223">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln224"> </a>
+<a name="ln225">        result = rsc-&gt;fns-&gt;find_rsc(child, id, on_node, flags);</a>
+<a name="ln226">        if (result) {</a>
+<a name="ln227">            return result;</a>
+<a name="ln228">        }</a>
+<a name="ln229">    }</a>
+<a name="ln230">    return NULL;</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">char *</a>
+<a name="ln234">native_parameter(resource_t * rsc, node_t * node, gboolean create, const char *name,</a>
+<a name="ln235">                 pe_working_set_t * data_set)</a>
+<a name="ln236">{</a>
+<a name="ln237">    char *value_copy = NULL;</a>
+<a name="ln238">    const char *value = NULL;</a>
+<a name="ln239">    GHashTable *hash = rsc-&gt;parameters;</a>
+<a name="ln240">    GHashTable *local_hash = NULL;</a>
+<a name="ln241"> </a>
+<a name="ln242">    CRM_CHECK(rsc != NULL, return NULL);</a>
+<a name="ln243">    CRM_CHECK(name != NULL &amp;&amp; strlen(name) != 0, return NULL);</a>
+<a name="ln244"> </a>
+<a name="ln245">    pe_rsc_trace(rsc, &quot;Looking up %s in %s&quot;, name, rsc-&gt;id);</a>
+<a name="ln246"> </a>
+<a name="ln247">    if (create || g_hash_table_size(rsc-&gt;parameters) == 0) {</a>
+<a name="ln248">        if (node != NULL) {</a>
+<a name="ln249">            pe_rsc_trace(rsc, &quot;Creating hash with node %s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln250">        } else {</a>
+<a name="ln251">            pe_rsc_trace(rsc, &quot;Creating default hash&quot;);</a>
+<a name="ln252">        }</a>
+<a name="ln253"> </a>
+<a name="ln254">        local_hash = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln255">                                           g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln256"> </a>
+<a name="ln257">        get_rsc_attributes(local_hash, rsc, node, data_set);</a>
+<a name="ln258"> </a>
+<a name="ln259">        hash = local_hash;</a>
+<a name="ln260">    }</a>
+<a name="ln261"> </a>
+<a name="ln262">    value = g_hash_table_lookup(hash, name);</a>
+<a name="ln263">    if (value == NULL) {</a>
+<a name="ln264">        /* try meta attributes instead */</a>
+<a name="ln265">        value = g_hash_table_lookup(rsc-&gt;meta, name);</a>
+<a name="ln266">    }</a>
+<a name="ln267"> </a>
+<a name="ln268">    if (value != NULL) {</a>
+<a name="ln269">        value_copy = strdup(value);</a>
+<a name="ln270">    }</a>
+<a name="ln271">    if (local_hash != NULL) {</a>
+<a name="ln272">        g_hash_table_destroy(local_hash);</a>
+<a name="ln273">    }</a>
+<a name="ln274">    return value_copy;</a>
+<a name="ln275">}</a>
+<a name="ln276"> </a>
+<a name="ln277">gboolean</a>
+<a name="ln278">native_active(resource_t * rsc, gboolean all)</a>
+<a name="ln279">{</a>
+<a name="ln280">    GListPtr gIter = rsc-&gt;running_on;</a>
+<a name="ln281"> </a>
+<a name="ln282">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln283">        node_t *a_node = (node_t *) gIter-&gt;data;</a>
+<a name="ln284"> </a>
+<a name="ln285">        if (a_node-&gt;details-&gt;unclean) {</a>
+<a name="ln286">            crm_debug(&quot;Resource %s: node %s is unclean&quot;, rsc-&gt;id, a_node-&gt;details-&gt;uname);</a>
+<a name="ln287">            return TRUE;</a>
+<a name="ln288">        } else if (a_node-&gt;details-&gt;online == FALSE) {</a>
+<a name="ln289">            crm_debug(&quot;Resource %s: node %s is offline&quot;, rsc-&gt;id, a_node-&gt;details-&gt;uname);</a>
+<a name="ln290">        } else {</a>
+<a name="ln291">            crm_debug(&quot;Resource %s active on %s&quot;, rsc-&gt;id, a_node-&gt;details-&gt;uname);</a>
+<a name="ln292">            return TRUE;</a>
+<a name="ln293">        }</a>
+<a name="ln294">    }</a>
+<a name="ln295"> </a>
+<a name="ln296">    return FALSE;</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">struct print_data_s {</a>
+<a name="ln300">    long options;</a>
+<a name="ln301">    void *print_data;</a>
+<a name="ln302">};</a>
+<a name="ln303"> </a>
+<a name="ln304">static void</a>
+<a name="ln305">native_print_attr(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln306">{</a>
+<a name="ln307">    long options = ((struct print_data_s *)user_data)-&gt;options;</a>
+<a name="ln308">    void *print_data = ((struct print_data_s *)user_data)-&gt;print_data;</a>
+<a name="ln309"> </a>
+<a name="ln310">    status_print(&quot;Option: %s = %s\n&quot;, (char *)key, (char *)value);</a>
+<a name="ln311">}</a>
+<a name="ln312"> </a>
+<a name="ln313">static const char *</a>
+<a name="ln314">native_pending_state(resource_t * rsc)</a>
+<a name="ln315">{</a>
+<a name="ln316">    const char *pending_state = NULL;</a>
+<a name="ln317"> </a>
+<a name="ln318">    if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_START)) {</a>
+<a name="ln319">        pending_state = &quot;Starting&quot;;</a>
+<a name="ln320"> </a>
+<a name="ln321">    } else if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_STOP)) {</a>
+<a name="ln322">        pending_state = &quot;Stopping&quot;;</a>
+<a name="ln323"> </a>
+<a name="ln324">    } else if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_MIGRATE)) {</a>
+<a name="ln325">        pending_state = &quot;Migrating&quot;;</a>
+<a name="ln326"> </a>
+<a name="ln327">    } else if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_MIGRATED)) {</a>
+<a name="ln328">       /* Work might be done in here. */</a>
+<a name="ln329">        pending_state = &quot;Migrating&quot;;</a>
+<a name="ln330"> </a>
+<a name="ln331">    } else if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_PROMOTE)) {</a>
+<a name="ln332">        pending_state = &quot;Promoting&quot;;</a>
+<a name="ln333"> </a>
+<a name="ln334">    } else if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_DEMOTE)) {</a>
+<a name="ln335">        pending_state = &quot;Demoting&quot;;</a>
+<a name="ln336">    }</a>
+<a name="ln337"> </a>
+<a name="ln338">    return pending_state;</a>
+<a name="ln339">}</a>
+<a name="ln340"> </a>
+<a name="ln341">static const char *</a>
+<a name="ln342">native_pending_task(resource_t * rsc)</a>
+<a name="ln343">{</a>
+<a name="ln344">    const char *pending_task = NULL;</a>
+<a name="ln345"> </a>
+<a name="ln346">    if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_NOTIFY)) {</a>
+<a name="ln347">        /* &quot;Notifying&quot; is not very useful to be shown. */</a>
+<a name="ln348">        pending_task = NULL;</a>
+<a name="ln349"> </a>
+<a name="ln350">    } else if (safe_str_eq(rsc-&gt;pending_task, CRMD_ACTION_STATUS)) {</a>
+<a name="ln351">        pending_task = &quot;Monitoring&quot;;</a>
+<a name="ln352"> </a>
+<a name="ln353">    /* Pending probes are not printed, even if pending</a>
+<a name="ln354">     * operations are requested. If someone ever requests that</a>
+<a name="ln355">     * behavior, uncomment this and the corresponding part of</a>
+<a name="ln356">     * unpack.c:unpack_rsc_op().</a>
+<a name="ln357">     */</a>
+<a name="ln358">    /*</a>
+<a name="ln359">    } else if (safe_str_eq(rsc-&gt;pending_task, &quot;probe&quot;)) {</a>
+<a name="ln360">        pending_task = &quot;Checking&quot;;</a>
+<a name="ln361">    */</a>
+<a name="ln362">    }</a>
+<a name="ln363"> </a>
+<a name="ln364">    return pending_task;</a>
+<a name="ln365">}</a>
+<a name="ln366"> </a>
+<a name="ln367">static enum rsc_role_e</a>
+<a name="ln368">native_displayable_role(resource_t *rsc)</a>
+<a name="ln369">{</a>
+<a name="ln370">    enum rsc_role_e role = rsc-&gt;role;</a>
+<a name="ln371"> </a>
+<a name="ln372">    if ((role == RSC_ROLE_STARTED)</a>
+<a name="ln373">        &amp;&amp; (uber_parent(rsc)-&gt;variant == pe_master)) {</a>
+<a name="ln374"> </a>
+<a name="ln375">        role = RSC_ROLE_SLAVE;</a>
+<a name="ln376">    }</a>
+<a name="ln377">    return role;</a>
+<a name="ln378">}</a>
+<a name="ln379"> </a>
+<a name="ln380">static const char *</a>
+<a name="ln381">native_displayable_state(resource_t *rsc, long options)</a>
+<a name="ln382">{</a>
+<a name="ln383">    const char *rsc_state = NULL;</a>
+<a name="ln384"> </a>
+<a name="ln385">    if (options &amp; pe_print_pending) {</a>
+<a name="ln386">        rsc_state = native_pending_state(rsc);</a>
+<a name="ln387">    }</a>
+<a name="ln388">    if (rsc_state == NULL) {</a>
+<a name="ln389">        rsc_state = role2text(native_displayable_role(rsc));</a>
+<a name="ln390">    }</a>
+<a name="ln391">    return rsc_state;</a>
+<a name="ln392">}</a>
+<a name="ln393"> </a>
+<a name="ln394">static void</a>
+<a name="ln395">native_print_xml(resource_t * rsc, const char *pre_text, long options, void *print_data)</a>
+<a name="ln396">{</a>
+<a name="ln397">    const char *class = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln398">    const char *prov = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln399">    const char *rsc_state = native_displayable_state(rsc, options);</a>
+<a name="ln400">    const char *target_role = NULL;</a>
+<a name="ln401"> </a>
+<a name="ln402">    /* resource information. */</a>
+<a name="ln403">    status_print(&quot;%s&lt;resource &quot;, pre_text);</a>
+<a name="ln404">    status_print(&quot;id=\&quot;%s\&quot; &quot;, rsc_printable_id(rsc));</a>
+<a name="ln405">    status_print(&quot;resource_agent=\&quot;%s%s%s:%s\&quot; &quot;,</a>
+<a name="ln406">                 class,</a>
+<a name="ln407">                 prov ? &quot;::&quot; : &quot;&quot;, prov ? prov : &quot;&quot;, crm_element_value(rsc-&gt;xml, XML_ATTR_TYPE));</a>
+<a name="ln408"> </a>
+<a name="ln409">    status_print(&quot;role=\&quot;%s\&quot; &quot;, rsc_state);</a>
+<a name="ln410">    if (rsc-&gt;meta) {</a>
+<a name="ln411">        target_role = g_hash_table_lookup(rsc-&gt;meta, XML_RSC_ATTR_TARGET_ROLE);</a>
+<a name="ln412">    }</a>
+<a name="ln413">    if (target_role) {</a>
+<a name="ln414">        status_print(&quot;target_role=\&quot;%s\&quot; &quot;, target_role);</a>
+<a name="ln415">    }</a>
+<a name="ln416">    status_print(&quot;active=\&quot;%s\&quot; &quot;, rsc-&gt;fns-&gt;active(rsc, TRUE) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln417">    status_print(&quot;orphaned=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_orphan) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln418">    status_print(&quot;blocked=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_block) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln419">    status_print(&quot;managed=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_managed) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln420">    status_print(&quot;failed=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_failed) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln421">    status_print(&quot;failure_ignored=\&quot;%s\&quot; &quot;,</a>
+<a name="ln422">                 is_set(rsc-&gt;flags, pe_rsc_failure_ignored) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln423">    status_print(&quot;nodes_running_on=\&quot;%d\&quot; &quot;, g_list_length(rsc-&gt;running_on));</a>
+<a name="ln424"> </a>
+<a name="ln425">    if (options &amp; pe_print_pending) {</a>
+<a name="ln426">        const char *pending_task = native_pending_task(rsc);</a>
+<a name="ln427"> </a>
+<a name="ln428">        if (pending_task) {</a>
+<a name="ln429">            status_print(&quot;pending=\&quot;%s\&quot; &quot;, pending_task);</a>
+<a name="ln430">        }</a>
+<a name="ln431">    }</a>
+<a name="ln432"> </a>
+<a name="ln433">    if (options &amp; pe_print_dev) {</a>
+<a name="ln434">        status_print(&quot;provisional=\&quot;%s\&quot; &quot;,</a>
+<a name="ln435">                     is_set(rsc-&gt;flags, pe_rsc_provisional) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln436">        status_print(&quot;runnable=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_runnable) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln437">        status_print(&quot;priority=\&quot;%f\&quot; &quot;, (double)rsc-&gt;priority);</a>
+<a name="ln438">        status_print(&quot;variant=\&quot;%s\&quot; &quot;, crm_element_name(rsc-&gt;xml));</a>
+<a name="ln439">    }</a>
+<a name="ln440"> </a>
+<a name="ln441">    /* print out the nodes this resource is running on */</a>
+<a name="ln442">    if (options &amp; pe_print_rsconly) {</a>
+<a name="ln443">        status_print(&quot;/&gt;\n&quot;);</a>
+<a name="ln444">        /* do nothing */</a>
+<a name="ln445">    } else if (g_list_length(rsc-&gt;running_on) &gt; 0) {</a>
+<a name="ln446">        GListPtr gIter = rsc-&gt;running_on;</a>
+<a name="ln447"> </a>
+<a name="ln448">        status_print(&quot;&gt;\n&quot;);</a>
+<a name="ln449">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln450">            node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln451"> </a>
+<a name="ln452">            status_print(&quot;%s    &lt;node name=\&quot;%s\&quot; id=\&quot;%s\&quot; cached=\&quot;%s\&quot;/&gt;\n&quot;, pre_text,</a>
+<a name="ln453">                         node-&gt;details-&gt;uname, node-&gt;details-&gt;id,</a>
+<a name="ln454">                         node-&gt;details-&gt;online ? &quot;false&quot; : &quot;true&quot;);</a>
+<a name="ln455">        }</a>
+<a name="ln456">        status_print(&quot;%s&lt;/resource&gt;\n&quot;, pre_text);</a>
+<a name="ln457">    } else {</a>
+<a name="ln458">        status_print(&quot;/&gt;\n&quot;);</a>
+<a name="ln459">    }</a>
+<a name="ln460">}</a>
+<a name="ln461"> </a>
+<a name="ln462">/* making this inline rather than a macro prevents a coverity &quot;unreachable&quot;</a>
+<a name="ln463"> * warning on the first usage</a>
+<a name="ln464"> */</a>
+<a name="ln465">static inline const char *</a>
+<a name="ln466">comma_if(int i)</a>
+<a name="ln467">{</a>
+<a name="ln468">    return i? &quot;, &quot; : &quot;&quot;;</a>
+<a name="ln469">}</a>
+<a name="ln470"> </a>
+<a name="ln471">void</a>
+<a name="ln472">common_print(resource_t * rsc, const char *pre_text, const char *name, node_t *node, long options, void *print_data)</a>
+<a name="ln473">{</a>
+<a name="ln474">    const char *desc = NULL;</a>
+<a name="ln475">    const char *class = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln476">    const char *kind = crm_element_value(rsc-&gt;xml, XML_ATTR_TYPE);</a>
+<a name="ln477">    const char *target_role = NULL;</a>
+<a name="ln478">    enum rsc_role_e role = native_displayable_role(rsc);</a>
+<a name="ln479"> </a>
+<a name="ln480">    int offset = 0;</a>
+<a name="ln481">    int flagOffset = 0;</a>
+<a name="ln482">    char buffer[LINE_MAX];</a>
+<a name="ln483">    char flagBuffer[LINE_MAX];</a>
+<a name="ln484"> </a>
+<a name="ln485">    CRM_ASSERT(rsc-&gt;variant == pe_native);</a>
+<a name="ln486">    CRM_ASSERT(kind != NULL);</a>
+<a name="ln487"> </a>
+<a name="ln488">    if (rsc-&gt;meta) {</a>
+<a name="ln489">        const char *is_internal = g_hash_table_lookup(rsc-&gt;meta, XML_RSC_ATTR_INTERNAL_RSC);</a>
+<a name="ln490">        if (crm_is_true(is_internal)) {</a>
+<a name="ln491">            crm_trace(&quot;skipping print of internal resource %s&quot;, rsc-&gt;id);</a>
+<a name="ln492">            return;</a>
+<a name="ln493">        }</a>
+<a name="ln494">        target_role = g_hash_table_lookup(rsc-&gt;meta, XML_RSC_ATTR_TARGET_ROLE);</a>
+<a name="ln495">    }</a>
+<a name="ln496"> </a>
+<a name="ln497">    if (pre_text == NULL &amp;&amp; (options &amp; pe_print_printf)) {</a>
+<a name="ln498">        pre_text = &quot; &quot;;</a>
+<a name="ln499">    }</a>
+<a name="ln500"> </a>
+<a name="ln501">    if (options &amp; pe_print_xml) {</a>
+<a name="ln502">        native_print_xml(rsc, pre_text, options, print_data);</a>
+<a name="ln503">        return;</a>
+<a name="ln504">    }</a>
+<a name="ln505"> </a>
+<a name="ln506">    if ((options &amp; pe_print_rsconly) || g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln507">        node = NULL;</a>
+<a name="ln508">    }</a>
+<a name="ln509"> </a>
+<a name="ln510">    if (options &amp; pe_print_html) {</a>
+<a name="ln511">        if (is_not_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln512">            status_print(&quot;&lt;font color=\&quot;yellow\&quot;&gt;&quot;);</a>
+<a name="ln513"> </a>
+<a name="ln514">        } else if (is_set(rsc-&gt;flags, pe_rsc_failed)) {</a>
+<a name="ln515">            status_print(&quot;&lt;font color=\&quot;red\&quot;&gt;&quot;);</a>
+<a name="ln516"> </a>
+<a name="ln517">        } else if (rsc-&gt;variant == pe_native &amp;&amp; g_list_length(rsc-&gt;running_on) == 0) {</a>
+<a name="ln518">            status_print(&quot;&lt;font color=\&quot;red\&quot;&gt;&quot;);</a>
+<a name="ln519"> </a>
+<a name="ln520">        } else if (g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln521">            status_print(&quot;&lt;font color=\&quot;orange\&quot;&gt;&quot;);</a>
+<a name="ln522"> </a>
+<a name="ln523">        } else if (is_set(rsc-&gt;flags, pe_rsc_failure_ignored)) {</a>
+<a name="ln524">            status_print(&quot;&lt;font color=\&quot;yellow\&quot;&gt;&quot;);</a>
+<a name="ln525"> </a>
+<a name="ln526">        } else {</a>
+<a name="ln527">            status_print(&quot;&lt;font color=\&quot;green\&quot;&gt;&quot;);</a>
+<a name="ln528">        }</a>
+<a name="ln529">    }</a>
+<a name="ln530"> </a>
+<a name="ln531">    if(pre_text) {</a>
+<a name="ln532">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;%s&quot;, pre_text);</a>
+<a name="ln533">    }</a>
+<a name="ln534">    offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;%s&quot;, name);</a>
+<a name="ln535">    offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;\t(%s&quot;, class);</a>
+<a name="ln536">    if (safe_str_eq(class, PCMK_RESOURCE_CLASS_OCF)) {</a>
+<a name="ln537">        const char *prov = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln538">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;::%s&quot;, prov);</a>
+<a name="ln539">    }</a>
+<a name="ln540">    offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;:%s):\t&quot;, kind);</a>
+<a name="ln541">    if(is_set(rsc-&gt;flags, pe_rsc_orphan)) {</a>
+<a name="ln542">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot; ORPHANED &quot;);</a>
+<a name="ln543">    }</a>
+<a name="ln544">    if(role &gt; RSC_ROLE_SLAVE &amp;&amp; is_set(rsc-&gt;flags, pe_rsc_failed)) {</a>
+<a name="ln545">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;FAILED %s&quot;, role2text(role));</a>
+<a name="ln546">    } else if(is_set(rsc-&gt;flags, pe_rsc_failed)) {</a>
+<a name="ln547">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;FAILED&quot;);</a>
+<a name="ln548">    } else {</a>
+<a name="ln549">        const char *rsc_state = native_displayable_state(rsc, options);</a>
+<a name="ln550"> </a>
+<a name="ln551">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;%s&quot;, rsc_state);</a>
+<a name="ln552">    }</a>
+<a name="ln553"> </a>
+<a name="ln554">    if(node) {</a>
+<a name="ln555">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot; %s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln556"> </a>
+<a name="ln557">        if (node-&gt;details-&gt;online == FALSE &amp;&amp; node-&gt;details-&gt;unclean) {</a>
+<a name="ln558">            flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln559">                                   &quot;%sUNCLEAN&quot;, comma_if(flagOffset));</a>
+<a name="ln560">        }</a>
+<a name="ln561">    }</a>
+<a name="ln562"> </a>
+<a name="ln563">    if (options &amp; pe_print_pending) {</a>
+<a name="ln564">        const char *pending_task = native_pending_task(rsc);</a>
+<a name="ln565"> </a>
+<a name="ln566">        if (pending_task) {</a>
+<a name="ln567">            flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln568">                                   &quot;%s%s&quot;, comma_if(flagOffset), pending_task);</a>
+<a name="ln569">        }</a>
+<a name="ln570">    }</a>
+<a name="ln571"> </a>
+<a name="ln572">    if (target_role) {</a>
+<a name="ln573">        enum rsc_role_e target_role_e = text2role(target_role);</a>
+<a name="ln574"> </a>
+<a name="ln575">        /* Ignore target role Started, as it is the default anyways</a>
+<a name="ln576">         * (and would also allow a Master to be Master).</a>
+<a name="ln577">         * Show if target role limits our abilities. */</a>
+<a name="ln578">        if (target_role_e == RSC_ROLE_STOPPED) {</a>
+<a name="ln579">            flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln580">                                   &quot;%sdisabled&quot;, comma_if(flagOffset));</a>
+<a name="ln581">            rsc-&gt;cluster-&gt;disabled_resources++;</a>
+<a name="ln582"> </a>
+<a name="ln583">        } else if (uber_parent(rsc)-&gt;variant == pe_master</a>
+<a name="ln584">                   &amp;&amp; target_role_e == RSC_ROLE_SLAVE) {</a>
+<a name="ln585">            flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln586">                                   &quot;%starget-role:%s&quot;, comma_if(flagOffset), target_role);</a>
+<a name="ln587">            rsc-&gt;cluster-&gt;disabled_resources++;</a>
+<a name="ln588">        }</a>
+<a name="ln589">    }</a>
+<a name="ln590"> </a>
+<a name="ln591">    if (is_set(rsc-&gt;flags, pe_rsc_block)) {</a>
+<a name="ln592">        flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln593">                               &quot;%sblocked&quot;, comma_if(flagOffset));</a>
+<a name="ln594">        rsc-&gt;cluster-&gt;blocked_resources++;</a>
+<a name="ln595"> </a>
+<a name="ln596">    } else if (is_not_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln597">        flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln598">                               &quot;%sunmanaged&quot;, comma_if(flagOffset));</a>
+<a name="ln599">    }</a>
+<a name="ln600"> </a>
+<a name="ln601">    if(is_set(rsc-&gt;flags, pe_rsc_failure_ignored)) {</a>
+<a name="ln602">        flagOffset += snprintf(flagBuffer + flagOffset, LINE_MAX - flagOffset,</a>
+<a name="ln603">                               &quot;%sfailure ignored&quot;, comma_if(flagOffset));</a>
+<a name="ln604">    }</a>
+<a name="ln605"> </a>
+<a name="ln606">    if ((options &amp; pe_print_rsconly) || g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln607">        desc = crm_element_value(rsc-&gt;xml, XML_ATTR_DESC);</a>
+<a name="ln608">    }</a>
+<a name="ln609"> </a>
+<a name="ln610">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln611">    if(flagOffset &gt; 0) {</a>
+<a name="ln612">        status_print(&quot;%s (%s)%s%s&quot;, buffer, flagBuffer, desc?&quot; &quot;:&quot;&quot;, desc?desc:&quot;&quot;);</a>
+<a name="ln613">    } else {</a>
+<a name="ln614">        status_print(&quot;%s%s%s&quot;, buffer, desc?&quot; &quot;:&quot;&quot;, desc?desc:&quot;&quot;);</a>
+<a name="ln615">    }</a>
+<a name="ln616"> </a>
+<a name="ln617">#if CURSES_ENABLED</a>
+<a name="ln618">    if ((options &amp; pe_print_rsconly) || g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln619">        /* Done */</a>
+<a name="ln620"> </a>
+<a name="ln621">    } else if (options &amp; pe_print_ncurses) {</a>
+<a name="ln622">        /* coverity[negative_returns] False positive */</a>
+<a name="ln623">        move(-1, 0);</a>
+<a name="ln624">    }</a>
+<a name="ln625">#endif</a>
+<a name="ln626"> </a>
+<a name="ln627">    if (options &amp; pe_print_html) {</a>
+<a name="ln628">        status_print(&quot; &lt;/font&gt; &quot;);</a>
+<a name="ln629">    }</a>
+<a name="ln630"> </a>
+<a name="ln631">    if ((options &amp; pe_print_rsconly)) {</a>
+<a name="ln632"> </a>
+<a name="ln633">    } else if (g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln634">        GListPtr gIter = rsc-&gt;running_on;</a>
+<a name="ln635">        int counter = 0;</a>
+<a name="ln636"> </a>
+<a name="ln637">        if (options &amp; pe_print_html) {</a>
+<a name="ln638">            status_print(&quot;&lt;ul&gt;\n&quot;);</a>
+<a name="ln639">        } else if ((options &amp; pe_print_printf)</a>
+<a name="ln640">                   || (options &amp; pe_print_ncurses)) {</a>
+<a name="ln641">            status_print(&quot;[&quot;);</a>
+<a name="ln642">        }</a>
+<a name="ln643"> </a>
+<a name="ln644">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln645">            node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln646"> </a>
+<a name="ln647">            counter++;</a>
+<a name="ln648"> </a>
+<a name="ln649">            if (options &amp; pe_print_html) {</a>
+<a name="ln650">                status_print(&quot;&lt;li&gt;\n%s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln651"> </a>
+<a name="ln652">            } else if ((options &amp; pe_print_printf)</a>
+<a name="ln653">                       || (options &amp; pe_print_ncurses)) {</a>
+<a name="ln654">                status_print(&quot; %s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln655"> </a>
+<a name="ln656">            } else if ((options &amp; pe_print_log)) {</a>
+<a name="ln657">                status_print(&quot;\t%d : %s&quot;, counter, node-&gt;details-&gt;uname);</a>
+<a name="ln658"> </a>
+<a name="ln659">            } else {</a>
+<a name="ln660">                status_print(&quot;%s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln661">            }</a>
+<a name="ln662">            if (options &amp; pe_print_html) {</a>
+<a name="ln663">                status_print(&quot;&lt;/li&gt;\n&quot;);</a>
+<a name="ln664"> </a>
+<a name="ln665">            }</a>
+<a name="ln666">        }</a>
+<a name="ln667"> </a>
+<a name="ln668">        if (options &amp; pe_print_html) {</a>
+<a name="ln669">            status_print(&quot;&lt;/ul&gt;\n&quot;);</a>
+<a name="ln670">        } else if ((options &amp; pe_print_printf)</a>
+<a name="ln671">                   || (options &amp; pe_print_ncurses)) {</a>
+<a name="ln672">            status_print(&quot; ]&quot;);</a>
+<a name="ln673">        }</a>
+<a name="ln674">    }</a>
+<a name="ln675"> </a>
+<a name="ln676">    if (options &amp; pe_print_html) {</a>
+<a name="ln677">        status_print(&quot;&lt;br/&gt;\n&quot;);</a>
+<a name="ln678">    } else if (options &amp; pe_print_suppres_nl) {</a>
+<a name="ln679">        /* nothing */</a>
+<a name="ln680">    } else if ((options &amp; pe_print_printf) || (options &amp; pe_print_ncurses)) {</a>
+<a name="ln681">        status_print(&quot;\n&quot;);</a>
+<a name="ln682">    }</a>
+<a name="ln683"> </a>
+<a name="ln684">    if (options &amp; pe_print_details) {</a>
+<a name="ln685">        struct print_data_s pdata;</a>
+<a name="ln686"> </a>
+<a name="ln687">        pdata.options = options;</a>
+<a name="ln688">        pdata.print_data = print_data;</a>
+<a name="ln689">        g_hash_table_foreach(rsc-&gt;parameters, native_print_attr, &amp;pdata);</a>
+<a name="ln690">    }</a>
+<a name="ln691"> </a>
+<a name="ln692">    if (options &amp; pe_print_dev) {</a>
+<a name="ln693">        GHashTableIter iter;</a>
+<a name="ln694">        node_t *node = NULL;</a>
+<a name="ln695"> </a>
+<a name="ln696">        status_print(&quot;%s\t(%s%svariant=%s, priority=%f)&quot;, pre_text,</a>
+<a name="ln697">                     is_set(rsc-&gt;flags, pe_rsc_provisional) ? &quot;provisional, &quot; : &quot;&quot;,</a>
+<a name="ln698">                     is_set(rsc-&gt;flags, pe_rsc_runnable) ? &quot;&quot; : &quot;non-startable, &quot;,</a>
+<a name="ln699">                     crm_element_name(rsc-&gt;xml), (double)rsc-&gt;priority);</a>
+<a name="ln700">        status_print(&quot;%s\tAllowed Nodes&quot;, pre_text);</a>
+<a name="ln701">        g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln702">        while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln703">            status_print(&quot;%s\t * %s %d&quot;, pre_text, node-&gt;details-&gt;uname, node-&gt;weight);</a>
+<a name="ln704">        }</a>
+<a name="ln705">    }</a>
+<a name="ln706"> </a>
+<a name="ln707">    if (options &amp; pe_print_max_details) {</a>
+<a name="ln708">        GHashTableIter iter;</a>
+<a name="ln709">        node_t *node = NULL;</a>
+<a name="ln710"> </a>
+<a name="ln711">        status_print(&quot;%s\t=== Allowed Nodes\n&quot;, pre_text);</a>
+<a name="ln712">        g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln713">        while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln714">            print_node(&quot;\t&quot;, node, FALSE);</a>
+<a name="ln715">        }</a>
+<a name="ln716">    }</a>
+<a name="ln717">}</a>
+<a name="ln718"> </a>
+<a name="ln719">void</a>
+<a name="ln720">native_print(resource_t * rsc, const char *pre_text, long options, void *print_data)</a>
+<a name="ln721">{</a>
+<a name="ln722">    node_t *node = NULL;</a>
+<a name="ln723"> </a>
+<a name="ln724">    CRM_ASSERT(rsc-&gt;variant == pe_native);</a>
+<a name="ln725">    if (options &amp; pe_print_xml) {</a>
+<a name="ln726">        native_print_xml(rsc, pre_text, options, print_data);</a>
+<a name="ln727">        return;</a>
+<a name="ln728">    }</a>
+<a name="ln729"> </a>
+<a name="ln730">    if (rsc-&gt;running_on != NULL) {</a>
+<a name="ln731">        node = rsc-&gt;running_on-&gt;data;</a>
+<a name="ln732">    }</a>
+<a name="ln733">    common_print(rsc, pre_text, rsc_printable_id(rsc), node, options, print_data);</a>
+<a name="ln734">}</a>
+<a name="ln735"> </a>
+<a name="ln736">void</a>
+<a name="ln737">native_free(resource_t * rsc)</a>
+<a name="ln738">{</a>
+<a name="ln739">    pe_rsc_trace(rsc, &quot;Freeing resource action list (not the data)&quot;);</a>
+<a name="ln740">    common_free(rsc);</a>
+<a name="ln741">}</a>
+<a name="ln742"> </a>
+<a name="ln743">enum rsc_role_e</a>
+<a name="ln744">native_resource_state(const resource_t * rsc, gboolean current)</a>
+<a name="ln745">{</a>
+<a name="ln746">    enum rsc_role_e role = rsc-&gt;next_role;</a>
+<a name="ln747"> </a>
+<a name="ln748">    if (current) {</a>
+<a name="ln749">        role = rsc-&gt;role;</a>
+<a name="ln750">    }</a>
+<a name="ln751">    pe_rsc_trace(rsc, &quot;%s state: %s&quot;, rsc-&gt;id, role2text(role));</a>
+<a name="ln752">    return role;</a>
+<a name="ln753">}</a>
+<a name="ln754"> </a>
+<a name="ln755">node_t *</a>
+<a name="ln756">native_location(resource_t * rsc, GListPtr * list, gboolean current)</a>
+<a name="ln757">{</a>
+<a name="ln758">    node_t *one = NULL;</a>
+<a name="ln759">    GListPtr result = NULL;</a>
+<a name="ln760"> </a>
+<a name="ln761">    if (rsc-&gt;children) {</a>
+<a name="ln762">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln763"> </a>
+<a name="ln764">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln765">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln766"> </a>
+<a name="ln767">            child-&gt;fns-&gt;location(child, &amp;result, current);</a>
+<a name="ln768">        }</a>
+<a name="ln769"> </a>
+<a name="ln770">    } else if (current &amp;&amp; rsc-&gt;running_on) {</a>
+<a name="ln771">        result = g_list_copy(rsc-&gt;running_on);</a>
+<a name="ln772"> </a>
+<a name="ln773">    } else if (current == FALSE &amp;&amp; rsc-&gt;allocated_to) {</a>
+<a name="ln774">        result = g_list_append(NULL, rsc-&gt;allocated_to);</a>
+<a name="ln775">    }</a>
+<a name="ln776"> </a>
+<a name="ln777">    if (result &amp;&amp; g_list_length(result) == 1) {</a>
+<a name="ln778">        one = g_list_nth_data(result, 0);</a>
+<a name="ln779">    }</a>
+<a name="ln780"> </a>
+<a name="ln781">    if (list) {</a>
+<a name="ln782">        GListPtr gIter = result;</a>
+<a name="ln783"> </a>
+<a name="ln784">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln785">            node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln786"> </a>
+<a name="ln787">            if (*list == NULL || pe_find_node_id(*list, node-&gt;details-&gt;id) == NULL) {</a>
+<a name="ln788">                *list = g_list_append(*list, node);</a>
+<a name="ln789">            }</a>
+<a name="ln790">        }</a>
+<a name="ln791">    }</a>
+<a name="ln792"> </a>
+<a name="ln793">    g_list_free(result);</a>
+<a name="ln794">    return one;</a>
+<a name="ln795">}</a>
+<a name="ln796"> </a>
+<a name="ln797">static void</a>
+<a name="ln798">get_rscs_brief(GListPtr rsc_list, GHashTable * rsc_table, GHashTable * active_table)</a>
+<a name="ln799">{</a>
+<a name="ln800">    GListPtr gIter = rsc_list;</a>
+<a name="ln801"> </a>
+<a name="ln802">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln803">        resource_t *rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln804"> </a>
+<a name="ln805">        const char *class = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln806">        const char *kind = crm_element_value(rsc-&gt;xml, XML_ATTR_TYPE);</a>
+<a name="ln807"> </a>
+<a name="ln808">        int offset = 0;</a>
+<a name="ln809">        char buffer[LINE_MAX];</a>
+<a name="ln810"> </a>
+<a name="ln811">        int *rsc_counter = NULL;</a>
+<a name="ln812">        int *active_counter = NULL;</a>
+<a name="ln813"> </a>
+<a name="ln814">        if (rsc-&gt;variant != pe_native) {</a>
+<a name="ln815">            continue;</a>
+<a name="ln816">        }</a>
+<a name="ln817"> </a>
+<a name="ln818">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;%s&quot;, class);</a>
+<a name="ln819">        if (safe_str_eq(class, PCMK_RESOURCE_CLASS_OCF)) {</a>
+<a name="ln820">            const char *prov = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln821">            offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;::%s&quot;, prov);</a>
+<a name="ln822">        }</a>
+<a name="ln823">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;:%s&quot;, kind);</a>
+<a name="ln824">        CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln825"> </a>
+<a name="ln826">        if (rsc_table) {</a>
+<a name="ln827">            rsc_counter = g_hash_table_lookup(rsc_table, buffer);</a>
+<a name="ln828">            if (rsc_counter == NULL) {</a>
+<a name="ln829">                rsc_counter = calloc(1, sizeof(int));</a>
+<a name="ln830">                *rsc_counter = 0;</a>
+<a name="ln831">                g_hash_table_insert(rsc_table, strdup(buffer), rsc_counter);</a>
+<a name="ln832">            }</a>
+<a name="ln833">            (*rsc_counter)++;</a>
+<a name="ln834">        }</a>
+<a name="ln835"> </a>
+<a name="ln836">        if (active_table) {</a>
+<a name="ln837">            GListPtr gIter2 = rsc-&gt;running_on;</a>
+<a name="ln838"> </a>
+<a name="ln839">            for (; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln840">                node_t *node = (node_t *) gIter2-&gt;data;</a>
+<a name="ln841">                GHashTable *node_table = NULL;</a>
+<a name="ln842"> </a>
+<a name="ln843">                if (node-&gt;details-&gt;unclean == FALSE &amp;&amp; node-&gt;details-&gt;online == FALSE) {</a>
+<a name="ln844">                    continue;</a>
+<a name="ln845">                }</a>
+<a name="ln846"> </a>
+<a name="ln847">                node_table = g_hash_table_lookup(active_table, node-&gt;details-&gt;uname);</a>
+<a name="ln848">                if (node_table == NULL) {</a>
+<a name="ln849">                    node_table = g_hash_table_new_full(crm_str_hash, g_str_equal, free, free);</a>
+<a name="ln850">                    g_hash_table_insert(active_table, strdup(node-&gt;details-&gt;uname), node_table);</a>
+<a name="ln851">                }</a>
+<a name="ln852"> </a>
+<a name="ln853">                active_counter = g_hash_table_lookup(node_table, buffer);</a>
+<a name="ln854">                if (active_counter == NULL) {</a>
+<a name="ln855">                    active_counter = calloc(1, sizeof(int));</a>
+<a name="ln856">                    *active_counter = 0;</a>
+<a name="ln857">                    g_hash_table_insert(node_table, strdup(buffer), active_counter);</a>
+<a name="ln858">                }</a>
+<a name="ln859">                (*active_counter)++;</a>
+<a name="ln860">            }</a>
+<a name="ln861">        }</a>
+<a name="ln862">    }</a>
+<a name="ln863">}</a>
+<a name="ln864"> </a>
+<a name="ln865">static void</a>
+<a name="ln866">destroy_node_table(gpointer data)</a>
+<a name="ln867">{</a>
+<a name="ln868">    GHashTable *node_table = data;</a>
+<a name="ln869"> </a>
+<a name="ln870">    if (node_table) {</a>
+<a name="ln871">        g_hash_table_destroy(node_table);</a>
+<a name="ln872">    }</a>
+<a name="ln873">}</a>
+<a name="ln874"> </a>
+<a name="ln875">void</a>
+<a name="ln876">print_rscs_brief(GListPtr rsc_list, const char *pre_text, long options,</a>
+<a name="ln877">                 void *print_data, gboolean print_all)</a>
+<a name="ln878">{</a>
+<a name="ln879">    GHashTable *rsc_table = g_hash_table_new_full(crm_str_hash, g_str_equal, free, free);</a>
+<a name="ln880">    GHashTable *active_table = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln881">                                                     free, destroy_node_table);</a>
+<a name="ln882">    GHashTableIter hash_iter;</a>
+<a name="ln883">    char *type = NULL;</a>
+<a name="ln884">    int *rsc_counter = NULL;</a>
+<a name="ln885"> </a>
+<a name="ln886">    get_rscs_brief(rsc_list, rsc_table, active_table);</a>
+<a name="ln887"> </a>
+<a name="ln888">    g_hash_table_iter_init(&amp;hash_iter, rsc_table);</a>
+<a name="ln889">    while (g_hash_table_iter_next(&amp;hash_iter, (gpointer *)&amp;type, (gpointer *)&amp;rsc_counter)) {</a>
+<a name="ln890">        GHashTableIter hash_iter2;</a>
+<a name="ln891">        char *node_name = NULL;</a>
+<a name="ln892">        GHashTable *node_table = NULL;</a>
+<a name="ln893">        int active_counter_all = 0;</a>
+<a name="ln894"> </a>
+<a name="ln895">        g_hash_table_iter_init(&amp;hash_iter2, active_table);</a>
+<a name="ln896">        while (g_hash_table_iter_next(&amp;hash_iter2, (gpointer *)&amp;node_name, (gpointer *)&amp;node_table)) {</a>
+<a name="ln897">            int *active_counter = g_hash_table_lookup(node_table, type);</a>
+<a name="ln898"> </a>
+<a name="ln899">            if (active_counter == NULL || *active_counter == 0) {</a>
+<a name="ln900">                continue;</a>
+<a name="ln901"> </a>
+<a name="ln902">            } else {</a>
+<a name="ln903">                active_counter_all += *active_counter;</a>
+<a name="ln904">            }</a>
+<a name="ln905"> </a>
+<a name="ln906">            if (options &amp; pe_print_rsconly) {</a>
+<a name="ln907">                node_name = NULL;</a>
+<a name="ln908">            }</a>
+<a name="ln909"> </a>
+<a name="ln910">            if (options &amp; pe_print_html) {</a>
+<a name="ln911">                status_print(&quot;&lt;li&gt;\n&quot;);</a>
+<a name="ln912">            }</a>
+<a name="ln913"> </a>
+<a name="ln914">            if (print_all) {</a>
+<a name="ln915">                status_print(&quot;%s%d/%d\t(%s):\tActive %s\n&quot;, pre_text ? pre_text : &quot;&quot;,</a>
+<a name="ln916">                             active_counter ? *active_counter : 0,</a>
+<a name="ln917">                             rsc_counter ? *rsc_counter : 0, type,</a>
+<a name="ln918">                             active_counter &amp;&amp; (*active_counter &gt; 0) &amp;&amp; node_name ? node_name : &quot;&quot;);</a>
+<a name="ln919">            } else {</a>
+<a name="ln920">                status_print(&quot;%s%d\t(%s):\tActive %s\n&quot;, pre_text ? pre_text : &quot;&quot;,</a>
+<a name="ln921">                             active_counter ? *active_counter : 0, type,</a>
+<a name="ln922">                             active_counter &amp;&amp; (*active_counter &gt; 0) &amp;&amp; node_name ? node_name : &quot;&quot;);</a>
+<a name="ln923">            }</a>
+<a name="ln924"> </a>
+<a name="ln925">            if (options &amp; pe_print_html) {</a>
+<a name="ln926">                status_print(&quot;&lt;/li&gt;\n&quot;);</a>
+<a name="ln927">            }</a>
+<a name="ln928">        }</a>
+<a name="ln929"> </a>
+<a name="ln930">        if (print_all &amp;&amp; active_counter_all == 0) {</a>
+<a name="ln931">            if (options &amp; pe_print_html) {</a>
+<a name="ln932">                status_print(&quot;&lt;li&gt;\n&quot;);</a>
+<a name="ln933">            }</a>
+<a name="ln934"> </a>
+<a name="ln935">            status_print(&quot;%s%d/%d\t(%s):\tActive\n&quot;, pre_text ? pre_text : &quot;&quot;,</a>
+<a name="ln936">                         active_counter_all,</a>
+<a name="ln937">                         rsc_counter ? *rsc_counter : 0, type);</a>
+<a name="ln938"> </a>
+<a name="ln939">            if (options &amp; pe_print_html) {</a>
+<a name="ln940">                status_print(&quot;&lt;/li&gt;\n&quot;);</a>
+<a name="ln941">            }</a>
+<a name="ln942">        }</a>
+<a name="ln943">    }</a>
+<a name="ln944"> </a>
+<a name="ln945">    if (rsc_table) {</a>
+<a name="ln946">        g_hash_table_destroy(rsc_table);</a>
+<a name="ln947">        rsc_table = NULL;</a>
+<a name="ln948">    }</a>
+<a name="ln949">    if (active_table) {</a>
+<a name="ln950">        g_hash_table_destroy(active_table);</a>
+<a name="ln951">        active_table = NULL;</a>
+<a name="ln952">    }</a>
+<a name="ln953">}</a>
+
+</code></pre>
+<div class="balloon" rel="610"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == 0.</p></div>
+<div class="balloon" rel="628"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 627.</p></div>
+<div class="balloon" rel="638"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 637.</p></div>
+<div class="balloon" rel="650"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 649.</p></div>
+<div class="balloon" rel="663"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 662.</p></div>
+<div class="balloon" rel="669"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 668.</p></div>
+<div class="balloon" rel="677"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 676.</p></div>
+<div class="balloon" rel="830"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'rsc_counter'. Check lines: 830, 829.</p></div>
+<div class="balloon" rel="831"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 831, 831.</p></div>
+<div class="balloon" rel="850"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 850, 850.</p></div>
+<div class="balloon" rel="856"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'active_counter'. Check lines: 856, 855.</p></div>
+<div class="balloon" rel="857"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 857, 857.</p></div>
+<div class="balloon" rel="824"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == 0.</p></div>
+<div class="balloon" rel="911"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 910.</p></div>
+<div class="balloon" rel="915"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'active_counter' is always true.</p></div>
+<div class="balloon" rel="920"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'active_counter' is always true.</p></div>
+<div class="balloon" rel="926"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 925.</p></div>
+<div class="balloon" rel="932"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 931.</p></div>
+<div class="balloon" rel="940"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 939.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

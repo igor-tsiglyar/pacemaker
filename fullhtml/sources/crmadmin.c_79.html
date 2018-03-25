@@ -1,0 +1,620 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5"> </a>
+<a name="ln6">/* </a>
+<a name="ln7"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln8"> * </a>
+<a name="ln9"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln10"> * modify it under the terms of the GNU General Public</a>
+<a name="ln11"> * License as published by the Free Software Foundation; either</a>
+<a name="ln12"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln13"> * </a>
+<a name="ln14"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln15"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln17"> * General Public License for more details.</a>
+<a name="ln18"> * </a>
+<a name="ln19"> * You should have received a copy of the GNU General Public</a>
+<a name="ln20"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln21"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;sys/param.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;stdio.h&gt;</a>
+<a name="ln29">#include &lt;sys/types.h&gt;</a>
+<a name="ln30">#include &lt;unistd.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;stdlib.h&gt;</a>
+<a name="ln33">#include &lt;errno.h&gt;</a>
+<a name="ln34">#include &lt;fcntl.h&gt;</a>
+<a name="ln35">#include &lt;libgen.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">#include &lt;crm/crm.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln40"> </a>
+<a name="ln41">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;crm/cib.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">int message_timer_id = -1;</a>
+<a name="ln46">int message_timeout_ms = 30 * 1000;</a>
+<a name="ln47"> </a>
+<a name="ln48">GMainLoop *mainloop = NULL;</a>
+<a name="ln49">crm_ipc_t *crmd_channel = NULL;</a>
+<a name="ln50">char *admin_uuid = NULL;</a>
+<a name="ln51"> </a>
+<a name="ln52">void usage(const char *cmd, int exit_status);</a>
+<a name="ln53">gboolean do_init(void);</a>
+<a name="ln54">int do_work(void);</a>
+<a name="ln55">void crmadmin_ipc_connection_destroy(gpointer user_data);</a>
+<a name="ln56"> </a>
+<a name="ln57">int admin_msg_callback(const char *buffer, ssize_t length, gpointer userdata);</a>
+<a name="ln58">char *pluralSection(const char *a_section);</a>
+<a name="ln59">xmlNode *handleCibMod(void);</a>
+<a name="ln60">int do_find_node_list(xmlNode * xml_node);</a>
+<a name="ln61">gboolean admin_message_timeout(gpointer data);</a>
+<a name="ln62">gboolean is_node_online(xmlNode * node_state);</a>
+<a name="ln63"> </a>
+<a name="ln64">enum debug {</a>
+<a name="ln65">    debug_none,</a>
+<a name="ln66">    debug_dec,</a>
+<a name="ln67">    debug_inc</a>
+<a name="ln68">};</a>
+<a name="ln69"> </a>
+<a name="ln70">gboolean BE_VERBOSE = FALSE;</a>
+<a name="ln71">int expected_responses = 1;</a>
+<a name="ln72"> </a>
+<a name="ln73">gboolean BASH_EXPORT = FALSE;</a>
+<a name="ln74">gboolean DO_HEALTH = FALSE;</a>
+<a name="ln75">gboolean DO_RESET = FALSE;</a>
+<a name="ln76">gboolean DO_RESOURCE = FALSE;</a>
+<a name="ln77">gboolean DO_ELECT_DC = FALSE;</a>
+<a name="ln78">gboolean DO_WHOIS_DC = FALSE;</a>
+<a name="ln79">gboolean DO_NODE_LIST = FALSE;</a>
+<a name="ln80">gboolean BE_SILENT = FALSE;</a>
+<a name="ln81">gboolean DO_RESOURCE_LIST = FALSE;</a>
+<a name="ln82">enum debug DO_DEBUG = debug_none;</a>
+<a name="ln83">const char *crmd_operation = NULL;</a>
+<a name="ln84"> </a>
+<a name="ln85">xmlNode *msg_options = NULL;</a>
+<a name="ln86"> </a>
+<a name="ln87">const char *standby_on_off = &quot;on&quot;;</a>
+<a name="ln88">const char *admin_verbose = XML_BOOLEAN_FALSE;</a>
+<a name="ln89">char *id = NULL;</a>
+<a name="ln90">char *disconnect = NULL;</a>
+<a name="ln91">char *dest_node = NULL;</a>
+<a name="ln92">char *rsc_name = NULL;</a>
+<a name="ln93">char *crm_option = NULL;</a>
+<a name="ln94"> </a>
+<a name="ln95">int operation_status = 0;</a>
+<a name="ln96">const char *sys_to = NULL;</a>
+<a name="ln97"> </a>
+<a name="ln98">/* *INDENT-OFF* */</a>
+<a name="ln99">static struct crm_option long_options[] = {</a>
+<a name="ln100">    /* Top-level Options */</a>
+<a name="ln101">    {&quot;help&quot;,    0, 0, '?', &quot;\tThis text&quot;},</a>
+<a name="ln102">    {&quot;version&quot;, 0, 0, '$', &quot;\tVersion information&quot;  },</a>
+<a name="ln103">    {&quot;quiet&quot;,   0, 0, 'q', &quot;\tDisplay only the essential query information&quot;},</a>
+<a name="ln104">    {&quot;verbose&quot;, 0, 0, 'V', &quot;\tIncrease debug output&quot;},</a>
+<a name="ln105">    </a>
+<a name="ln106">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nCommands:&quot;},</a>
+<a name="ln107">    /* daemon options */</a>
+<a name="ln108">    {&quot;debug_inc&quot;, 1, 0, 'i', &quot;Increase the crmd's debug level on the specified host&quot;},</a>
+<a name="ln109">    {&quot;debug_dec&quot;, 1, 0, 'd', &quot;Decrease the crmd's debug level on the specified host&quot;},</a>
+<a name="ln110">    {&quot;status&quot;,    1, 0, 'S', &quot;Display the status of the specified node.&quot; },</a>
+<a name="ln111">    {&quot;-spacer-&quot;,  1, 0, '-', &quot;\n\tResult is the node's internal FSM state which can be useful for debugging\n&quot;},</a>
+<a name="ln112">    {&quot;dc_lookup&quot;, 0, 0, 'D', &quot;Display the uname of the node co-ordinating the cluster.&quot;},</a>
+<a name="ln113">    {&quot;-spacer-&quot;,  1, 0, '-', &quot;\n\tThis is an internal detail and is rarely useful to administrators except when deciding on which node to examine the logs.\n&quot;},</a>
+<a name="ln114">    {&quot;nodes&quot;,     0, 0, 'N', &quot;\tDisplay the uname of all member nodes&quot;},</a>
+<a name="ln115">    {&quot;election&quot;,  0, 0, 'E', &quot;(Advanced) Start an election for the cluster co-ordinator&quot;},</a>
+<a name="ln116">    {&quot;kill&quot;,      1, 0, 'K', &quot;(Advanced) Shut down the crmd (not the rest of the clusterstack ) on the specified node&quot;},</a>
+<a name="ln117">    {&quot;health&quot;,    0, 0, 'H', NULL, 1},</a>
+<a name="ln118">    </a>
+<a name="ln119">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nAdditional Options:&quot;},</a>
+<a name="ln120">    {XML_ATTR_TIMEOUT, 1, 0, 't', &quot;Time (in milliseconds) to wait before declaring the operation failed&quot;},</a>
+<a name="ln121">    {&quot;bash-export&quot;, 0, 0, 'B', &quot;Create Bash export entries of the form 'export uname=uuid'\n&quot;},</a>
+<a name="ln122"> </a>
+<a name="ln123">    {&quot;-spacer-&quot;,  1, 0, '-', &quot;Notes:&quot;},</a>
+<a name="ln124">    {&quot;-spacer-&quot;,  1, 0, '-', &quot; The -i,-d,-K and -E commands are rarely used and may be removed in future versions.&quot;},</a>
+<a name="ln125"> </a>
+<a name="ln126">    {0, 0, 0, 0}</a>
+<a name="ln127">};</a>
+<a name="ln128">/* *INDENT-ON* */</a>
+<a name="ln129"> </a>
+<a name="ln130">int</a>
+<a name="ln131">main(int argc, char **argv)</a>
+<a name="ln132">{</a>
+<a name="ln133">    int option_index = 0;</a>
+<a name="ln134">    int argerr = 0;</a>
+<a name="ln135">    int flag;</a>
+<a name="ln136"> </a>
+<a name="ln137">    crm_log_cli_init(&quot;crmadmin&quot;);</a>
+<a name="ln138">    crm_set_options(NULL, &quot;command [options]&quot;, long_options,</a>
+<a name="ln139">                    &quot;Development tool for performing some crmd-specific commands.&quot;</a>
+<a name="ln140">                    &quot;\n  Likely to be replaced by crm_node in the future&quot;);</a>
+<a name="ln141">    if (argc &lt; 2) {</a>
+<a name="ln142">        crm_help('?', EX_USAGE);</a>
+<a name="ln143">    }</a>
+<a name="ln144"> </a>
+<a name="ln145">    while (1) {</a>
+<a name="ln146">        flag = crm_get_option(argc, argv, &amp;option_index);</a>
+<a name="ln147">        if (flag == -1)</a>
+<a name="ln148">            break;</a>
+<a name="ln149"> </a>
+<a name="ln150">        switch (flag) {</a>
+<a name="ln151">            case 'V':</a>
+<a name="ln152">                BE_VERBOSE = TRUE;</a>
+<a name="ln153">                admin_verbose = XML_BOOLEAN_TRUE;</a>
+<a name="ln154">                crm_bump_log_level(argc, argv);</a>
+<a name="ln155">                break;</a>
+<a name="ln156">            case 't':</a>
+<a name="ln157">                message_timeout_ms = atoi(optarg);</a>
+<a name="ln158">                if (message_timeout_ms &lt; 1) {</a>
+<a name="ln159">                    message_timeout_ms = 30 * 1000;</a>
+<a name="ln160">                }</a>
+<a name="ln161">                break;</a>
+<a name="ln162"> </a>
+<a name="ln163">            case '$':</a>
+<a name="ln164">            case '?':</a>
+<a name="ln165">                crm_help(flag, EX_OK);</a>
+<a name="ln166">                break;</a>
+<a name="ln167">            case 'D':</a>
+<a name="ln168">                DO_WHOIS_DC = TRUE;</a>
+<a name="ln169">                break;</a>
+<a name="ln170">            case 'B':</a>
+<a name="ln171">                BASH_EXPORT = TRUE;</a>
+<a name="ln172">                break;</a>
+<a name="ln173">            case 'K':</a>
+<a name="ln174">                DO_RESET = TRUE;</a>
+<a name="ln175">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln176">                dest_node = strdup(optarg);</a>
+<a name="ln177">                crmd_operation = CRM_OP_LOCAL_SHUTDOWN;</a>
+<a name="ln178">                break;</a>
+<a name="ln179">            case 'q':</a>
+<a name="ln180">                BE_SILENT = TRUE;</a>
+<a name="ln181">                break;</a>
+<a name="ln182">            case 'i':</a>
+<a name="ln183">                DO_DEBUG = debug_inc;</a>
+<a name="ln184">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln185">                dest_node = strdup(optarg);</a>
+<a name="ln186">                break;</a>
+<a name="ln187">            case 'd':</a>
+<a name="ln188">                DO_DEBUG = debug_dec;</a>
+<a name="ln189">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln190">                dest_node = strdup(optarg);</a>
+<a name="ln191">                break;</a>
+<a name="ln192">            case 'S':</a>
+<a name="ln193">                DO_HEALTH = TRUE;</a>
+<a name="ln194">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln195">                dest_node = strdup(optarg);</a>
+<a name="ln196">                break;</a>
+<a name="ln197">            case 'E':</a>
+<a name="ln198">                DO_ELECT_DC = TRUE;</a>
+<a name="ln199">                break;</a>
+<a name="ln200">            case 'N':</a>
+<a name="ln201">                DO_NODE_LIST = TRUE;</a>
+<a name="ln202">                break;</a>
+<a name="ln203">            case 'H':</a>
+<a name="ln204">                DO_HEALTH = TRUE;</a>
+<a name="ln205">                break;</a>
+<a name="ln206">            default:</a>
+<a name="ln207">                printf(&quot;Argument code 0%o (%c) is not (?yet?) supported\n&quot;, flag, flag);</a>
+<a name="ln208">                ++argerr;</a>
+<a name="ln209">                break;</a>
+<a name="ln210">        }</a>
+<a name="ln211">    }</a>
+<a name="ln212"> </a>
+<a name="ln213">    if (optind &lt; argc) {</a>
+<a name="ln214">        printf(&quot;non-option ARGV-elements: &quot;);</a>
+<a name="ln215">        while (optind &lt; argc)</a>
+<a name="ln216">            printf(&quot;%s &quot;, argv[optind++]);</a>
+<a name="ln217">        printf(&quot;\n&quot;);</a>
+<a name="ln218">    }</a>
+<a name="ln219"> </a>
+<a name="ln220">    if (optind &gt; argc) {</a>
+<a name="ln221">        ++argerr;</a>
+<a name="ln222">    }</a>
+<a name="ln223"> </a>
+<a name="ln224">    if (argerr) {</a>
+<a name="ln225">        crm_help('?', EX_USAGE);</a>
+<a name="ln226">    }</a>
+<a name="ln227"> </a>
+<a name="ln228">    if (do_init()) {</a>
+<a name="ln229">        int res = 0;</a>
+<a name="ln230"> </a>
+<a name="ln231">        res = do_work();</a>
+<a name="ln232">        if (res &gt; 0) {</a>
+<a name="ln233">            /* wait for the reply by creating a mainloop and running it until</a>
+<a name="ln234">             * the callbacks are invoked...</a>
+<a name="ln235">             */</a>
+<a name="ln236">            mainloop = g_main_new(FALSE);</a>
+<a name="ln237">            crm_trace(&quot;Waiting for %d replies from the local CRM&quot;, expected_responses);</a>
+<a name="ln238"> </a>
+<a name="ln239">            message_timer_id = g_timeout_add(message_timeout_ms, admin_message_timeout, NULL);</a>
+<a name="ln240"> </a>
+<a name="ln241">            g_main_run(mainloop);</a>
+<a name="ln242"> </a>
+<a name="ln243">        } else if (res &lt; 0) {</a>
+<a name="ln244">            crm_err(&quot;No message to send&quot;);</a>
+<a name="ln245">            operation_status = -1;</a>
+<a name="ln246">        }</a>
+<a name="ln247">    } else {</a>
+<a name="ln248">        crm_warn(&quot;Init failed, could not perform requested operations&quot;);</a>
+<a name="ln249">        operation_status = -2;</a>
+<a name="ln250">    }</a>
+<a name="ln251"> </a>
+<a name="ln252">    crm_trace(&quot;%s exiting normally&quot;, crm_system_name);</a>
+<a name="ln253">    return operation_status;</a>
+<a name="ln254">}</a>
+<a name="ln255"> </a>
+<a name="ln256">int</a>
+<a name="ln257">do_work(void)</a>
+<a name="ln258">{</a>
+<a name="ln259">    int ret = 1;</a>
+<a name="ln260"> </a>
+<a name="ln261">    /* construct the request */</a>
+<a name="ln262">    xmlNode *msg_data = NULL;</a>
+<a name="ln263">    gboolean all_is_good = TRUE;</a>
+<a name="ln264"> </a>
+<a name="ln265">    msg_options = create_xml_node(NULL, XML_TAG_OPTIONS);</a>
+<a name="ln266">    crm_xml_add(msg_options, XML_ATTR_VERBOSE, admin_verbose);</a>
+<a name="ln267">    crm_xml_add(msg_options, XML_ATTR_TIMEOUT, &quot;0&quot;);</a>
+<a name="ln268"> </a>
+<a name="ln269">    if (DO_HEALTH == TRUE) {</a>
+<a name="ln270">        crm_trace(&quot;Querying the system&quot;);</a>
+<a name="ln271"> </a>
+<a name="ln272">        sys_to = CRM_SYSTEM_DC;</a>
+<a name="ln273"> </a>
+<a name="ln274">        if (dest_node != NULL) {</a>
+<a name="ln275">            sys_to = CRM_SYSTEM_CRMD;</a>
+<a name="ln276">            crmd_operation = CRM_OP_PING;</a>
+<a name="ln277"> </a>
+<a name="ln278">            if (BE_VERBOSE) {</a>
+<a name="ln279">                expected_responses = 1;</a>
+<a name="ln280">            }</a>
+<a name="ln281"> </a>
+<a name="ln282">            crm_xml_add(msg_options, XML_ATTR_TIMEOUT, &quot;0&quot;);</a>
+<a name="ln283"> </a>
+<a name="ln284">        } else {</a>
+<a name="ln285">            crm_info(&quot;Cluster-wide health not available yet&quot;);</a>
+<a name="ln286">            all_is_good = FALSE;</a>
+<a name="ln287">        }</a>
+<a name="ln288"> </a>
+<a name="ln289">    } else if (DO_ELECT_DC) {</a>
+<a name="ln290">        /* tell the local node to initiate an election */</a>
+<a name="ln291"> </a>
+<a name="ln292">        dest_node = NULL;</a>
+<a name="ln293">        sys_to = CRM_SYSTEM_CRMD;</a>
+<a name="ln294">        crmd_operation = CRM_OP_VOTE;</a>
+<a name="ln295"> </a>
+<a name="ln296">        crm_xml_add(msg_options, XML_ATTR_TIMEOUT, &quot;0&quot;);</a>
+<a name="ln297">        ret = 0;                /* no return message */</a>
+<a name="ln298"> </a>
+<a name="ln299">    } else if (DO_WHOIS_DC) {</a>
+<a name="ln300">        dest_node = NULL;</a>
+<a name="ln301">        sys_to = CRM_SYSTEM_DC;</a>
+<a name="ln302">        crmd_operation = CRM_OP_PING;</a>
+<a name="ln303">        crm_xml_add(msg_options, XML_ATTR_TIMEOUT, &quot;0&quot;);</a>
+<a name="ln304"> </a>
+<a name="ln305">    } else if (DO_NODE_LIST) {</a>
+<a name="ln306"> </a>
+<a name="ln307">        cib_t *the_cib = cib_new();</a>
+<a name="ln308">        xmlNode *output = NULL;</a>
+<a name="ln309"> </a>
+<a name="ln310">        int rc = the_cib-&gt;cmds-&gt;signon(the_cib, crm_system_name, cib_command);</a>
+<a name="ln311"> </a>
+<a name="ln312">        if (rc != pcmk_ok) {</a>
+<a name="ln313">            return -1;</a>
+<a name="ln314">        }</a>
+<a name="ln315"> </a>
+<a name="ln316">        rc = the_cib-&gt;cmds-&gt;query(the_cib, NULL, &amp;output, cib_scope_local | cib_sync_call);</a>
+<a name="ln317">        if(rc == pcmk_ok) {</a>
+<a name="ln318">            do_find_node_list(output);</a>
+<a name="ln319"> </a>
+<a name="ln320">            free_xml(output);</a>
+<a name="ln321">        }</a>
+<a name="ln322">        the_cib-&gt;cmds-&gt;signoff(the_cib);</a>
+<a name="ln323">        crm_exit(rc);</a>
+<a name="ln324"> </a>
+<a name="ln325">    } else if (DO_RESET) {</a>
+<a name="ln326">        /* tell dest_node to initiate the shutdown procedure</a>
+<a name="ln327">         *</a>
+<a name="ln328">         * if dest_node is NULL, the request will be sent to the</a>
+<a name="ln329">         *   local node</a>
+<a name="ln330">         */</a>
+<a name="ln331">        sys_to = CRM_SYSTEM_CRMD;</a>
+<a name="ln332">        crm_xml_add(msg_options, XML_ATTR_TIMEOUT, &quot;0&quot;);</a>
+<a name="ln333"> </a>
+<a name="ln334">        ret = 0;                /* no return message */</a>
+<a name="ln335"> </a>
+<a name="ln336">    } else if (DO_DEBUG == debug_inc) {</a>
+<a name="ln337">        /* tell dest_node to increase its debug level</a>
+<a name="ln338">         *</a>
+<a name="ln339">         * if dest_node is NULL, the request will be sent to the</a>
+<a name="ln340">         *   local node</a>
+<a name="ln341">         */</a>
+<a name="ln342">        sys_to = CRM_SYSTEM_CRMD;</a>
+<a name="ln343">        crmd_operation = CRM_OP_DEBUG_UP;</a>
+<a name="ln344"> </a>
+<a name="ln345">        ret = 0;                /* no return message */</a>
+<a name="ln346"> </a>
+<a name="ln347">    } else if (DO_DEBUG == debug_dec) {</a>
+<a name="ln348">        /* tell dest_node to increase its debug level</a>
+<a name="ln349">         *</a>
+<a name="ln350">         * if dest_node is NULL, the request will be sent to the</a>
+<a name="ln351">         *   local node</a>
+<a name="ln352">         */</a>
+<a name="ln353">        sys_to = CRM_SYSTEM_CRMD;</a>
+<a name="ln354">        crmd_operation = CRM_OP_DEBUG_DOWN;</a>
+<a name="ln355"> </a>
+<a name="ln356">        ret = 0;                /* no return message */</a>
+<a name="ln357"> </a>
+<a name="ln358">    } else {</a>
+<a name="ln359">        crm_err(&quot;Unknown options&quot;);</a>
+<a name="ln360">        all_is_good = FALSE;</a>
+<a name="ln361">    }</a>
+<a name="ln362"> </a>
+<a name="ln363">    if (all_is_good == FALSE) {</a>
+<a name="ln364">        crm_err(&quot;Creation of request failed.  No message to send&quot;);</a>
+<a name="ln365">        return -1;</a>
+<a name="ln366">    }</a>
+<a name="ln367"> </a>
+<a name="ln368">/* send it */</a>
+<a name="ln369">    if (crmd_channel == NULL) {</a>
+<a name="ln370">        crm_err(&quot;The IPC connection is not valid, cannot send anything&quot;);</a>
+<a name="ln371">        return -1;</a>
+<a name="ln372">    }</a>
+<a name="ln373"> </a>
+<a name="ln374">    if (sys_to == NULL) {</a>
+<a name="ln375">        if (dest_node != NULL) {</a>
+<a name="ln376">            sys_to = CRM_SYSTEM_CRMD;</a>
+<a name="ln377">        } else {</a>
+<a name="ln378">            sys_to = CRM_SYSTEM_DC;</a>
+<a name="ln379">        }</a>
+<a name="ln380">    }</a>
+<a name="ln381"> </a>
+<a name="ln382">    {</a>
+<a name="ln383">        xmlNode *cmd = create_request(crmd_operation, msg_data, dest_node, sys_to,</a>
+<a name="ln384">                                      crm_system_name, admin_uuid);</a>
+<a name="ln385"> </a>
+<a name="ln386">        crm_ipc_send(crmd_channel, cmd, 0, 0, NULL);</a>
+<a name="ln387">        free_xml(cmd);</a>
+<a name="ln388">    }</a>
+<a name="ln389"> </a>
+<a name="ln390">    return ret;</a>
+<a name="ln391">}</a>
+<a name="ln392"> </a>
+<a name="ln393">void</a>
+<a name="ln394">crmadmin_ipc_connection_destroy(gpointer user_data)</a>
+<a name="ln395">{</a>
+<a name="ln396">    crm_err(&quot;Connection to CRMd was terminated&quot;);</a>
+<a name="ln397">    if (mainloop) {</a>
+<a name="ln398">        g_main_quit(mainloop);</a>
+<a name="ln399">    } else {</a>
+<a name="ln400">        crm_exit(ENOTCONN);</a>
+<a name="ln401">    }</a>
+<a name="ln402">}</a>
+<a name="ln403"> </a>
+<a name="ln404">struct ipc_client_callbacks crm_callbacks = {</a>
+<a name="ln405">    .dispatch = admin_msg_callback,</a>
+<a name="ln406">    .destroy = crmadmin_ipc_connection_destroy</a>
+<a name="ln407">};</a>
+<a name="ln408"> </a>
+<a name="ln409">gboolean</a>
+<a name="ln410">do_init(void)</a>
+<a name="ln411">{</a>
+<a name="ln412">    mainloop_io_t *source =</a>
+<a name="ln413">        mainloop_add_ipc_client(CRM_SYSTEM_CRMD, G_PRIORITY_DEFAULT, 0, NULL, &amp;crm_callbacks);</a>
+<a name="ln414"> </a>
+<a name="ln415">    admin_uuid = calloc(1, 11);</a>
+<a name="ln416">    if (admin_uuid != NULL) {</a>
+<a name="ln417">        snprintf(admin_uuid, 10, &quot;%d&quot;, getpid());</a>
+<a name="ln418">        admin_uuid[10] = '\0';</a>
+<a name="ln419">    }</a>
+<a name="ln420"> </a>
+<a name="ln421">    crmd_channel = mainloop_get_ipc_client(source);</a>
+<a name="ln422"> </a>
+<a name="ln423">    if (DO_RESOURCE || DO_RESOURCE_LIST || DO_NODE_LIST) {</a>
+<a name="ln424">        return TRUE;</a>
+<a name="ln425"> </a>
+<a name="ln426">    } else if (crmd_channel != NULL) {</a>
+<a name="ln427">        xmlNode *xml = create_hello_message(admin_uuid, crm_system_name, &quot;0&quot;, &quot;1&quot;);</a>
+<a name="ln428"> </a>
+<a name="ln429">        crm_ipc_send(crmd_channel, xml, 0, 0, NULL);</a>
+<a name="ln430">        return TRUE;</a>
+<a name="ln431">    }</a>
+<a name="ln432">    return FALSE;</a>
+<a name="ln433">}</a>
+<a name="ln434"> </a>
+<a name="ln435">static bool</a>
+<a name="ln436">validate_crm_message(xmlNode * msg, const char *sys, const char *uuid, const char *msg_type)</a>
+<a name="ln437">{</a>
+<a name="ln438">    const char *type = NULL;</a>
+<a name="ln439">    const char *crm_msg_reference = NULL;</a>
+<a name="ln440"> </a>
+<a name="ln441">    if (msg == NULL) {</a>
+<a name="ln442">        return FALSE;</a>
+<a name="ln443">    }</a>
+<a name="ln444"> </a>
+<a name="ln445">    type = crm_element_value(msg, F_CRM_MSG_TYPE);</a>
+<a name="ln446">    crm_msg_reference = crm_element_value(msg, XML_ATTR_REFERENCE);</a>
+<a name="ln447"> </a>
+<a name="ln448">    if (type == NULL) {</a>
+<a name="ln449">        crm_info(&quot;No message type defined.&quot;);</a>
+<a name="ln450">        return FALSE;</a>
+<a name="ln451"> </a>
+<a name="ln452">    } else if (msg_type != NULL &amp;&amp; strcasecmp(msg_type, type) != 0) {</a>
+<a name="ln453">        crm_info(&quot;Expecting a (%s) message but received a (%s).&quot;, msg_type, type);</a>
+<a name="ln454">        return FALSE;</a>
+<a name="ln455">    }</a>
+<a name="ln456"> </a>
+<a name="ln457">    if (crm_msg_reference == NULL) {</a>
+<a name="ln458">        crm_info(&quot;No message crm_msg_reference defined.&quot;);</a>
+<a name="ln459">        return FALSE;</a>
+<a name="ln460">    }</a>
+<a name="ln461"> </a>
+<a name="ln462">    return TRUE;</a>
+<a name="ln463">}</a>
+<a name="ln464"> </a>
+<a name="ln465">int</a>
+<a name="ln466">admin_msg_callback(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln467">{</a>
+<a name="ln468">    static int received_responses = 0;</a>
+<a name="ln469">    xmlNode *xml = string2xml(buffer);</a>
+<a name="ln470"> </a>
+<a name="ln471">    received_responses++;</a>
+<a name="ln472">    g_source_remove(message_timer_id);</a>
+<a name="ln473"> </a>
+<a name="ln474">    crm_log_xml_trace(xml, &quot;ipc&quot;);</a>
+<a name="ln475"> </a>
+<a name="ln476">    if (xml == NULL) {</a>
+<a name="ln477">        crm_info(&quot;XML in IPC message was not valid... &quot; &quot;discarding.&quot;);</a>
+<a name="ln478"> </a>
+<a name="ln479">    } else if (validate_crm_message(xml, crm_system_name, admin_uuid, XML_ATTR_RESPONSE) == FALSE) {</a>
+<a name="ln480">        crm_trace(&quot;Message was not a CRM response. Discarding.&quot;);</a>
+<a name="ln481"> </a>
+<a name="ln482">    } else if (DO_HEALTH) {</a>
+<a name="ln483">        xmlNode *data = get_message_xml(xml, F_CRM_DATA);</a>
+<a name="ln484">        const char *state = crm_element_value(data, &quot;crmd_state&quot;);</a>
+<a name="ln485"> </a>
+<a name="ln486">        printf(&quot;Status of %s@%s: %s (%s)\n&quot;,</a>
+<a name="ln487">               crm_element_value(data, XML_PING_ATTR_SYSFROM),</a>
+<a name="ln488">               crm_element_value(xml, F_CRM_HOST_FROM),</a>
+<a name="ln489">               state, crm_element_value(data, XML_PING_ATTR_STATUS));</a>
+<a name="ln490"> </a>
+<a name="ln491">        if (BE_SILENT &amp;&amp; state != NULL) {</a>
+<a name="ln492">            fprintf(stderr, &quot;%s\n&quot;, state);</a>
+<a name="ln493">        }</a>
+<a name="ln494"> </a>
+<a name="ln495">    } else if (DO_WHOIS_DC) {</a>
+<a name="ln496">        const char *dc = crm_element_value(xml, F_CRM_HOST_FROM);</a>
+<a name="ln497"> </a>
+<a name="ln498">        printf(&quot;Designated Controller is: %s\n&quot;, dc);</a>
+<a name="ln499">        if (BE_SILENT &amp;&amp; dc != NULL) {</a>
+<a name="ln500">            fprintf(stderr, &quot;%s\n&quot;, dc);</a>
+<a name="ln501">        }</a>
+<a name="ln502">        crm_exit(pcmk_ok);</a>
+<a name="ln503">    }</a>
+<a name="ln504"> </a>
+<a name="ln505">    free_xml(xml);</a>
+<a name="ln506"> </a>
+<a name="ln507">    if (received_responses &gt;= expected_responses) {</a>
+<a name="ln508">        crm_trace(&quot;Received expected number (%d) of messages from Heartbeat.&quot;</a>
+<a name="ln509">                  &quot;  Exiting normally.&quot;, expected_responses);</a>
+<a name="ln510">        crm_exit(pcmk_ok);</a>
+<a name="ln511">    }</a>
+<a name="ln512"> </a>
+<a name="ln513">    message_timer_id = g_timeout_add(message_timeout_ms, admin_message_timeout, NULL);</a>
+<a name="ln514">    return 0;</a>
+<a name="ln515">}</a>
+<a name="ln516"> </a>
+<a name="ln517">gboolean</a>
+<a name="ln518">admin_message_timeout(gpointer data)</a>
+<a name="ln519">{</a>
+<a name="ln520">    fprintf(stderr, &quot;No messages received in %d seconds.. aborting\n&quot;,</a>
+<a name="ln521">            (int)message_timeout_ms / 1000);</a>
+<a name="ln522">    crm_err(&quot;No messages received in %d seconds&quot;, (int)message_timeout_ms / 1000);</a>
+<a name="ln523">    operation_status = -3;</a>
+<a name="ln524">    g_main_quit(mainloop);</a>
+<a name="ln525">    return FALSE;</a>
+<a name="ln526">}</a>
+<a name="ln527"> </a>
+<a name="ln528">gboolean</a>
+<a name="ln529">is_node_online(xmlNode * node_state)</a>
+<a name="ln530">{</a>
+<a name="ln531">    const char *uname = crm_element_value(node_state, XML_ATTR_UNAME);</a>
+<a name="ln532">    const char *join_state = crm_element_value(node_state, XML_NODE_JOIN_STATE);</a>
+<a name="ln533">    const char *exp_state = crm_element_value(node_state, XML_NODE_EXPECTED);</a>
+<a name="ln534">    const char *crm_state = crm_element_value(node_state, XML_NODE_IS_PEER);</a>
+<a name="ln535">    const char *ccm_state = crm_element_value(node_state, XML_NODE_IN_CLUSTER);</a>
+<a name="ln536"> </a>
+<a name="ln537">    if (safe_str_neq(join_state, CRMD_JOINSTATE_DOWN)</a>
+<a name="ln538">        &amp;&amp; crm_is_true(ccm_state)</a>
+<a name="ln539">        &amp;&amp; safe_str_eq(crm_state, &quot;online&quot;)) {</a>
+<a name="ln540">        crm_trace(&quot;Node %s is online&quot;, uname);</a>
+<a name="ln541">        return TRUE;</a>
+<a name="ln542">    }</a>
+<a name="ln543">    crm_trace(&quot;Node %s: ccm=%s join=%s exp=%s crm=%s&quot;,</a>
+<a name="ln544">              uname, crm_str(ccm_state),</a>
+<a name="ln545">              crm_str(join_state), crm_str(exp_state), crm_str(crm_state));</a>
+<a name="ln546">    crm_trace(&quot;Node %s is offline&quot;, uname);</a>
+<a name="ln547">    return FALSE;</a>
+<a name="ln548">}</a>
+<a name="ln549"> </a>
+<a name="ln550">int</a>
+<a name="ln551">do_find_node_list(xmlNode * xml_node)</a>
+<a name="ln552">{</a>
+<a name="ln553">    int found = 0;</a>
+<a name="ln554">    xmlNode *node = NULL;</a>
+<a name="ln555">    xmlNode *nodes = get_object_root(XML_CIB_TAG_NODES, xml_node);</a>
+<a name="ln556"> </a>
+<a name="ln557">    for (node = __xml_first_child(nodes); node != NULL; node = __xml_next(node)) {</a>
+<a name="ln558">        if (crm_str_eq((const char *)node-&gt;name, XML_CIB_TAG_NODE, TRUE)) {</a>
+<a name="ln559"> </a>
+<a name="ln560">            if (BASH_EXPORT) {</a>
+<a name="ln561">                printf(&quot;export %s=%s\n&quot;,</a>
+<a name="ln562">                       crm_element_value(node, XML_ATTR_UNAME),</a>
+<a name="ln563">                       crm_element_value(node, XML_ATTR_ID));</a>
+<a name="ln564">            } else {</a>
+<a name="ln565">                printf(&quot;%s node: %s (%s)\n&quot;,</a>
+<a name="ln566">                       crm_element_value(node, XML_ATTR_TYPE),</a>
+<a name="ln567">                       crm_element_value(node, XML_ATTR_UNAME),</a>
+<a name="ln568">                       crm_element_value(node, XML_ATTR_ID));</a>
+<a name="ln569">            }</a>
+<a name="ln570">            found++;</a>
+<a name="ln571">        }</a>
+<a name="ln572">    }</a>
+<a name="ln573"> </a>
+<a name="ln574">    if (found == 0) {</a>
+<a name="ln575">        printf(&quot;NO nodes configured\n&quot;);</a>
+<a name="ln576">    }</a>
+<a name="ln577"> </a>
+<a name="ln578">    return found;</a>
+<a name="ln579">}</a>
+
+</code></pre>
+<div class="balloon" rel="89"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V707/" target="_blank">V707</a> Giving short names to global variables is considered to be bad practice. It is suggested to rename 'id' variable.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

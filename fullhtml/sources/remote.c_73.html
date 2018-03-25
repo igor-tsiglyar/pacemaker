@@ -1,0 +1,2159 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2009 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;sys/types.h&gt;</a>
+<a name="ln28">#include &lt;sys/wait.h&gt;</a>
+<a name="ln29">#include &lt;sys/stat.h&gt;</a>
+<a name="ln30">#include &lt;unistd.h&gt;</a>
+<a name="ln31">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;stdlib.h&gt;</a>
+<a name="ln34">#include &lt;errno.h&gt;</a>
+<a name="ln35">#include &lt;fcntl.h&gt;</a>
+<a name="ln36">#include &lt;ctype.h&gt;</a>
+<a name="ln37">#include &lt;regex.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;crm/crm.h&gt;</a>
+<a name="ln40">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln41">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln42">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln43">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">#include &lt;crm/stonith-ng.h&gt;</a>
+<a name="ln46">#include &lt;crm/fencing/internal.h&gt;</a>
+<a name="ln47">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln48"> </a>
+<a name="ln49">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln50">#include &lt;internal.h&gt;</a>
+<a name="ln51"> </a>
+<a name="ln52">#define TIMEOUT_MULTIPLY_FACTOR 1.2</a>
+<a name="ln53"> </a>
+<a name="ln54">/* When one stonithd queries its peers for devices able to handle a fencing</a>
+<a name="ln55"> * request, each peer will reply with a list of such devices available to it.</a>
+<a name="ln56"> * Each reply will be parsed into a st_query_result_t, with each device's</a>
+<a name="ln57"> * information kept in a device_properties_t.</a>
+<a name="ln58"> */</a>
+<a name="ln59"> </a>
+<a name="ln60">typedef struct device_properties_s {</a>
+<a name="ln61">    /* Whether access to this device has been verified */</a>
+<a name="ln62">    gboolean verified;</a>
+<a name="ln63"> </a>
+<a name="ln64">    /* The remaining members are indexed by the operation's &quot;phase&quot; */</a>
+<a name="ln65"> </a>
+<a name="ln66">    /* Whether this device has been executed in each phase */</a>
+<a name="ln67">    gboolean executed[st_phase_max];</a>
+<a name="ln68">    /* Whether this device is disallowed from executing in each phase */</a>
+<a name="ln69">    gboolean disallowed[st_phase_max];</a>
+<a name="ln70">    /* Action-specific timeout for each phase */</a>
+<a name="ln71">    int custom_action_timeout[st_phase_max];</a>
+<a name="ln72">    /* Action-specific maximum random delay for each phase */</a>
+<a name="ln73">    int delay_max[st_phase_max];</a>
+<a name="ln74">} device_properties_t;</a>
+<a name="ln75"> </a>
+<a name="ln76">typedef struct st_query_result_s {</a>
+<a name="ln77">    /* Name of peer that sent this result */</a>
+<a name="ln78">    char *host;</a>
+<a name="ln79">    /* Only try peers for non-topology based operations once */</a>
+<a name="ln80">    gboolean tried;</a>
+<a name="ln81">    /* Number of entries in the devices table */</a>
+<a name="ln82">    int ndevices;</a>
+<a name="ln83">    /* Devices available to this host that are capable of fencing the target */</a>
+<a name="ln84">    GHashTable *devices;</a>
+<a name="ln85">} st_query_result_t;</a>
+<a name="ln86"> </a>
+<a name="ln87">GHashTable *remote_op_list = NULL;</a>
+<a name="ln88">void call_remote_stonith(remote_fencing_op_t * op, st_query_result_t * peer);</a>
+<a name="ln89">static void remote_op_done(remote_fencing_op_t * op, xmlNode * data, int rc, int dup);</a>
+<a name="ln90">extern xmlNode *stonith_create_op(int call_id, const char *token, const char *op, xmlNode * data,</a>
+<a name="ln91">                                  int call_options);</a>
+<a name="ln92"> </a>
+<a name="ln93">static void report_timeout_period(remote_fencing_op_t * op, int op_timeout);</a>
+<a name="ln94">static int get_op_total_timeout(const remote_fencing_op_t *op,</a>
+<a name="ln95">                                const st_query_result_t *chosen_peer);</a>
+<a name="ln96"> </a>
+<a name="ln97">static gint</a>
+<a name="ln98">sort_strings(gconstpointer a, gconstpointer b)</a>
+<a name="ln99">{</a>
+<a name="ln100">    return strcmp(a, b);</a>
+<a name="ln101">}</a>
+<a name="ln102"> </a>
+<a name="ln103">static void</a>
+<a name="ln104">free_remote_query(gpointer data)</a>
+<a name="ln105">{</a>
+<a name="ln106">    if (data) {</a>
+<a name="ln107">        st_query_result_t *query = data;</a>
+<a name="ln108"> </a>
+<a name="ln109">        crm_trace(&quot;Free'ing query result from %s&quot;, query-&gt;host);</a>
+<a name="ln110">        g_hash_table_destroy(query-&gt;devices);</a>
+<a name="ln111">        free(query-&gt;host);</a>
+<a name="ln112">        free(query);</a>
+<a name="ln113">    }</a>
+<a name="ln114">}</a>
+<a name="ln115"> </a>
+<a name="ln116">struct peer_count_data {</a>
+<a name="ln117">    const remote_fencing_op_t *op;</a>
+<a name="ln118">    gboolean verified_only;</a>
+<a name="ln119">    int count;</a>
+<a name="ln120">};</a>
+<a name="ln121"> </a>
+<a name="ln122">/*!</a>
+<a name="ln123"> * \internal</a>
+<a name="ln124"> * \brief Increment a counter if a device has not been executed yet</a>
+<a name="ln125"> *</a>
+<a name="ln126"> * \param[in] key        Device ID (ignored)</a>
+<a name="ln127"> * \param[in] value      Device properties</a>
+<a name="ln128"> * \param[in] user_data  Peer count data</a>
+<a name="ln129"> */</a>
+<a name="ln130">static void</a>
+<a name="ln131">count_peer_device(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln132">{</a>
+<a name="ln133">    device_properties_t *props = (device_properties_t*)value;</a>
+<a name="ln134">    struct peer_count_data *data = user_data;</a>
+<a name="ln135"> </a>
+<a name="ln136">    if (!props-&gt;executed[data-&gt;op-&gt;phase]</a>
+<a name="ln137">        &amp;&amp; (!data-&gt;verified_only || props-&gt;verified)) {</a>
+<a name="ln138">        ++(data-&gt;count);</a>
+<a name="ln139">    }</a>
+<a name="ln140">}</a>
+<a name="ln141"> </a>
+<a name="ln142">/*!</a>
+<a name="ln143"> * \internal</a>
+<a name="ln144"> * \brief Check the number of available devices in a peer's query results</a>
+<a name="ln145"> *</a>
+<a name="ln146"> * \param[in] op             Operation that results are for</a>
+<a name="ln147"> * \param[in] peer           Peer to count</a>
+<a name="ln148"> * \param[in] verified_only  Whether to count only verified devices</a>
+<a name="ln149"> *</a>
+<a name="ln150"> * \return Number of devices available to peer that were not already executed</a>
+<a name="ln151"> */</a>
+<a name="ln152">static int</a>
+<a name="ln153">count_peer_devices(const remote_fencing_op_t *op, const st_query_result_t *peer,</a>
+<a name="ln154">                   gboolean verified_only)</a>
+<a name="ln155">{</a>
+<a name="ln156">    struct peer_count_data data;</a>
+<a name="ln157"> </a>
+<a name="ln158">    data.op = op;</a>
+<a name="ln159">    data.verified_only = verified_only;</a>
+<a name="ln160">    data.count = 0;</a>
+<a name="ln161">    if (peer) {</a>
+<a name="ln162">        g_hash_table_foreach(peer-&gt;devices, count_peer_device, &amp;data);</a>
+<a name="ln163">    }</a>
+<a name="ln164">    return data.count;</a>
+<a name="ln165">}</a>
+<a name="ln166"> </a>
+<a name="ln167">/*!</a>
+<a name="ln168"> * \internal</a>
+<a name="ln169"> * \brief Search for a device in a query result</a>
+<a name="ln170"> *</a>
+<a name="ln171"> * \param[in] op      Operation that result is for</a>
+<a name="ln172"> * \param[in] peer    Query result for a peer</a>
+<a name="ln173"> * \param[in] device  Device ID to search for</a>
+<a name="ln174"> *</a>
+<a name="ln175"> * \return Device properties if found, NULL otherwise</a>
+<a name="ln176"> */</a>
+<a name="ln177">static device_properties_t *</a>
+<a name="ln178">find_peer_device(const remote_fencing_op_t *op, const st_query_result_t *peer,</a>
+<a name="ln179">                 const char *device)</a>
+<a name="ln180">{</a>
+<a name="ln181">    device_properties_t *props = g_hash_table_lookup(peer-&gt;devices, device);</a>
+<a name="ln182"> </a>
+<a name="ln183">    return (props &amp;&amp; !props-&gt;executed[op-&gt;phase]</a>
+<a name="ln184">           &amp;&amp; !props-&gt;disallowed[op-&gt;phase])? props : NULL;</a>
+<a name="ln185">}</a>
+<a name="ln186"> </a>
+<a name="ln187">/*!</a>
+<a name="ln188"> * \internal</a>
+<a name="ln189"> * \brief Find a device in a peer's device list and mark it as executed</a>
+<a name="ln190"> *</a>
+<a name="ln191"> * \param[in]     op                     Operation that peer result is for</a>
+<a name="ln192"> * \param[in,out] peer                   Peer with results to search</a>
+<a name="ln193"> * \param[in]     device                 ID of device to mark as done</a>
+<a name="ln194"> * \param[in]     verified_devices_only  Only consider verified devices</a>
+<a name="ln195"> *</a>
+<a name="ln196"> * \return TRUE if device was found and marked, FALSE otherwise</a>
+<a name="ln197"> */</a>
+<a name="ln198">static gboolean</a>
+<a name="ln199">grab_peer_device(const remote_fencing_op_t *op, st_query_result_t *peer,</a>
+<a name="ln200">                 const char *device, gboolean verified_devices_only)</a>
+<a name="ln201">{</a>
+<a name="ln202">    device_properties_t *props = find_peer_device(op, peer, device);</a>
+<a name="ln203"> </a>
+<a name="ln204">    if ((props == NULL) || (verified_devices_only &amp;&amp; !props-&gt;verified)) {</a>
+<a name="ln205">        return FALSE;</a>
+<a name="ln206">    }</a>
+<a name="ln207"> </a>
+<a name="ln208">    crm_trace(&quot;Removing %s from %s (%d remaining)&quot;,</a>
+<a name="ln209">              device, peer-&gt;host, count_peer_devices(op, peer, FALSE));</a>
+<a name="ln210">    props-&gt;executed[op-&gt;phase] = TRUE;</a>
+<a name="ln211">    return TRUE;</a>
+<a name="ln212">}</a>
+<a name="ln213"> </a>
+<a name="ln214">static void</a>
+<a name="ln215">clear_remote_op_timers(remote_fencing_op_t * op)</a>
+<a name="ln216">{</a>
+<a name="ln217">    if (op-&gt;query_timer) {</a>
+<a name="ln218">        g_source_remove(op-&gt;query_timer);</a>
+<a name="ln219">        op-&gt;query_timer = 0;</a>
+<a name="ln220">    }</a>
+<a name="ln221">    if (op-&gt;op_timer_total) {</a>
+<a name="ln222">        g_source_remove(op-&gt;op_timer_total);</a>
+<a name="ln223">        op-&gt;op_timer_total = 0;</a>
+<a name="ln224">    }</a>
+<a name="ln225">    if (op-&gt;op_timer_one) {</a>
+<a name="ln226">        g_source_remove(op-&gt;op_timer_one);</a>
+<a name="ln227">        op-&gt;op_timer_one = 0;</a>
+<a name="ln228">    }</a>
+<a name="ln229">}</a>
+<a name="ln230"> </a>
+<a name="ln231">static void</a>
+<a name="ln232">free_remote_op(gpointer data)</a>
+<a name="ln233">{</a>
+<a name="ln234">    remote_fencing_op_t *op = data;</a>
+<a name="ln235"> </a>
+<a name="ln236">    crm_trace(&quot;Free'ing op %s for %s&quot;, op-&gt;id, op-&gt;target);</a>
+<a name="ln237">    crm_log_xml_debug(op-&gt;request, &quot;Destroying&quot;);</a>
+<a name="ln238"> </a>
+<a name="ln239">    clear_remote_op_timers(op);</a>
+<a name="ln240"> </a>
+<a name="ln241">    free(op-&gt;id);</a>
+<a name="ln242">    free(op-&gt;action);</a>
+<a name="ln243">    free(op-&gt;target);</a>
+<a name="ln244">    free(op-&gt;client_id);</a>
+<a name="ln245">    free(op-&gt;client_name);</a>
+<a name="ln246">    free(op-&gt;originator);</a>
+<a name="ln247"> </a>
+<a name="ln248">    if (op-&gt;query_results) {</a>
+<a name="ln249">        g_list_free_full(op-&gt;query_results, free_remote_query);</a>
+<a name="ln250">    }</a>
+<a name="ln251">    if (op-&gt;request) {</a>
+<a name="ln252">        free_xml(op-&gt;request);</a>
+<a name="ln253">        op-&gt;request = NULL;</a>
+<a name="ln254">    }</a>
+<a name="ln255">    if (op-&gt;devices_list) {</a>
+<a name="ln256">        g_list_free_full(op-&gt;devices_list, free);</a>
+<a name="ln257">        op-&gt;devices_list = NULL;</a>
+<a name="ln258">    }</a>
+<a name="ln259">    g_list_free_full(op-&gt;automatic_list, free);</a>
+<a name="ln260">    free(op);</a>
+<a name="ln261">}</a>
+<a name="ln262"> </a>
+<a name="ln263">/*!</a>
+<a name="ln264"> * \internal</a>
+<a name="ln265"> * \brief Return an operation's originally requested action (before any remap)</a>
+<a name="ln266"> *</a>
+<a name="ln267"> * \param[in] op  Operation to check</a>
+<a name="ln268"> *</a>
+<a name="ln269"> * \return Operation's original action</a>
+<a name="ln270"> */</a>
+<a name="ln271">static const char *</a>
+<a name="ln272">op_requested_action(const remote_fencing_op_t *op)</a>
+<a name="ln273">{</a>
+<a name="ln274">    return ((op-&gt;phase &gt; st_phase_requested)? &quot;reboot&quot; : op-&gt;action);</a>
+<a name="ln275">}</a>
+<a name="ln276"> </a>
+<a name="ln277">/*!</a>
+<a name="ln278"> * \internal</a>
+<a name="ln279"> * \brief Remap a &quot;reboot&quot; operation to the &quot;off&quot; phase</a>
+<a name="ln280"> *</a>
+<a name="ln281"> * \param[in,out] op      Operation to remap</a>
+<a name="ln282"> */</a>
+<a name="ln283">static void</a>
+<a name="ln284">op_phase_off(remote_fencing_op_t *op)</a>
+<a name="ln285">{</a>
+<a name="ln286">    crm_info(&quot;Remapping multiple-device reboot of %s (%s) to off&quot;,</a>
+<a name="ln287">             op-&gt;target, op-&gt;id);</a>
+<a name="ln288">    op-&gt;phase = st_phase_off;</a>
+<a name="ln289"> </a>
+<a name="ln290">    /* Happily, &quot;off&quot; and &quot;on&quot; are shorter than &quot;reboot&quot;, so we can reuse the</a>
+<a name="ln291">     * memory allocation at each phase.</a>
+<a name="ln292">     */</a>
+<a name="ln293">    strcpy(op-&gt;action, &quot;off&quot;);</a>
+<a name="ln294">}</a>
+<a name="ln295"> </a>
+<a name="ln296">/*!</a>
+<a name="ln297"> * \internal</a>
+<a name="ln298"> * \brief Advance a remapped reboot operation to the &quot;on&quot; phase</a>
+<a name="ln299"> *</a>
+<a name="ln300"> * \param[in,out] op  Operation to remap</a>
+<a name="ln301"> */</a>
+<a name="ln302">static void</a>
+<a name="ln303">op_phase_on(remote_fencing_op_t *op)</a>
+<a name="ln304">{</a>
+<a name="ln305">    GListPtr iter = NULL;</a>
+<a name="ln306"> </a>
+<a name="ln307">    crm_info(&quot;Remapped off of %s complete, remapping to on for %s.%.8s&quot;,</a>
+<a name="ln308">             op-&gt;target, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln309">    op-&gt;phase = st_phase_on;</a>
+<a name="ln310">    strcpy(op-&gt;action, &quot;on&quot;);</a>
+<a name="ln311"> </a>
+<a name="ln312">    /* Skip devices with automatic unfencing, because the cluster will handle it</a>
+<a name="ln313">     * when the node rejoins.</a>
+<a name="ln314">     */</a>
+<a name="ln315">    for (iter = op-&gt;automatic_list; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln316">        GListPtr match = g_list_find_custom(op-&gt;devices_list, iter-&gt;data,</a>
+<a name="ln317">                                            sort_strings);</a>
+<a name="ln318"> </a>
+<a name="ln319">        if (match) {</a>
+<a name="ln320">            op-&gt;devices_list = g_list_remove(op-&gt;devices_list, match-&gt;data);</a>
+<a name="ln321">        }</a>
+<a name="ln322">    }</a>
+<a name="ln323">    g_list_free_full(op-&gt;automatic_list, free);</a>
+<a name="ln324">    op-&gt;automatic_list = NULL;</a>
+<a name="ln325"> </a>
+<a name="ln326">    /* Rewind device list pointer */</a>
+<a name="ln327">    op-&gt;devices = op-&gt;devices_list;</a>
+<a name="ln328">}</a>
+<a name="ln329"> </a>
+<a name="ln330">/*!</a>
+<a name="ln331"> * \internal</a>
+<a name="ln332"> * \brief Reset a remapped reboot operation</a>
+<a name="ln333"> *</a>
+<a name="ln334"> * \param[in,out] op  Operation to reset</a>
+<a name="ln335"> */</a>
+<a name="ln336">static void</a>
+<a name="ln337">undo_op_remap(remote_fencing_op_t *op)</a>
+<a name="ln338">{</a>
+<a name="ln339">    if (op-&gt;phase &gt; 0) {</a>
+<a name="ln340">        crm_info(&quot;Undoing remap of reboot of %s for %s.%.8s&quot;,</a>
+<a name="ln341">                 op-&gt;target, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln342">        op-&gt;phase = st_phase_requested;</a>
+<a name="ln343">        strcpy(op-&gt;action, &quot;reboot&quot;);</a>
+<a name="ln344">    }</a>
+<a name="ln345">}</a>
+<a name="ln346"> </a>
+<a name="ln347">static xmlNode *</a>
+<a name="ln348">create_op_done_notify(remote_fencing_op_t * op, int rc)</a>
+<a name="ln349">{</a>
+<a name="ln350">    xmlNode *notify_data = create_xml_node(NULL, T_STONITH_NOTIFY_FENCE);</a>
+<a name="ln351"> </a>
+<a name="ln352">    crm_xml_add_int(notify_data, &quot;state&quot;, op-&gt;state);</a>
+<a name="ln353">    crm_xml_add_int(notify_data, F_STONITH_RC, rc);</a>
+<a name="ln354">    crm_xml_add(notify_data, F_STONITH_TARGET, op-&gt;target);</a>
+<a name="ln355">    crm_xml_add(notify_data, F_STONITH_ACTION, op-&gt;action);</a>
+<a name="ln356">    crm_xml_add(notify_data, F_STONITH_DELEGATE, op-&gt;delegate);</a>
+<a name="ln357">    crm_xml_add(notify_data, F_STONITH_REMOTE_OP_ID, op-&gt;id);</a>
+<a name="ln358">    crm_xml_add(notify_data, F_STONITH_ORIGIN, op-&gt;originator);</a>
+<a name="ln359">    crm_xml_add(notify_data, F_STONITH_CLIENTID, op-&gt;client_id);</a>
+<a name="ln360">    crm_xml_add(notify_data, F_STONITH_CLIENTNAME, op-&gt;client_name);</a>
+<a name="ln361"> </a>
+<a name="ln362">    return notify_data;</a>
+<a name="ln363">}</a>
+<a name="ln364"> </a>
+<a name="ln365">static void</a>
+<a name="ln366">bcast_result_to_peers(remote_fencing_op_t * op, int rc)</a>
+<a name="ln367">{</a>
+<a name="ln368">    static int count = 0;</a>
+<a name="ln369">    xmlNode *bcast = create_xml_node(NULL, T_STONITH_REPLY);</a>
+<a name="ln370">    xmlNode *notify_data = create_op_done_notify(op, rc);</a>
+<a name="ln371"> </a>
+<a name="ln372">    count++;</a>
+<a name="ln373">    crm_trace(&quot;Broadcasting result to peers&quot;);</a>
+<a name="ln374">    crm_xml_add(bcast, F_TYPE, T_STONITH_NOTIFY);</a>
+<a name="ln375">    crm_xml_add(bcast, F_SUBTYPE, &quot;broadcast&quot;);</a>
+<a name="ln376">    crm_xml_add(bcast, F_STONITH_OPERATION, T_STONITH_NOTIFY);</a>
+<a name="ln377">    crm_xml_add_int(bcast, &quot;count&quot;, count);</a>
+<a name="ln378">    add_message_xml(bcast, F_STONITH_CALLDATA, notify_data);</a>
+<a name="ln379">    send_cluster_message(NULL, crm_msg_stonith_ng, bcast, FALSE);</a>
+<a name="ln380">    free_xml(notify_data);</a>
+<a name="ln381">    free_xml(bcast);</a>
+<a name="ln382"> </a>
+<a name="ln383">    return;</a>
+<a name="ln384">}</a>
+<a name="ln385"> </a>
+<a name="ln386">static void</a>
+<a name="ln387">handle_local_reply_and_notify(remote_fencing_op_t * op, xmlNode * data, int rc)</a>
+<a name="ln388">{</a>
+<a name="ln389">    xmlNode *notify_data = NULL;</a>
+<a name="ln390">    xmlNode *reply = NULL;</a>
+<a name="ln391"> </a>
+<a name="ln392">    if (op-&gt;notify_sent == TRUE) {</a>
+<a name="ln393">        /* nothing to do */</a>
+<a name="ln394">        return;</a>
+<a name="ln395">    }</a>
+<a name="ln396"> </a>
+<a name="ln397">    /* Do notification with a clean data object */</a>
+<a name="ln398">    notify_data = create_op_done_notify(op, rc);</a>
+<a name="ln399">    crm_xml_add_int(data, &quot;state&quot;, op-&gt;state);</a>
+<a name="ln400">    crm_xml_add(data, F_STONITH_TARGET, op-&gt;target);</a>
+<a name="ln401">    crm_xml_add(data, F_STONITH_OPERATION, op-&gt;action);</a>
+<a name="ln402"> </a>
+<a name="ln403">    reply = stonith_construct_reply(op-&gt;request, NULL, data, rc);</a>
+<a name="ln404">    crm_xml_add(reply, F_STONITH_DELEGATE, op-&gt;delegate);</a>
+<a name="ln405"> </a>
+<a name="ln406">    /* Send fencing OP reply to local client that initiated fencing */</a>
+<a name="ln407">    do_local_reply(reply, op-&gt;client_id, op-&gt;call_options &amp; st_opt_sync_call, FALSE);</a>
+<a name="ln408"> </a>
+<a name="ln409">    /* bcast to all local clients that the fencing operation happend */</a>
+<a name="ln410">    do_stonith_notify(0, T_STONITH_NOTIFY_FENCE, rc, notify_data);</a>
+<a name="ln411"> </a>
+<a name="ln412">    /* mark this op as having notify's already sent */</a>
+<a name="ln413">    op-&gt;notify_sent = TRUE;</a>
+<a name="ln414">    free_xml(reply);</a>
+<a name="ln415">    free_xml(notify_data);</a>
+<a name="ln416">}</a>
+<a name="ln417"> </a>
+<a name="ln418">static void</a>
+<a name="ln419">handle_duplicates(remote_fencing_op_t * op, xmlNode * data, int rc)</a>
+<a name="ln420">{</a>
+<a name="ln421">    GListPtr iter = NULL;</a>
+<a name="ln422"> </a>
+<a name="ln423">    for (iter = op-&gt;duplicates; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln424">        remote_fencing_op_t *other = iter-&gt;data;</a>
+<a name="ln425"> </a>
+<a name="ln426">        if (other-&gt;state == st_duplicate) {</a>
+<a name="ln427">            /* Ie. it hasn't timed out already */</a>
+<a name="ln428">            other-&gt;state = op-&gt;state;</a>
+<a name="ln429">            crm_debug(&quot;Peforming duplicate notification for %s@%s.%.8s = %s&quot;, other-&gt;client_name,</a>
+<a name="ln430">                      other-&gt;originator, other-&gt;id, pcmk_strerror(rc));</a>
+<a name="ln431">            remote_op_done(other, data, rc, TRUE);</a>
+<a name="ln432"> </a>
+<a name="ln433">        } else {</a>
+<a name="ln434">            crm_err(&quot;Skipping duplicate notification for %s@%s - %d&quot;, other-&gt;client_name,</a>
+<a name="ln435">                    other-&gt;originator, other-&gt;state);</a>
+<a name="ln436">        }</a>
+<a name="ln437">    }</a>
+<a name="ln438">}</a>
+<a name="ln439"> </a>
+<a name="ln440">/*!</a>
+<a name="ln441"> * \internal</a>
+<a name="ln442"> * \brief Finalize a remote operation.</a>
+<a name="ln443"> *</a>
+<a name="ln444"> * \description This function has two code paths.</a>
+<a name="ln445"> *</a>
+<a name="ln446"> * Path 1. This node is the owner of the operation and needs</a>
+<a name="ln447"> *         to notify the cpg group via a broadcast as to the operation's</a>
+<a name="ln448"> *         results.</a>
+<a name="ln449"> *</a>
+<a name="ln450"> * Path 2. The cpg broadcast is received. All nodes notify their local</a>
+<a name="ln451"> *         stonith clients the operation results.</a>
+<a name="ln452"> *</a>
+<a name="ln453"> * So, The owner of the operation first notifies the cluster of the result,</a>
+<a name="ln454"> * and once that cpg notify is received back it notifies all the local clients.</a>
+<a name="ln455"> *</a>
+<a name="ln456"> * Nodes that are passive watchers of the operation will receive the</a>
+<a name="ln457"> * broadcast and only need to notify their local clients the operation finished.</a>
+<a name="ln458"> *</a>
+<a name="ln459"> * \param op, The fencing operation to finalize</a>
+<a name="ln460"> * \param data, The xml msg reply (if present) of the last delegated fencing</a>
+<a name="ln461"> *              operation.</a>
+<a name="ln462"> * \param dup, Is this operation a duplicate, if so treat it a little differently</a>
+<a name="ln463"> *             making sure the broadcast is not sent out.</a>
+<a name="ln464"> */</a>
+<a name="ln465">static void</a>
+<a name="ln466">remote_op_done(remote_fencing_op_t * op, xmlNode * data, int rc, int dup)</a>
+<a name="ln467">{</a>
+<a name="ln468">    int level = LOG_ERR;</a>
+<a name="ln469">    const char *subt = NULL;</a>
+<a name="ln470">    xmlNode *local_data = NULL;</a>
+<a name="ln471"> </a>
+<a name="ln472">    op-&gt;completed = time(NULL);</a>
+<a name="ln473">    clear_remote_op_timers(op);</a>
+<a name="ln474">    undo_op_remap(op);</a>
+<a name="ln475"> </a>
+<a name="ln476">    if (op-&gt;notify_sent == TRUE) {</a>
+<a name="ln477">        crm_err(&quot;Already sent notifications for '%s of %s by %s' (for=%s@%s.%.8s, state=%d): %s&quot;,</a>
+<a name="ln478">                op-&gt;action, op-&gt;target, op-&gt;delegate ? op-&gt;delegate : &quot;&lt;no-one&gt;&quot;,</a>
+<a name="ln479">                op-&gt;client_name, op-&gt;originator, op-&gt;id, op-&gt;state, pcmk_strerror(rc));</a>
+<a name="ln480">        goto remote_op_done_cleanup;</a>
+<a name="ln481">    }</a>
+<a name="ln482"> </a>
+<a name="ln483">    if (!op-&gt;delegate &amp;&amp; data &amp;&amp; rc != -ENODEV &amp;&amp; rc != -EHOSTUNREACH) {</a>
+<a name="ln484">        xmlNode *ndata = get_xpath_object(&quot;//@&quot; F_STONITH_DELEGATE, data, LOG_TRACE);</a>
+<a name="ln485">        if(ndata) {</a>
+<a name="ln486">            op-&gt;delegate = crm_element_value_copy(ndata, F_STONITH_DELEGATE);</a>
+<a name="ln487">        } else { </a>
+<a name="ln488">            op-&gt;delegate = crm_element_value_copy(data, F_ORIG);</a>
+<a name="ln489">        }</a>
+<a name="ln490">    }</a>
+<a name="ln491"> </a>
+<a name="ln492">    if (data == NULL) {</a>
+<a name="ln493">        data = create_xml_node(NULL, &quot;remote-op&quot;);</a>
+<a name="ln494">        local_data = data;</a>
+<a name="ln495">    }</a>
+<a name="ln496"> </a>
+<a name="ln497">    /* Tell everyone the operation is done, we will continue</a>
+<a name="ln498">     * with doing the local notifications once we receive</a>
+<a name="ln499">     * the broadcast back. */</a>
+<a name="ln500">    subt = crm_element_value(data, F_SUBTYPE);</a>
+<a name="ln501">    if (dup == FALSE &amp;&amp; safe_str_neq(subt, &quot;broadcast&quot;)) {</a>
+<a name="ln502">        /* Defer notification until the bcast message arrives */</a>
+<a name="ln503">        bcast_result_to_peers(op, rc);</a>
+<a name="ln504">        goto remote_op_done_cleanup;</a>
+<a name="ln505">    }</a>
+<a name="ln506"> </a>
+<a name="ln507">    if (rc == pcmk_ok || dup) {</a>
+<a name="ln508">        level = LOG_NOTICE;</a>
+<a name="ln509">    } else if (safe_str_neq(op-&gt;originator, stonith_our_uname)) {</a>
+<a name="ln510">        level = LOG_NOTICE;</a>
+<a name="ln511">    }</a>
+<a name="ln512"> </a>
+<a name="ln513">    do_crm_log(level,</a>
+<a name="ln514">               &quot;Operation %s of %s by %s for %s@%s.%.8s: %s&quot;,</a>
+<a name="ln515">               op-&gt;action, op-&gt;target, op-&gt;delegate ? op-&gt;delegate : &quot;&lt;no-one&gt;&quot;,</a>
+<a name="ln516">               op-&gt;client_name, op-&gt;originator, op-&gt;id, pcmk_strerror(rc));</a>
+<a name="ln517"> </a>
+<a name="ln518">    handle_local_reply_and_notify(op, data, rc);</a>
+<a name="ln519"> </a>
+<a name="ln520">    if (dup == FALSE) {</a>
+<a name="ln521">        handle_duplicates(op, data, rc);</a>
+<a name="ln522">    }</a>
+<a name="ln523"> </a>
+<a name="ln524">    /* Free non-essential parts of the record</a>
+<a name="ln525">     * Keep the record around so we can query the history</a>
+<a name="ln526">     */</a>
+<a name="ln527">    if (op-&gt;query_results) {</a>
+<a name="ln528">        g_list_free_full(op-&gt;query_results, free_remote_query);</a>
+<a name="ln529">        op-&gt;query_results = NULL;</a>
+<a name="ln530">    }</a>
+<a name="ln531"> </a>
+<a name="ln532">    if (op-&gt;request) {</a>
+<a name="ln533">        free_xml(op-&gt;request);</a>
+<a name="ln534">        op-&gt;request = NULL;</a>
+<a name="ln535">    }</a>
+<a name="ln536"> </a>
+<a name="ln537">  remote_op_done_cleanup:</a>
+<a name="ln538">    free_xml(local_data);</a>
+<a name="ln539">}</a>
+<a name="ln540"> </a>
+<a name="ln541">static gboolean</a>
+<a name="ln542">remote_op_watchdog_done(gpointer userdata)</a>
+<a name="ln543">{</a>
+<a name="ln544">    remote_fencing_op_t *op = userdata;</a>
+<a name="ln545"> </a>
+<a name="ln546">    op-&gt;op_timer_one = 0;</a>
+<a name="ln547"> </a>
+<a name="ln548">    crm_notice(&quot;Self-fencing (%s) by %s for %s.%8s assumed complete&quot;,</a>
+<a name="ln549">               op-&gt;action, op-&gt;target, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln550">    op-&gt;state = st_done;</a>
+<a name="ln551">    remote_op_done(op, NULL, pcmk_ok, FALSE);</a>
+<a name="ln552">    return FALSE;</a>
+<a name="ln553">}</a>
+<a name="ln554"> </a>
+<a name="ln555">static gboolean</a>
+<a name="ln556">remote_op_timeout_one(gpointer userdata)</a>
+<a name="ln557">{</a>
+<a name="ln558">    remote_fencing_op_t *op = userdata;</a>
+<a name="ln559"> </a>
+<a name="ln560">    op-&gt;op_timer_one = 0;</a>
+<a name="ln561"> </a>
+<a name="ln562">    crm_notice(&quot;Peer's fencing (%s) of %s for %s timed out&quot; CRM_XS &quot;id=%s&quot;,</a>
+<a name="ln563">               op-&gt;action, op-&gt;target, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln564">    call_remote_stonith(op, NULL);</a>
+<a name="ln565">    return FALSE;</a>
+<a name="ln566">}</a>
+<a name="ln567"> </a>
+<a name="ln568">static gboolean</a>
+<a name="ln569">remote_op_timeout(gpointer userdata)</a>
+<a name="ln570">{</a>
+<a name="ln571">    remote_fencing_op_t *op = userdata;</a>
+<a name="ln572"> </a>
+<a name="ln573">    op-&gt;op_timer_total = 0;</a>
+<a name="ln574"> </a>
+<a name="ln575">    if (op-&gt;state == st_done) {</a>
+<a name="ln576">        crm_debug(&quot;Action %s (%s) for %s (%s) already completed&quot;,</a>
+<a name="ln577">                  op-&gt;action, op-&gt;id, op-&gt;target, op-&gt;client_name);</a>
+<a name="ln578">        return FALSE;</a>
+<a name="ln579">    }</a>
+<a name="ln580"> </a>
+<a name="ln581">    crm_debug(&quot;Action %s (%s) for %s (%s) timed out&quot;,</a>
+<a name="ln582">              op-&gt;action, op-&gt;id, op-&gt;target, op-&gt;client_name);</a>
+<a name="ln583"> </a>
+<a name="ln584">    if (op-&gt;phase == st_phase_on) {</a>
+<a name="ln585">        /* A remapped reboot operation timed out in the &quot;on&quot; phase, but the</a>
+<a name="ln586">         * &quot;off&quot; phase completed successfully, so quit trying any further</a>
+<a name="ln587">         * devices, and return success.</a>
+<a name="ln588">         */</a>
+<a name="ln589">        remote_op_done(op, NULL, pcmk_ok, FALSE);</a>
+<a name="ln590">        return FALSE;</a>
+<a name="ln591">    }</a>
+<a name="ln592"> </a>
+<a name="ln593">    op-&gt;state = st_failed;</a>
+<a name="ln594"> </a>
+<a name="ln595">    remote_op_done(op, NULL, -ETIME, FALSE);</a>
+<a name="ln596"> </a>
+<a name="ln597">    return FALSE;</a>
+<a name="ln598">}</a>
+<a name="ln599"> </a>
+<a name="ln600">static gboolean</a>
+<a name="ln601">remote_op_query_timeout(gpointer data)</a>
+<a name="ln602">{</a>
+<a name="ln603">    remote_fencing_op_t *op = data;</a>
+<a name="ln604"> </a>
+<a name="ln605">    op-&gt;query_timer = 0;</a>
+<a name="ln606">    if (op-&gt;state == st_done) {</a>
+<a name="ln607">        crm_debug(&quot;Operation %s for %s already completed&quot;, op-&gt;id, op-&gt;target);</a>
+<a name="ln608">    } else if (op-&gt;state == st_exec) {</a>
+<a name="ln609">        crm_debug(&quot;Operation %s for %s already in progress&quot;, op-&gt;id, op-&gt;target);</a>
+<a name="ln610">    } else if (op-&gt;query_results) {</a>
+<a name="ln611">        crm_debug(&quot;Query %s for %s complete: %d&quot;, op-&gt;id, op-&gt;target, op-&gt;state);</a>
+<a name="ln612">        call_remote_stonith(op, NULL);</a>
+<a name="ln613">    } else {</a>
+<a name="ln614">        crm_debug(&quot;Query %s for %s timed out: %d&quot;, op-&gt;id, op-&gt;target, op-&gt;state);</a>
+<a name="ln615">        if (op-&gt;op_timer_total) {</a>
+<a name="ln616">            g_source_remove(op-&gt;op_timer_total);</a>
+<a name="ln617">            op-&gt;op_timer_total = 0;</a>
+<a name="ln618">        }</a>
+<a name="ln619">        remote_op_timeout(op);</a>
+<a name="ln620">    }</a>
+<a name="ln621"> </a>
+<a name="ln622">    return FALSE;</a>
+<a name="ln623">}</a>
+<a name="ln624"> </a>
+<a name="ln625">static gboolean</a>
+<a name="ln626">topology_is_empty(stonith_topology_t *tp)</a>
+<a name="ln627">{</a>
+<a name="ln628">    int i;</a>
+<a name="ln629"> </a>
+<a name="ln630">    if (tp == NULL) {</a>
+<a name="ln631">        return TRUE;</a>
+<a name="ln632">    }</a>
+<a name="ln633"> </a>
+<a name="ln634">    for (i = 0; i &lt; ST_LEVEL_MAX; i++) {</a>
+<a name="ln635">        if (tp-&gt;levels[i] != NULL) {</a>
+<a name="ln636">            return FALSE;</a>
+<a name="ln637">        }</a>
+<a name="ln638">    }</a>
+<a name="ln639">    return TRUE;</a>
+<a name="ln640">}</a>
+<a name="ln641"> </a>
+<a name="ln642">/*!</a>
+<a name="ln643"> * \internal</a>
+<a name="ln644"> * \brief Add a device to an operation's automatic unfencing list</a>
+<a name="ln645"> *</a>
+<a name="ln646"> * \param[in,out] op      Operation to modify</a>
+<a name="ln647"> * \param[in]     device  Device ID to add</a>
+<a name="ln648"> */</a>
+<a name="ln649">static void</a>
+<a name="ln650">add_required_device(remote_fencing_op_t *op, const char *device)</a>
+<a name="ln651">{</a>
+<a name="ln652">    GListPtr match  = g_list_find_custom(op-&gt;automatic_list, device,</a>
+<a name="ln653">                                         sort_strings);</a>
+<a name="ln654"> </a>
+<a name="ln655">    if (!match) {</a>
+<a name="ln656">        op-&gt;automatic_list = g_list_prepend(op-&gt;automatic_list, strdup(device));</a>
+<a name="ln657">    }</a>
+<a name="ln658">}</a>
+<a name="ln659"> </a>
+<a name="ln660">/*!</a>
+<a name="ln661"> * \internal</a>
+<a name="ln662"> * \brief Remove a device from the automatic unfencing list</a>
+<a name="ln663"> *</a>
+<a name="ln664"> * \param[in,out] op      Operation to modify</a>
+<a name="ln665"> * \param[in]     device  Device ID to remove</a>
+<a name="ln666"> */</a>
+<a name="ln667">static void</a>
+<a name="ln668">remove_required_device(remote_fencing_op_t *op, const char *device)</a>
+<a name="ln669">{</a>
+<a name="ln670">    GListPtr match = g_list_find_custom(op-&gt;automatic_list, device,</a>
+<a name="ln671">                                        sort_strings);</a>
+<a name="ln672"> </a>
+<a name="ln673">    if (match) {</a>
+<a name="ln674">        op-&gt;automatic_list = g_list_remove(op-&gt;automatic_list, match-&gt;data);</a>
+<a name="ln675">    }</a>
+<a name="ln676">}</a>
+<a name="ln677"> </a>
+<a name="ln678">/* deep copy the device list */</a>
+<a name="ln679">static void</a>
+<a name="ln680">set_op_device_list(remote_fencing_op_t * op, GListPtr devices)</a>
+<a name="ln681">{</a>
+<a name="ln682">    GListPtr lpc = NULL;</a>
+<a name="ln683"> </a>
+<a name="ln684">    if (op-&gt;devices_list) {</a>
+<a name="ln685">        g_list_free_full(op-&gt;devices_list, free);</a>
+<a name="ln686">        op-&gt;devices_list = NULL;</a>
+<a name="ln687">    }</a>
+<a name="ln688">    for (lpc = devices; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln689">        op-&gt;devices_list = g_list_append(op-&gt;devices_list, strdup(lpc-&gt;data));</a>
+<a name="ln690">    }</a>
+<a name="ln691">    op-&gt;devices = op-&gt;devices_list;</a>
+<a name="ln692">}</a>
+<a name="ln693"> </a>
+<a name="ln694">/*!</a>
+<a name="ln695"> * \internal</a>
+<a name="ln696"> * \brief Check whether a node matches a topology target</a>
+<a name="ln697"> *</a>
+<a name="ln698"> * \param[in] tp    Topology table entry to check</a>
+<a name="ln699"> * \param[in] node  Name of node to check</a>
+<a name="ln700"> *</a>
+<a name="ln701"> * \return TRUE if node matches topology target</a>
+<a name="ln702"> */</a>
+<a name="ln703">static gboolean</a>
+<a name="ln704">topology_matches(const stonith_topology_t *tp, const char *node)</a>
+<a name="ln705">{</a>
+<a name="ln706">    regex_t r_patt;</a>
+<a name="ln707"> </a>
+<a name="ln708">    CRM_CHECK(node &amp;&amp; tp &amp;&amp; tp-&gt;target, return FALSE);</a>
+<a name="ln709">    switch(tp-&gt;kind) {</a>
+<a name="ln710">        case 2:</a>
+<a name="ln711">            /* This level targets by attribute, so tp-&gt;target is a NAME=VALUE pair</a>
+<a name="ln712">             * of a permanent attribute applied to targeted nodes. The test below</a>
+<a name="ln713">             * relies on the locally cached copy of the CIB, so if fencing needs to</a>
+<a name="ln714">             * be done before the initial CIB is received or after a malformed CIB</a>
+<a name="ln715">             * is received, then the topology will be unable to be used.</a>
+<a name="ln716">             */</a>
+<a name="ln717">            if (node_has_attr(node, tp-&gt;target_attribute, tp-&gt;target_value)) {</a>
+<a name="ln718">                crm_notice(&quot;Matched %s with %s by attribute&quot;, node, tp-&gt;target);</a>
+<a name="ln719">                return TRUE;</a>
+<a name="ln720">            }</a>
+<a name="ln721">            break;</a>
+<a name="ln722">        case 1:</a>
+<a name="ln723">            /* This level targets by name, so tp-&gt;target is a regular expression</a>
+<a name="ln724">             * matching names of nodes to be targeted.</a>
+<a name="ln725">             */</a>
+<a name="ln726"> </a>
+<a name="ln727">            if (regcomp(&amp;r_patt, tp-&gt;target_pattern, REG_EXTENDED)) {</a>
+<a name="ln728">                crm_info(&quot;Bad regex '%s' for fencing level&quot;, tp-&gt;target);</a>
+<a name="ln729">            } else {</a>
+<a name="ln730">                int status = regexec(&amp;r_patt, node, 0, NULL, 0);</a>
+<a name="ln731"> </a>
+<a name="ln732">                regfree(&amp;r_patt);</a>
+<a name="ln733">                if (status == 0) {</a>
+<a name="ln734">                    crm_notice(&quot;Matched %s with %s by name&quot;, node, tp-&gt;target);</a>
+<a name="ln735">                    return TRUE;</a>
+<a name="ln736">                }</a>
+<a name="ln737">            }</a>
+<a name="ln738">            break;</a>
+<a name="ln739">        case 0:</a>
+<a name="ln740">            crm_trace(&quot;Testing %s against %s&quot;, node, tp-&gt;target);</a>
+<a name="ln741">            return safe_str_eq(tp-&gt;target, node);</a>
+<a name="ln742">    }</a>
+<a name="ln743">    crm_trace(&quot;No match for %s with %s&quot;, node, tp-&gt;target);</a>
+<a name="ln744">    return FALSE;</a>
+<a name="ln745">}</a>
+<a name="ln746"> </a>
+<a name="ln747">stonith_topology_t *</a>
+<a name="ln748">find_topology_for_host(const char *host) </a>
+<a name="ln749">{</a>
+<a name="ln750">    GHashTableIter tIter;</a>
+<a name="ln751">    stonith_topology_t *tp = g_hash_table_lookup(topology, host);</a>
+<a name="ln752"> </a>
+<a name="ln753">    if(tp != NULL) {</a>
+<a name="ln754">        crm_trace(&quot;Found %s for %s in %d entries&quot;, tp-&gt;target, host, g_hash_table_size(topology));</a>
+<a name="ln755">        return tp;</a>
+<a name="ln756">    }</a>
+<a name="ln757"> </a>
+<a name="ln758">    g_hash_table_iter_init(&amp;tIter, topology);</a>
+<a name="ln759">    while (g_hash_table_iter_next(&amp;tIter, NULL, (gpointer *) &amp; tp)) {</a>
+<a name="ln760">        if (topology_matches(tp, host)) {</a>
+<a name="ln761">            crm_trace(&quot;Found %s for %s in %d entries&quot;, tp-&gt;target, host, g_hash_table_size(topology));</a>
+<a name="ln762">            return tp;</a>
+<a name="ln763">        }</a>
+<a name="ln764">    }</a>
+<a name="ln765"> </a>
+<a name="ln766">    crm_trace(&quot;No matches for %s in %d topology entries&quot;, host, g_hash_table_size(topology));</a>
+<a name="ln767">    return NULL;</a>
+<a name="ln768">}</a>
+<a name="ln769"> </a>
+<a name="ln770">/*!</a>
+<a name="ln771"> * \internal</a>
+<a name="ln772"> * \brief Set fencing operation's device list to target's next topology level</a>
+<a name="ln773"> *</a>
+<a name="ln774"> * \param[in,out] op  Remote fencing operation to modify</a>
+<a name="ln775"> *</a>
+<a name="ln776"> * \return pcmk_ok if successful, target was not specified (i.e. queries) or</a>
+<a name="ln777"> *         target has no topology, or -EINVAL if no more topology levels to try</a>
+<a name="ln778"> */</a>
+<a name="ln779">static int</a>
+<a name="ln780">stonith_topology_next(remote_fencing_op_t * op)</a>
+<a name="ln781">{</a>
+<a name="ln782">    stonith_topology_t *tp = NULL;</a>
+<a name="ln783"> </a>
+<a name="ln784">    if (op-&gt;target) {</a>
+<a name="ln785">        /* Queries don't have a target set */</a>
+<a name="ln786">        tp = find_topology_for_host(op-&gt;target);</a>
+<a name="ln787">    }</a>
+<a name="ln788">    if (topology_is_empty(tp)) {</a>
+<a name="ln789">        return pcmk_ok;</a>
+<a name="ln790">    }</a>
+<a name="ln791"> </a>
+<a name="ln792">    set_bit(op-&gt;call_options, st_opt_topology);</a>
+<a name="ln793"> </a>
+<a name="ln794">    /* This is a new level, so undo any remapping left over from previous */</a>
+<a name="ln795">    undo_op_remap(op);</a>
+<a name="ln796"> </a>
+<a name="ln797">    do {</a>
+<a name="ln798">        op-&gt;level++;</a>
+<a name="ln799"> </a>
+<a name="ln800">    } while (op-&gt;level &lt; ST_LEVEL_MAX &amp;&amp; tp-&gt;levels[op-&gt;level] == NULL);</a>
+<a name="ln801"> </a>
+<a name="ln802">    if (op-&gt;level &lt; ST_LEVEL_MAX) {</a>
+<a name="ln803">        crm_trace(&quot;Attempting fencing level %d for %s (%d devices) - %s@%s.%.8s&quot;,</a>
+<a name="ln804">                  op-&gt;level, op-&gt;target, g_list_length(tp-&gt;levels[op-&gt;level]),</a>
+<a name="ln805">                  op-&gt;client_name, op-&gt;originator, op-&gt;id);</a>
+<a name="ln806">        set_op_device_list(op, tp-&gt;levels[op-&gt;level]);</a>
+<a name="ln807"> </a>
+<a name="ln808">        if (g_list_next(op-&gt;devices_list) &amp;&amp; safe_str_eq(op-&gt;action, &quot;reboot&quot;)) {</a>
+<a name="ln809">            /* A reboot has been requested for a topology level with multiple</a>
+<a name="ln810">             * devices. Instead of rebooting the devices sequentially, we will</a>
+<a name="ln811">             * turn them all off, then turn them all on again. (Think about</a>
+<a name="ln812">             * switched power outlets for redundant power supplies.)</a>
+<a name="ln813">             */</a>
+<a name="ln814">            op_phase_off(op);</a>
+<a name="ln815">        }</a>
+<a name="ln816">        return pcmk_ok;</a>
+<a name="ln817">    }</a>
+<a name="ln818"> </a>
+<a name="ln819">    crm_notice(&quot;All fencing options to fence %s for %s@%s.%.8s failed&quot;,</a>
+<a name="ln820">               op-&gt;target, op-&gt;client_name, op-&gt;originator, op-&gt;id);</a>
+<a name="ln821">    return -EINVAL;</a>
+<a name="ln822">}</a>
+<a name="ln823"> </a>
+<a name="ln824">/*!</a>
+<a name="ln825"> * \brief Check to see if this operation is a duplicate of another in flight</a>
+<a name="ln826"> * operation. If so merge this operation into the inflight operation, and mark</a>
+<a name="ln827"> * it as a duplicate.</a>
+<a name="ln828"> */</a>
+<a name="ln829">static void</a>
+<a name="ln830">merge_duplicates(remote_fencing_op_t * op)</a>
+<a name="ln831">{</a>
+<a name="ln832">    GHashTableIter iter;</a>
+<a name="ln833">    remote_fencing_op_t *other = NULL;</a>
+<a name="ln834"> </a>
+<a name="ln835">    time_t now = time(NULL);</a>
+<a name="ln836"> </a>
+<a name="ln837">    g_hash_table_iter_init(&amp;iter, remote_op_list);</a>
+<a name="ln838">    while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;other)) {</a>
+<a name="ln839">        crm_node_t *peer = NULL;</a>
+<a name="ln840">        const char *other_action = op_requested_action(other);</a>
+<a name="ln841"> </a>
+<a name="ln842">        if (other-&gt;state &gt; st_exec) {</a>
+<a name="ln843">            /* Must be in-progress */</a>
+<a name="ln844">            continue;</a>
+<a name="ln845">        } else if (safe_str_neq(op-&gt;target, other-&gt;target)) {</a>
+<a name="ln846">            /* Must be for the same node */</a>
+<a name="ln847">            continue;</a>
+<a name="ln848">        } else if (safe_str_neq(op-&gt;action, other_action)) {</a>
+<a name="ln849">            crm_trace(&quot;Must be for the same action: %s vs. %s&quot;,</a>
+<a name="ln850">                      op-&gt;action, other_action);</a>
+<a name="ln851">            continue;</a>
+<a name="ln852">        } else if (safe_str_eq(op-&gt;client_name, other-&gt;client_name)) {</a>
+<a name="ln853">            crm_trace(&quot;Must be for different clients: %s&quot;, op-&gt;client_name);</a>
+<a name="ln854">            continue;</a>
+<a name="ln855">        } else if (safe_str_eq(other-&gt;target, other-&gt;originator)) {</a>
+<a name="ln856">            crm_trace(&quot;Can't be a suicide operation: %s&quot;, other-&gt;target);</a>
+<a name="ln857">            continue;</a>
+<a name="ln858">        }</a>
+<a name="ln859"> </a>
+<a name="ln860">        peer = crm_get_peer(0, other-&gt;originator);</a>
+<a name="ln861">        if(fencing_peer_active(peer) == FALSE) {</a>
+<a name="ln862">            crm_notice(&quot;Failing stonith action %s for node %s originating from %s@%s.%.8s: Originator is dead&quot;,</a>
+<a name="ln863">                       other-&gt;action, other-&gt;target, other-&gt;client_name, other-&gt;originator, other-&gt;id);</a>
+<a name="ln864">            other-&gt;state = st_failed;</a>
+<a name="ln865">            continue;</a>
+<a name="ln866"> </a>
+<a name="ln867">        } else if(other-&gt;total_timeout &gt; 0 &amp;&amp; now &gt; (other-&gt;total_timeout + other-&gt;created)) {</a>
+<a name="ln868">            crm_info(&quot;Stonith action %s for node %s originating from %s@%s.%.8s is too old: %d vs. %d + %d&quot;,</a>
+<a name="ln869">                     other-&gt;action, other-&gt;target, other-&gt;client_name, other-&gt;originator, other-&gt;id,</a>
+<a name="ln870">                     now, other-&gt;created, other-&gt;total_timeout);</a>
+<a name="ln871">            continue;</a>
+<a name="ln872">        }</a>
+<a name="ln873"> </a>
+<a name="ln874">        /* There is another in-flight request to fence the same host</a>
+<a name="ln875">         * Piggyback on that instead.  If it fails, so do we.</a>
+<a name="ln876">         */</a>
+<a name="ln877">        other-&gt;duplicates = g_list_append(other-&gt;duplicates, op);</a>
+<a name="ln878">        if (other-&gt;total_timeout == 0) {</a>
+<a name="ln879">            crm_trace(&quot;Making a best-guess as to the timeout used&quot;);</a>
+<a name="ln880">            other-&gt;total_timeout = op-&gt;total_timeout =</a>
+<a name="ln881">                TIMEOUT_MULTIPLY_FACTOR * get_op_total_timeout(op, NULL);</a>
+<a name="ln882">        }</a>
+<a name="ln883">        crm_notice</a>
+<a name="ln884">            (&quot;Merging stonith action %s for node %s originating from client %s.%.8s with identical request from %s@%s.%.8s (%ds)&quot;,</a>
+<a name="ln885">             op-&gt;action, op-&gt;target, op-&gt;client_name, op-&gt;id, other-&gt;client_name, other-&gt;originator,</a>
+<a name="ln886">             other-&gt;id, other-&gt;total_timeout);</a>
+<a name="ln887">        report_timeout_period(op, other-&gt;total_timeout);</a>
+<a name="ln888">        op-&gt;state = st_duplicate;</a>
+<a name="ln889">    }</a>
+<a name="ln890">}</a>
+<a name="ln891"> </a>
+<a name="ln892">static uint32_t fencing_active_peers(void)</a>
+<a name="ln893">{</a>
+<a name="ln894">    uint32_t count = 0;</a>
+<a name="ln895">    crm_node_t *entry;</a>
+<a name="ln896">    GHashTableIter gIter;</a>
+<a name="ln897"> </a>
+<a name="ln898">    g_hash_table_iter_init(&amp;gIter, crm_peer_cache);</a>
+<a name="ln899">    while (g_hash_table_iter_next(&amp;gIter, NULL, (void **)&amp;entry)) {</a>
+<a name="ln900">        if(fencing_peer_active(entry)) {</a>
+<a name="ln901">            count++;</a>
+<a name="ln902">        }</a>
+<a name="ln903">    }</a>
+<a name="ln904">    return count;</a>
+<a name="ln905">}</a>
+<a name="ln906"> </a>
+<a name="ln907">int</a>
+<a name="ln908">stonith_manual_ack(xmlNode * msg, remote_fencing_op_t * op)</a>
+<a name="ln909">{</a>
+<a name="ln910">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, msg, LOG_ERR);</a>
+<a name="ln911"> </a>
+<a name="ln912">    op-&gt;state = st_done;</a>
+<a name="ln913">    op-&gt;completed = time(NULL);</a>
+<a name="ln914">    op-&gt;delegate = strdup(&quot;a human&quot;);</a>
+<a name="ln915"> </a>
+<a name="ln916">    crm_notice(&quot;Injecting manual confirmation that %s is safely off/down&quot;,</a>
+<a name="ln917">               crm_element_value(dev, F_STONITH_TARGET));</a>
+<a name="ln918"> </a>
+<a name="ln919">    remote_op_done(op, msg, pcmk_ok, FALSE);</a>
+<a name="ln920"> </a>
+<a name="ln921">    /* Replies are sent via done_cb-&gt;stonith_send_async_reply()-&gt;do_local_reply() */</a>
+<a name="ln922">    return -EINPROGRESS;</a>
+<a name="ln923">}</a>
+<a name="ln924"> </a>
+<a name="ln925">char *</a>
+<a name="ln926">stonith_get_peer_name(unsigned int nodeid)</a>
+<a name="ln927">{</a>
+<a name="ln928">    crm_node_t *node = crm_find_peer(nodeid, NULL);</a>
+<a name="ln929">    char *nodename = NULL;</a>
+<a name="ln930"> </a>
+<a name="ln931">    if (node &amp;&amp; node-&gt;uname) {</a>
+<a name="ln932">        return strdup(node-&gt;uname);</a>
+<a name="ln933"> </a>
+<a name="ln934">    } else if ((nodename = get_node_name(nodeid))) {</a>
+<a name="ln935">        return nodename;</a>
+<a name="ln936"> </a>
+<a name="ln937">    } else {</a>
+<a name="ln938">        const char *last_known_name = g_hash_table_lookup(known_peer_names, GUINT_TO_POINTER(nodeid));</a>
+<a name="ln939"> </a>
+<a name="ln940">        if (last_known_name) {</a>
+<a name="ln941">            crm_debug(&quot;Use the last known name %s for nodeid %u&quot;, last_known_name, nodeid);</a>
+<a name="ln942">            return strdup(last_known_name);</a>
+<a name="ln943">        }</a>
+<a name="ln944">    }</a>
+<a name="ln945"> </a>
+<a name="ln946">    return NULL;</a>
+<a name="ln947">}</a>
+<a name="ln948"> </a>
+<a name="ln949">/*!</a>
+<a name="ln950"> * \internal</a>
+<a name="ln951"> * \brief Create a new remote stonith operation</a>
+<a name="ln952"> *</a>
+<a name="ln953"> * \param[in] client   ID of local stonith client that initiated the operation</a>
+<a name="ln954"> * \param[in] request  The request from the client that started the operation</a>
+<a name="ln955"> * \param[in] peer     TRUE if this operation is owned by another stonith peer</a>
+<a name="ln956"> *                     (an operation owned by one peer is stored on all peers,</a>
+<a name="ln957"> *                     but only the owner executes it; all nodes get the results</a>
+<a name="ln958"> *                     once the owner finishes execution)</a>
+<a name="ln959"> */</a>
+<a name="ln960">void *</a>
+<a name="ln961">create_remote_stonith_op(const char *client, xmlNode * request, gboolean peer)</a>
+<a name="ln962">{</a>
+<a name="ln963">    remote_fencing_op_t *op = NULL;</a>
+<a name="ln964">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, request, LOG_TRACE);</a>
+<a name="ln965">    int call_options = 0;</a>
+<a name="ln966"> </a>
+<a name="ln967">    if (remote_op_list == NULL) {</a>
+<a name="ln968">        remote_op_list = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, free_remote_op);</a>
+<a name="ln969">    }</a>
+<a name="ln970"> </a>
+<a name="ln971">    /* If this operation is owned by another node, check to make</a>
+<a name="ln972">     * sure we haven't already created this operation. */</a>
+<a name="ln973">    if (peer &amp;&amp; dev) {</a>
+<a name="ln974">        const char *op_id = crm_element_value(dev, F_STONITH_REMOTE_OP_ID);</a>
+<a name="ln975"> </a>
+<a name="ln976">        CRM_CHECK(op_id != NULL, return NULL);</a>
+<a name="ln977"> </a>
+<a name="ln978">        op = g_hash_table_lookup(remote_op_list, op_id);</a>
+<a name="ln979">        if (op) {</a>
+<a name="ln980">            crm_debug(&quot;%s already exists&quot;, op_id);</a>
+<a name="ln981">            return op;</a>
+<a name="ln982">        }</a>
+<a name="ln983">    }</a>
+<a name="ln984"> </a>
+<a name="ln985">    op = calloc(1, sizeof(remote_fencing_op_t));</a>
+<a name="ln986"> </a>
+<a name="ln987">    crm_element_value_int(request, F_STONITH_TIMEOUT, &amp;(op-&gt;base_timeout));</a>
+<a name="ln988"> </a>
+<a name="ln989">    if (peer &amp;&amp; dev) {</a>
+<a name="ln990">        op-&gt;id = crm_element_value_copy(dev, F_STONITH_REMOTE_OP_ID);</a>
+<a name="ln991">    } else {</a>
+<a name="ln992">        op-&gt;id = crm_generate_uuid();</a>
+<a name="ln993">    }</a>
+<a name="ln994"> </a>
+<a name="ln995">    g_hash_table_replace(remote_op_list, op-&gt;id, op);</a>
+<a name="ln996">    CRM_LOG_ASSERT(g_hash_table_lookup(remote_op_list, op-&gt;id) != NULL);</a>
+<a name="ln997">    crm_trace(&quot;Created %s&quot;, op-&gt;id);</a>
+<a name="ln998"> </a>
+<a name="ln999">    op-&gt;state = st_query;</a>
+<a name="ln1000">    op-&gt;replies_expected = fencing_active_peers();</a>
+<a name="ln1001">    op-&gt;action = crm_element_value_copy(dev, F_STONITH_ACTION);</a>
+<a name="ln1002">    op-&gt;originator = crm_element_value_copy(dev, F_STONITH_ORIGIN);</a>
+<a name="ln1003">    op-&gt;delegate = crm_element_value_copy(dev, F_STONITH_DELEGATE); /* May not be set */</a>
+<a name="ln1004">    op-&gt;created = time(NULL);</a>
+<a name="ln1005"> </a>
+<a name="ln1006">    if (op-&gt;originator == NULL) {</a>
+<a name="ln1007">        /* Local or relayed request */</a>
+<a name="ln1008">        op-&gt;originator = strdup(stonith_our_uname);</a>
+<a name="ln1009">    }</a>
+<a name="ln1010"> </a>
+<a name="ln1011">    CRM_LOG_ASSERT(client != NULL);</a>
+<a name="ln1012">    if (client) {</a>
+<a name="ln1013">        op-&gt;client_id = strdup(client);</a>
+<a name="ln1014">    }</a>
+<a name="ln1015"> </a>
+<a name="ln1016">    op-&gt;client_name = crm_element_value_copy(request, F_STONITH_CLIENTNAME);</a>
+<a name="ln1017"> </a>
+<a name="ln1018">    op-&gt;target = crm_element_value_copy(dev, F_STONITH_TARGET);</a>
+<a name="ln1019">    op-&gt;request = copy_xml(request);    /* TODO: Figure out how to avoid this */</a>
+<a name="ln1020">    crm_element_value_int(request, F_STONITH_CALLOPTS, &amp;call_options);</a>
+<a name="ln1021">    op-&gt;call_options = call_options;</a>
+<a name="ln1022"> </a>
+<a name="ln1023">    crm_element_value_int(request, F_STONITH_CALLID, &amp;(op-&gt;client_callid));</a>
+<a name="ln1024"> </a>
+<a name="ln1025">    crm_trace(&quot;%s new stonith op: %s - %s of %s for %s&quot;,</a>
+<a name="ln1026">              (peer</a>
+<a name="ln1027">               &amp;&amp; dev) ? &quot;Recorded&quot; : &quot;Generated&quot;, op-&gt;id, op-&gt;action, op-&gt;target, op-&gt;client_name);</a>
+<a name="ln1028"> </a>
+<a name="ln1029">    if (op-&gt;call_options &amp; st_opt_cs_nodeid) {</a>
+<a name="ln1030">        int nodeid = crm_atoi(op-&gt;target, NULL);</a>
+<a name="ln1031">        char *nodename = stonith_get_peer_name(nodeid);</a>
+<a name="ln1032"> </a>
+<a name="ln1033">        /* Ensure the conversion only happens once */</a>
+<a name="ln1034">        op-&gt;call_options &amp;= ~st_opt_cs_nodeid;</a>
+<a name="ln1035"> </a>
+<a name="ln1036">        if (nodename) {</a>
+<a name="ln1037">            free(op-&gt;target);</a>
+<a name="ln1038">            op-&gt;target = nodename;</a>
+<a name="ln1039"> </a>
+<a name="ln1040">        } else {</a>
+<a name="ln1041">            crm_warn(&quot;Could not expand nodeid '%s' into a host name&quot;, op-&gt;target);</a>
+<a name="ln1042">        }</a>
+<a name="ln1043">    }</a>
+<a name="ln1044"> </a>
+<a name="ln1045">    /* check to see if this is a duplicate operation of another in-flight operation */</a>
+<a name="ln1046">    merge_duplicates(op);</a>
+<a name="ln1047"> </a>
+<a name="ln1048">    return op;</a>
+<a name="ln1049">}</a>
+<a name="ln1050"> </a>
+<a name="ln1051">remote_fencing_op_t *</a>
+<a name="ln1052">initiate_remote_stonith_op(crm_client_t * client, xmlNode * request, gboolean manual_ack)</a>
+<a name="ln1053">{</a>
+<a name="ln1054">    int query_timeout = 0;</a>
+<a name="ln1055">    xmlNode *query = NULL;</a>
+<a name="ln1056">    const char *client_id = NULL;</a>
+<a name="ln1057">    remote_fencing_op_t *op = NULL;</a>
+<a name="ln1058"> </a>
+<a name="ln1059">    if (client) {</a>
+<a name="ln1060">        client_id = client-&gt;id;</a>
+<a name="ln1061">    } else {</a>
+<a name="ln1062">        client_id = crm_element_value(request, F_STONITH_CLIENTID);</a>
+<a name="ln1063">    }</a>
+<a name="ln1064"> </a>
+<a name="ln1065">    CRM_LOG_ASSERT(client_id != NULL);</a>
+<a name="ln1066">    op = create_remote_stonith_op(client_id, request, FALSE);</a>
+<a name="ln1067">    op-&gt;owner = TRUE;</a>
+<a name="ln1068">    if (manual_ack) {</a>
+<a name="ln1069">        crm_notice(&quot;Initiating manual confirmation for %s: %s&quot;,</a>
+<a name="ln1070">                   op-&gt;target, op-&gt;id);</a>
+<a name="ln1071">        return op;</a>
+<a name="ln1072">    }</a>
+<a name="ln1073"> </a>
+<a name="ln1074">    CRM_CHECK(op-&gt;action, return NULL);</a>
+<a name="ln1075"> </a>
+<a name="ln1076">    if (stonith_topology_next(op) != pcmk_ok) {</a>
+<a name="ln1077">        op-&gt;state = st_failed;</a>
+<a name="ln1078">    }</a>
+<a name="ln1079"> </a>
+<a name="ln1080">    switch (op-&gt;state) {</a>
+<a name="ln1081">        case st_failed:</a>
+<a name="ln1082">            crm_warn(&quot;Could not request peer fencing (%s) of %s &quot;</a>
+<a name="ln1083">                     CRM_XS &quot; id=%s&quot;, op-&gt;action, op-&gt;target, op-&gt;id);</a>
+<a name="ln1084">            remote_op_done(op, NULL, -EINVAL, FALSE);</a>
+<a name="ln1085">            return op;</a>
+<a name="ln1086"> </a>
+<a name="ln1087">        case st_duplicate:</a>
+<a name="ln1088">            crm_info(&quot;Requesting peer fencing (%s) of %s (duplicate) &quot;</a>
+<a name="ln1089">                     CRM_XS &quot; id=%s&quot;, op-&gt;action, op-&gt;target, op-&gt;id);</a>
+<a name="ln1090">            return op;</a>
+<a name="ln1091"> </a>
+<a name="ln1092">        default:</a>
+<a name="ln1093">            crm_notice(&quot;Requesting peer fencing (%s) of %s &quot;</a>
+<a name="ln1094">                       CRM_XS &quot; id=%s state=%d&quot;,</a>
+<a name="ln1095">                       op-&gt;action, op-&gt;target, op-&gt;id, op-&gt;state);</a>
+<a name="ln1096">    }</a>
+<a name="ln1097"> </a>
+<a name="ln1098">    query = stonith_create_op(op-&gt;client_callid, op-&gt;id, STONITH_OP_QUERY,</a>
+<a name="ln1099">                              NULL, op-&gt;call_options);</a>
+<a name="ln1100"> </a>
+<a name="ln1101">    crm_xml_add(query, F_STONITH_REMOTE_OP_ID, op-&gt;id);</a>
+<a name="ln1102">    crm_xml_add(query, F_STONITH_TARGET, op-&gt;target);</a>
+<a name="ln1103">    crm_xml_add(query, F_STONITH_ACTION, op_requested_action(op));</a>
+<a name="ln1104">    crm_xml_add(query, F_STONITH_ORIGIN, op-&gt;originator);</a>
+<a name="ln1105">    crm_xml_add(query, F_STONITH_CLIENTID, op-&gt;client_id);</a>
+<a name="ln1106">    crm_xml_add(query, F_STONITH_CLIENTNAME, op-&gt;client_name);</a>
+<a name="ln1107">    crm_xml_add_int(query, F_STONITH_TIMEOUT, op-&gt;base_timeout);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">    send_cluster_message(NULL, crm_msg_stonith_ng, query, FALSE);</a>
+<a name="ln1110">    free_xml(query);</a>
+<a name="ln1111"> </a>
+<a name="ln1112">    query_timeout = op-&gt;base_timeout * TIMEOUT_MULTIPLY_FACTOR;</a>
+<a name="ln1113">    op-&gt;query_timer = g_timeout_add((1000 * query_timeout), remote_op_query_timeout, op);</a>
+<a name="ln1114"> </a>
+<a name="ln1115">    return op;</a>
+<a name="ln1116">}</a>
+<a name="ln1117"> </a>
+<a name="ln1118">enum find_best_peer_options {</a>
+<a name="ln1119">    /*! Skip checking the target peer for capable fencing devices */</a>
+<a name="ln1120">    FIND_PEER_SKIP_TARGET = 0x0001,</a>
+<a name="ln1121">    /*! Only check the target peer for capable fencing devices */</a>
+<a name="ln1122">    FIND_PEER_TARGET_ONLY = 0x0002,</a>
+<a name="ln1123">    /*! Skip peers and devices that are not verified */</a>
+<a name="ln1124">    FIND_PEER_VERIFIED_ONLY = 0x0004,</a>
+<a name="ln1125">};</a>
+<a name="ln1126"> </a>
+<a name="ln1127">static st_query_result_t *</a>
+<a name="ln1128">find_best_peer(const char *device, remote_fencing_op_t * op, enum find_best_peer_options options)</a>
+<a name="ln1129">{</a>
+<a name="ln1130">    GListPtr iter = NULL;</a>
+<a name="ln1131">    gboolean verified_devices_only = (options &amp; FIND_PEER_VERIFIED_ONLY) ? TRUE : FALSE;</a>
+<a name="ln1132"> </a>
+<a name="ln1133">    if (!device &amp;&amp; is_set(op-&gt;call_options, st_opt_topology)) {</a>
+<a name="ln1134">        return NULL;</a>
+<a name="ln1135">    }</a>
+<a name="ln1136"> </a>
+<a name="ln1137">    for (iter = op-&gt;query_results; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln1138">        st_query_result_t *peer = iter-&gt;data;</a>
+<a name="ln1139"> </a>
+<a name="ln1140">        crm_trace(&quot;Testing result from %s for %s with %d devices: %d %x&quot;,</a>
+<a name="ln1141">                  peer-&gt;host, op-&gt;target, peer-&gt;ndevices, peer-&gt;tried, options);</a>
+<a name="ln1142">        if ((options &amp; FIND_PEER_SKIP_TARGET) &amp;&amp; safe_str_eq(peer-&gt;host, op-&gt;target)) {</a>
+<a name="ln1143">            continue;</a>
+<a name="ln1144">        }</a>
+<a name="ln1145">        if ((options &amp; FIND_PEER_TARGET_ONLY) &amp;&amp; safe_str_neq(peer-&gt;host, op-&gt;target)) {</a>
+<a name="ln1146">            continue;</a>
+<a name="ln1147">        }</a>
+<a name="ln1148"> </a>
+<a name="ln1149">        if (is_set(op-&gt;call_options, st_opt_topology)) {</a>
+<a name="ln1150"> </a>
+<a name="ln1151">            if (grab_peer_device(op, peer, device, verified_devices_only)) {</a>
+<a name="ln1152">                return peer;</a>
+<a name="ln1153">            }</a>
+<a name="ln1154"> </a>
+<a name="ln1155">        } else if ((peer-&gt;tried == FALSE)</a>
+<a name="ln1156">                   &amp;&amp; count_peer_devices(op, peer, verified_devices_only)) {</a>
+<a name="ln1157"> </a>
+<a name="ln1158">            /* No topology: Use the current best peer */</a>
+<a name="ln1159">            crm_trace(&quot;Simple fencing&quot;);</a>
+<a name="ln1160">            return peer;</a>
+<a name="ln1161">        }</a>
+<a name="ln1162">    }</a>
+<a name="ln1163"> </a>
+<a name="ln1164">    return NULL;</a>
+<a name="ln1165">}</a>
+<a name="ln1166"> </a>
+<a name="ln1167">static st_query_result_t *</a>
+<a name="ln1168">stonith_choose_peer(remote_fencing_op_t * op)</a>
+<a name="ln1169">{</a>
+<a name="ln1170">    const char *device = NULL;</a>
+<a name="ln1171">    st_query_result_t *peer = NULL;</a>
+<a name="ln1172">    uint32_t active = fencing_active_peers();</a>
+<a name="ln1173"> </a>
+<a name="ln1174">    do {</a>
+<a name="ln1175">        if (op-&gt;devices) {</a>
+<a name="ln1176">            device = op-&gt;devices-&gt;data;</a>
+<a name="ln1177">            crm_trace(&quot;Checking for someone to fence (%s) %s with %s&quot;,</a>
+<a name="ln1178">                      op-&gt;action, op-&gt;target, device);</a>
+<a name="ln1179">        } else {</a>
+<a name="ln1180">            crm_trace(&quot;Checking for someone to fence (%s) %s&quot;,</a>
+<a name="ln1181">                      op-&gt;action, op-&gt;target);</a>
+<a name="ln1182">        }</a>
+<a name="ln1183"> </a>
+<a name="ln1184">        /* Best choice is a peer other than the target with verified access */</a>
+<a name="ln1185">        peer = find_best_peer(device, op, FIND_PEER_SKIP_TARGET|FIND_PEER_VERIFIED_ONLY);</a>
+<a name="ln1186">        if (peer) {</a>
+<a name="ln1187">            crm_trace(&quot;Found verified peer %s for %s&quot;, peer-&gt;host, device?device:&quot;&lt;any&gt;&quot;);</a>
+<a name="ln1188">            return peer;</a>
+<a name="ln1189">        }</a>
+<a name="ln1190"> </a>
+<a name="ln1191">        if(op-&gt;query_timer != 0 &amp;&amp; op-&gt;replies &lt; QB_MIN(op-&gt;replies_expected, active)) {</a>
+<a name="ln1192">            crm_trace(&quot;Waiting before looking for unverified devices to fence %s&quot;, op-&gt;target);</a>
+<a name="ln1193">            return NULL;</a>
+<a name="ln1194">        }</a>
+<a name="ln1195"> </a>
+<a name="ln1196">        /* If no other peer has verified access, next best is unverified access */</a>
+<a name="ln1197">        peer = find_best_peer(device, op, FIND_PEER_SKIP_TARGET);</a>
+<a name="ln1198">        if (peer) {</a>
+<a name="ln1199">            crm_trace(&quot;Found best unverified peer %s&quot;, peer-&gt;host);</a>
+<a name="ln1200">            return peer;</a>
+<a name="ln1201">        }</a>
+<a name="ln1202"> </a>
+<a name="ln1203">        /* If no other peer can do it, last option is self-fencing</a>
+<a name="ln1204">         * (which is never allowed for the &quot;on&quot; phase of a remapped reboot)</a>
+<a name="ln1205">         */</a>
+<a name="ln1206">        if (op-&gt;phase != st_phase_on) {</a>
+<a name="ln1207">            peer = find_best_peer(device, op, FIND_PEER_TARGET_ONLY);</a>
+<a name="ln1208">            if (peer) {</a>
+<a name="ln1209">                crm_trace(&quot;%s will fence itself&quot;, peer-&gt;host);</a>
+<a name="ln1210">                return peer;</a>
+<a name="ln1211">            }</a>
+<a name="ln1212">        }</a>
+<a name="ln1213"> </a>
+<a name="ln1214">        /* Try the next fencing level if there is one (unless we're in the &quot;on&quot;</a>
+<a name="ln1215">         * phase of a remapped &quot;reboot&quot;, because we ignore errors in that case)</a>
+<a name="ln1216">         */</a>
+<a name="ln1217">    } while ((op-&gt;phase != st_phase_on)</a>
+<a name="ln1218">             &amp;&amp; is_set(op-&gt;call_options, st_opt_topology)</a>
+<a name="ln1219">             &amp;&amp; stonith_topology_next(op) == pcmk_ok);</a>
+<a name="ln1220"> </a>
+<a name="ln1221">    crm_notice(&quot;Couldn't find anyone to fence (%s) %s with %s&quot;,</a>
+<a name="ln1222">               op-&gt;action, op-&gt;target, (device? device : &quot;any device&quot;));</a>
+<a name="ln1223">    return NULL;</a>
+<a name="ln1224">}</a>
+<a name="ln1225"> </a>
+<a name="ln1226">static int</a>
+<a name="ln1227">get_device_timeout(const remote_fencing_op_t *op, const st_query_result_t *peer,</a>
+<a name="ln1228">                   const char *device)</a>
+<a name="ln1229">{</a>
+<a name="ln1230">    device_properties_t *props;</a>
+<a name="ln1231"> </a>
+<a name="ln1232">    if (!peer || !device) {</a>
+<a name="ln1233">        return op-&gt;base_timeout;</a>
+<a name="ln1234">    }</a>
+<a name="ln1235"> </a>
+<a name="ln1236">    props = g_hash_table_lookup(peer-&gt;devices, device);</a>
+<a name="ln1237">    if (!props) {</a>
+<a name="ln1238">        return op-&gt;base_timeout;</a>
+<a name="ln1239">    }</a>
+<a name="ln1240"> </a>
+<a name="ln1241">    return (props-&gt;custom_action_timeout[op-&gt;phase]?</a>
+<a name="ln1242">           props-&gt;custom_action_timeout[op-&gt;phase] : op-&gt;base_timeout)</a>
+<a name="ln1243">           + props-&gt;delay_max[op-&gt;phase];</a>
+<a name="ln1244">}</a>
+<a name="ln1245"> </a>
+<a name="ln1246">struct timeout_data {</a>
+<a name="ln1247">    const remote_fencing_op_t *op;</a>
+<a name="ln1248">    const st_query_result_t *peer;</a>
+<a name="ln1249">    int total_timeout;</a>
+<a name="ln1250">};</a>
+<a name="ln1251"> </a>
+<a name="ln1252">/*!</a>
+<a name="ln1253"> * \internal</a>
+<a name="ln1254"> * \brief Add timeout to a total if device has not been executed yet</a>
+<a name="ln1255"> *</a>
+<a name="ln1256"> * \param[in] key        GHashTable key (device ID)</a>
+<a name="ln1257"> * \param[in] value      GHashTable value (device properties)</a>
+<a name="ln1258"> * \param[in] user_data  Timeout data</a>
+<a name="ln1259"> */</a>
+<a name="ln1260">static void</a>
+<a name="ln1261">add_device_timeout(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln1262">{</a>
+<a name="ln1263">    const char *device_id = key;</a>
+<a name="ln1264">    device_properties_t *props = value;</a>
+<a name="ln1265">    struct timeout_data *timeout = user_data;</a>
+<a name="ln1266"> </a>
+<a name="ln1267">    if (!props-&gt;executed[timeout-&gt;op-&gt;phase]</a>
+<a name="ln1268">        &amp;&amp; !props-&gt;disallowed[timeout-&gt;op-&gt;phase]) {</a>
+<a name="ln1269">        timeout-&gt;total_timeout += get_device_timeout(timeout-&gt;op,</a>
+<a name="ln1270">                                                     timeout-&gt;peer, device_id);</a>
+<a name="ln1271">    }</a>
+<a name="ln1272">}</a>
+<a name="ln1273"> </a>
+<a name="ln1274">static int</a>
+<a name="ln1275">get_peer_timeout(const remote_fencing_op_t *op, const st_query_result_t *peer)</a>
+<a name="ln1276">{</a>
+<a name="ln1277">    struct timeout_data timeout;</a>
+<a name="ln1278"> </a>
+<a name="ln1279">    timeout.op = op;</a>
+<a name="ln1280">    timeout.peer = peer;</a>
+<a name="ln1281">    timeout.total_timeout = 0;</a>
+<a name="ln1282"> </a>
+<a name="ln1283">    g_hash_table_foreach(peer-&gt;devices, add_device_timeout, &amp;timeout);</a>
+<a name="ln1284"> </a>
+<a name="ln1285">    return (timeout.total_timeout? timeout.total_timeout : op-&gt;base_timeout);</a>
+<a name="ln1286">}</a>
+<a name="ln1287"> </a>
+<a name="ln1288">static int</a>
+<a name="ln1289">get_op_total_timeout(const remote_fencing_op_t *op,</a>
+<a name="ln1290">                     const st_query_result_t *chosen_peer)</a>
+<a name="ln1291">{</a>
+<a name="ln1292">    int total_timeout = 0;</a>
+<a name="ln1293">    stonith_topology_t *tp = find_topology_for_host(op-&gt;target);</a>
+<a name="ln1294"> </a>
+<a name="ln1295">    if (is_set(op-&gt;call_options, st_opt_topology) &amp;&amp; tp) {</a>
+<a name="ln1296">        int i;</a>
+<a name="ln1297">        GListPtr device_list = NULL;</a>
+<a name="ln1298">        GListPtr iter = NULL;</a>
+<a name="ln1299"> </a>
+<a name="ln1300">        /* Yep, this looks scary, nested loops all over the place.</a>
+<a name="ln1301">         * Here is what is going on.</a>
+<a name="ln1302">         * Loop1: Iterate through fencing levels.</a>
+<a name="ln1303">         * Loop2: If a fencing level has devices, loop through each device</a>
+<a name="ln1304">         * Loop3: For each device in a fencing level, see what peer owns it</a>
+<a name="ln1305">         *        and what that peer has reported the timeout is for the device.</a>
+<a name="ln1306">         */</a>
+<a name="ln1307">        for (i = 0; i &lt; ST_LEVEL_MAX; i++) {</a>
+<a name="ln1308">            if (!tp-&gt;levels[i]) {</a>
+<a name="ln1309">                continue;</a>
+<a name="ln1310">            }</a>
+<a name="ln1311">            for (device_list = tp-&gt;levels[i]; device_list; device_list = device_list-&gt;next) {</a>
+<a name="ln1312">                for (iter = op-&gt;query_results; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln1313">                    const st_query_result_t *peer = iter-&gt;data;</a>
+<a name="ln1314"> </a>
+<a name="ln1315">                    if (find_peer_device(op, peer, device_list-&gt;data)) {</a>
+<a name="ln1316">                        total_timeout += get_device_timeout(op, peer,</a>
+<a name="ln1317">                                                            device_list-&gt;data);</a>
+<a name="ln1318">                        break;</a>
+<a name="ln1319">                    }</a>
+<a name="ln1320">                }               /* End Loop3: match device with peer that owns device, find device's timeout period */</a>
+<a name="ln1321">            }                   /* End Loop2: iterate through devices at a specific level */</a>
+<a name="ln1322">        }                       /*End Loop1: iterate through fencing levels */</a>
+<a name="ln1323"> </a>
+<a name="ln1324">    } else if (chosen_peer) {</a>
+<a name="ln1325">        total_timeout = get_peer_timeout(op, chosen_peer);</a>
+<a name="ln1326">    } else {</a>
+<a name="ln1327">        total_timeout = op-&gt;base_timeout;</a>
+<a name="ln1328">    }</a>
+<a name="ln1329"> </a>
+<a name="ln1330">    return total_timeout ? total_timeout : op-&gt;base_timeout;</a>
+<a name="ln1331">}</a>
+<a name="ln1332"> </a>
+<a name="ln1333">static void</a>
+<a name="ln1334">report_timeout_period(remote_fencing_op_t * op, int op_timeout)</a>
+<a name="ln1335">{</a>
+<a name="ln1336">    GListPtr iter = NULL;</a>
+<a name="ln1337">    xmlNode *update = NULL;</a>
+<a name="ln1338">    const char *client_node = NULL;</a>
+<a name="ln1339">    const char *client_id = NULL;</a>
+<a name="ln1340">    const char *call_id = NULL;</a>
+<a name="ln1341"> </a>
+<a name="ln1342">    if (op-&gt;call_options &amp; st_opt_sync_call) {</a>
+<a name="ln1343">        /* There is no reason to report the timeout for a synchronous call. It</a>
+<a name="ln1344">         * is impossible to use the reported timeout to do anything when the client</a>
+<a name="ln1345">         * is blocking for the response.  This update is only important for</a>
+<a name="ln1346">         * async calls that require a callback to report the results in. */</a>
+<a name="ln1347">        return;</a>
+<a name="ln1348">    } else if (!op-&gt;request) {</a>
+<a name="ln1349">        return;</a>
+<a name="ln1350">    }</a>
+<a name="ln1351"> </a>
+<a name="ln1352">    crm_trace(&quot;Reporting timeout for %s.%.8s&quot;, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln1353">    client_node = crm_element_value(op-&gt;request, F_STONITH_CLIENTNODE);</a>
+<a name="ln1354">    call_id = crm_element_value(op-&gt;request, F_STONITH_CALLID);</a>
+<a name="ln1355">    client_id = crm_element_value(op-&gt;request, F_STONITH_CLIENTID);</a>
+<a name="ln1356">    if (!client_node || !call_id || !client_id) {</a>
+<a name="ln1357">        return;</a>
+<a name="ln1358">    }</a>
+<a name="ln1359"> </a>
+<a name="ln1360">    if (safe_str_eq(client_node, stonith_our_uname)) {</a>
+<a name="ln1361">        /* The client is connected to this node, send the update direclty to them */</a>
+<a name="ln1362">        do_stonith_async_timeout_update(client_id, call_id, op_timeout);</a>
+<a name="ln1363">        return;</a>
+<a name="ln1364">    }</a>
+<a name="ln1365"> </a>
+<a name="ln1366">    /* The client is connected to another node, relay this update to them */</a>
+<a name="ln1367">    update = stonith_create_op(op-&gt;client_callid, op-&gt;id, STONITH_OP_TIMEOUT_UPDATE, NULL, 0);</a>
+<a name="ln1368">    crm_xml_add(update, F_STONITH_REMOTE_OP_ID, op-&gt;id);</a>
+<a name="ln1369">    crm_xml_add(update, F_STONITH_CLIENTID, client_id);</a>
+<a name="ln1370">    crm_xml_add(update, F_STONITH_CALLID, call_id);</a>
+<a name="ln1371">    crm_xml_add_int(update, F_STONITH_TIMEOUT, op_timeout);</a>
+<a name="ln1372"> </a>
+<a name="ln1373">    send_cluster_message(crm_get_peer(0, client_node), crm_msg_stonith_ng, update, FALSE);</a>
+<a name="ln1374"> </a>
+<a name="ln1375">    free_xml(update);</a>
+<a name="ln1376"> </a>
+<a name="ln1377">    for (iter = op-&gt;duplicates; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln1378">        remote_fencing_op_t *dup = iter-&gt;data;</a>
+<a name="ln1379"> </a>
+<a name="ln1380">        crm_trace(&quot;Reporting timeout for duplicate %s.%.8s&quot;, dup-&gt;client_name, dup-&gt;id);</a>
+<a name="ln1381">        report_timeout_period(iter-&gt;data, op_timeout);</a>
+<a name="ln1382">    }</a>
+<a name="ln1383">}</a>
+<a name="ln1384"> </a>
+<a name="ln1385">/*!</a>
+<a name="ln1386"> * \internal</a>
+<a name="ln1387"> * \brief Advance an operation to the next device in its topology</a>
+<a name="ln1388"> *</a>
+<a name="ln1389"> * \param[in,out] op      Operation to advance</a>
+<a name="ln1390"> * \param[in]     device  ID of device just completed</a>
+<a name="ln1391"> * \param[in]     msg     XML reply that contained device result (if available)</a>
+<a name="ln1392"> * \param[in]     rc      Return code of device's execution</a>
+<a name="ln1393"> */</a>
+<a name="ln1394">static void</a>
+<a name="ln1395">advance_op_topology(remote_fencing_op_t *op, const char *device, xmlNode *msg,</a>
+<a name="ln1396">                    int rc)</a>
+<a name="ln1397">{</a>
+<a name="ln1398">    /* Advance to the next device at this topology level, if any */</a>
+<a name="ln1399">    if (op-&gt;devices) {</a>
+<a name="ln1400">        op-&gt;devices = op-&gt;devices-&gt;next;</a>
+<a name="ln1401">    }</a>
+<a name="ln1402"> </a>
+<a name="ln1403">    /* Handle automatic unfencing if an &quot;on&quot; action was requested */</a>
+<a name="ln1404">    if ((op-&gt;phase == st_phase_requested) &amp;&amp; safe_str_eq(op-&gt;action, &quot;on&quot;)) {</a>
+<a name="ln1405">        /* If the device we just executed was required, it's not anymore */</a>
+<a name="ln1406">        remove_required_device(op, device);</a>
+<a name="ln1407"> </a>
+<a name="ln1408">        /* If there are no more devices at this topology level, run through any</a>
+<a name="ln1409">         * remaining devices with automatic unfencing</a>
+<a name="ln1410">         */</a>
+<a name="ln1411">        if (op-&gt;devices == NULL) {</a>
+<a name="ln1412">            op-&gt;devices = op-&gt;automatic_list;</a>
+<a name="ln1413">        }</a>
+<a name="ln1414">    }</a>
+<a name="ln1415"> </a>
+<a name="ln1416">    if ((op-&gt;devices == NULL) &amp;&amp; (op-&gt;phase == st_phase_off)) {</a>
+<a name="ln1417">        /* We're done with this level and with required devices, but we had</a>
+<a name="ln1418">         * remapped &quot;reboot&quot; to &quot;off&quot;, so start over with &quot;on&quot;. If any devices</a>
+<a name="ln1419">         * need to be turned back on, op-&gt;devices will be non-NULL after this.</a>
+<a name="ln1420">         */</a>
+<a name="ln1421">        op_phase_on(op);</a>
+<a name="ln1422">    }</a>
+<a name="ln1423"> </a>
+<a name="ln1424">    if (op-&gt;devices) {</a>
+<a name="ln1425">        /* Necessary devices remain, so execute the next one */</a>
+<a name="ln1426">        crm_trace(&quot;Next for %s on behalf of %s@%s (rc was %d)&quot;,</a>
+<a name="ln1427">                  op-&gt;target, op-&gt;originator, op-&gt;client_name, rc);</a>
+<a name="ln1428">        call_remote_stonith(op, NULL);</a>
+<a name="ln1429">    } else {</a>
+<a name="ln1430">        /* We're done with all devices and phases, so finalize operation */</a>
+<a name="ln1431">        crm_trace(&quot;Marking complex fencing op for %s as complete&quot;, op-&gt;target);</a>
+<a name="ln1432">        op-&gt;state = st_done;</a>
+<a name="ln1433">        remote_op_done(op, msg, rc, FALSE);</a>
+<a name="ln1434">    }</a>
+<a name="ln1435">}</a>
+<a name="ln1436"> </a>
+<a name="ln1437">void</a>
+<a name="ln1438">call_remote_stonith(remote_fencing_op_t * op, st_query_result_t * peer)</a>
+<a name="ln1439">{</a>
+<a name="ln1440">    const char *device = NULL;</a>
+<a name="ln1441">    int timeout = op-&gt;base_timeout;</a>
+<a name="ln1442"> </a>
+<a name="ln1443">    crm_trace(&quot;State for %s.%.8s: %s %d&quot;, op-&gt;target, op-&gt;client_name, op-&gt;id, op-&gt;state);</a>
+<a name="ln1444">    if (peer == NULL &amp;&amp; !is_set(op-&gt;call_options, st_opt_topology)) {</a>
+<a name="ln1445">        peer = stonith_choose_peer(op);</a>
+<a name="ln1446">    }</a>
+<a name="ln1447"> </a>
+<a name="ln1448">    if (!op-&gt;op_timer_total) {</a>
+<a name="ln1449">        int total_timeout = get_op_total_timeout(op, peer);</a>
+<a name="ln1450"> </a>
+<a name="ln1451">        op-&gt;total_timeout = TIMEOUT_MULTIPLY_FACTOR * total_timeout;</a>
+<a name="ln1452">        op-&gt;op_timer_total = g_timeout_add(1000 * op-&gt;total_timeout, remote_op_timeout, op);</a>
+<a name="ln1453">        report_timeout_period(op, op-&gt;total_timeout);</a>
+<a name="ln1454">        crm_info(&quot;Total timeout set to %d for peer's fencing of %s for %s&quot;</a>
+<a name="ln1455">                 CRM_XS &quot;id=%s&quot;,</a>
+<a name="ln1456">                 total_timeout, op-&gt;target, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln1457">    }</a>
+<a name="ln1458"> </a>
+<a name="ln1459">    if (is_set(op-&gt;call_options, st_opt_topology) &amp;&amp; op-&gt;devices) {</a>
+<a name="ln1460">        /* Ignore any peer preference, they might not have the device we need */</a>
+<a name="ln1461">        /* When using topology, stonith_choose_peer() removes the device from</a>
+<a name="ln1462">         * further consideration, so be sure to calculate timeout beforehand */</a>
+<a name="ln1463">        peer = stonith_choose_peer(op);</a>
+<a name="ln1464"> </a>
+<a name="ln1465">        device = op-&gt;devices-&gt;data;</a>
+<a name="ln1466">        timeout = get_device_timeout(op, peer, device);</a>
+<a name="ln1467">    }</a>
+<a name="ln1468"> </a>
+<a name="ln1469">    if (peer) {</a>
+<a name="ln1470">        int timeout_one = 0;</a>
+<a name="ln1471">        xmlNode *remote_op = stonith_create_op(op-&gt;client_callid, op-&gt;id, STONITH_OP_FENCE, NULL, 0);</a>
+<a name="ln1472"> </a>
+<a name="ln1473">        crm_xml_add(remote_op, F_STONITH_REMOTE_OP_ID, op-&gt;id);</a>
+<a name="ln1474">        crm_xml_add(remote_op, F_STONITH_TARGET, op-&gt;target);</a>
+<a name="ln1475">        crm_xml_add(remote_op, F_STONITH_ACTION, op-&gt;action);</a>
+<a name="ln1476">        crm_xml_add(remote_op, F_STONITH_ORIGIN, op-&gt;originator);</a>
+<a name="ln1477">        crm_xml_add(remote_op, F_STONITH_CLIENTID, op-&gt;client_id);</a>
+<a name="ln1478">        crm_xml_add(remote_op, F_STONITH_CLIENTNAME, op-&gt;client_name);</a>
+<a name="ln1479">        crm_xml_add_int(remote_op, F_STONITH_TIMEOUT, timeout);</a>
+<a name="ln1480">        crm_xml_add_int(remote_op, F_STONITH_CALLOPTS, op-&gt;call_options);</a>
+<a name="ln1481"> </a>
+<a name="ln1482">        if (device) {</a>
+<a name="ln1483">            timeout_one = TIMEOUT_MULTIPLY_FACTOR *</a>
+<a name="ln1484">                          get_device_timeout(op, peer, device);</a>
+<a name="ln1485">            crm_info(&quot;Requesting that '%s' perform op '%s %s' with '%s' for %s (%ds)&quot;, peer-&gt;host,</a>
+<a name="ln1486">                     op-&gt;target, op-&gt;action, device, op-&gt;client_name, timeout_one);</a>
+<a name="ln1487">            crm_xml_add(remote_op, F_STONITH_DEVICE, device);</a>
+<a name="ln1488">            crm_xml_add(remote_op, F_STONITH_MODE, &quot;slave&quot;);</a>
+<a name="ln1489"> </a>
+<a name="ln1490">        } else {</a>
+<a name="ln1491">            timeout_one = TIMEOUT_MULTIPLY_FACTOR * get_peer_timeout(op, peer);</a>
+<a name="ln1492">            crm_info(&quot;Requesting that '%s' perform op '%s %s' for %s (%ds, %ds)&quot;,</a>
+<a name="ln1493">                     peer-&gt;host, op-&gt;target, op-&gt;action, op-&gt;client_name, timeout_one, stonith_watchdog_timeout_ms);</a>
+<a name="ln1494">            crm_xml_add(remote_op, F_STONITH_MODE, &quot;smart&quot;);</a>
+<a name="ln1495"> </a>
+<a name="ln1496">        }</a>
+<a name="ln1497"> </a>
+<a name="ln1498">        op-&gt;state = st_exec;</a>
+<a name="ln1499">        if (op-&gt;op_timer_one) {</a>
+<a name="ln1500">            g_source_remove(op-&gt;op_timer_one);</a>
+<a name="ln1501">        }</a>
+<a name="ln1502"> </a>
+<a name="ln1503">        if(stonith_watchdog_timeout_ms &gt; 0 &amp;&amp; device &amp;&amp; safe_str_eq(device, &quot;watchdog&quot;)) {</a>
+<a name="ln1504">            crm_notice(&quot;Waiting %ds for %s to self-fence (%s) for %s.%.8s (%p)&quot;,</a>
+<a name="ln1505">                       stonith_watchdog_timeout_ms/1000, op-&gt;target,</a>
+<a name="ln1506">                       op-&gt;action, op-&gt;client_name, op-&gt;id, device);</a>
+<a name="ln1507">            op-&gt;op_timer_one = g_timeout_add(stonith_watchdog_timeout_ms, remote_op_watchdog_done, op);</a>
+<a name="ln1508"> </a>
+<a name="ln1509">            /* TODO check devices to verify watchdog will be in use */</a>
+<a name="ln1510">        } else if(stonith_watchdog_timeout_ms &gt; 0</a>
+<a name="ln1511">                  &amp;&amp; safe_str_eq(peer-&gt;host, op-&gt;target)</a>
+<a name="ln1512">                  &amp;&amp; safe_str_neq(op-&gt;action, &quot;on&quot;)) {</a>
+<a name="ln1513">            crm_notice(&quot;Waiting %ds for %s to self-fence (%s) for %s.%.8s (%p)&quot;,</a>
+<a name="ln1514">                       stonith_watchdog_timeout_ms/1000, op-&gt;target,</a>
+<a name="ln1515">                       op-&gt;action, op-&gt;client_name, op-&gt;id, device);</a>
+<a name="ln1516">            op-&gt;op_timer_one = g_timeout_add(stonith_watchdog_timeout_ms, remote_op_watchdog_done, op);</a>
+<a name="ln1517"> </a>
+<a name="ln1518">        } else {</a>
+<a name="ln1519">            op-&gt;op_timer_one = g_timeout_add((1000 * timeout_one), remote_op_timeout_one, op);</a>
+<a name="ln1520">        }</a>
+<a name="ln1521"> </a>
+<a name="ln1522"> </a>
+<a name="ln1523">        send_cluster_message(crm_get_peer(0, peer-&gt;host), crm_msg_stonith_ng, remote_op, FALSE);</a>
+<a name="ln1524">        peer-&gt;tried = TRUE;</a>
+<a name="ln1525">        free_xml(remote_op);</a>
+<a name="ln1526">        return;</a>
+<a name="ln1527"> </a>
+<a name="ln1528">    } else if (op-&gt;phase == st_phase_on) {</a>
+<a name="ln1529">        /* A remapped &quot;on&quot; cannot be executed, but the node was already</a>
+<a name="ln1530">         * turned off successfully, so ignore the error and continue.</a>
+<a name="ln1531">         */</a>
+<a name="ln1532">        crm_warn(&quot;Ignoring %s 'on' failure (no capable peers) for %s after successful 'off'&quot;,</a>
+<a name="ln1533">                 device, op-&gt;target);</a>
+<a name="ln1534">        advance_op_topology(op, device, NULL, pcmk_ok);</a>
+<a name="ln1535">        return;</a>
+<a name="ln1536"> </a>
+<a name="ln1537">    } else if (op-&gt;owner == FALSE) {</a>
+<a name="ln1538">        crm_err(&quot;Fencing (%s) of %s for %s is not ours to control&quot;,</a>
+<a name="ln1539">                op-&gt;action, op-&gt;target, op-&gt;client_name);</a>
+<a name="ln1540"> </a>
+<a name="ln1541">    } else if (op-&gt;query_timer == 0) {</a>
+<a name="ln1542">        /* We've exhausted all available peers */</a>
+<a name="ln1543">        crm_info(&quot;No remaining peers capable of fencing (%s) %s for %s (%d)&quot;,</a>
+<a name="ln1544">                 op-&gt;target, op-&gt;action, op-&gt;client_name, op-&gt;state);</a>
+<a name="ln1545">        CRM_LOG_ASSERT(op-&gt;state &lt; st_done);</a>
+<a name="ln1546">        remote_op_timeout(op);</a>
+<a name="ln1547"> </a>
+<a name="ln1548">    } else if(op-&gt;replies &gt;= op-&gt;replies_expected || op-&gt;replies &gt;= fencing_active_peers()) {</a>
+<a name="ln1549">        int rc = -EHOSTUNREACH;</a>
+<a name="ln1550"> </a>
+<a name="ln1551">        /* if the operation never left the query state,</a>
+<a name="ln1552">         * but we have all the expected replies, then no devices</a>
+<a name="ln1553">         * are available to execute the fencing operation. */</a>
+<a name="ln1554"> </a>
+<a name="ln1555">        if(stonith_watchdog_timeout_ms &amp;&amp; (device == NULL || safe_str_eq(device, &quot;watchdog&quot;))) {</a>
+<a name="ln1556">            crm_notice(&quot;Waiting %ds for %s to self-fence (%s) for %s.%.8s (%p)&quot;,</a>
+<a name="ln1557">                     stonith_watchdog_timeout_ms/1000, op-&gt;target,</a>
+<a name="ln1558">                     op-&gt;action, op-&gt;client_name, op-&gt;id, device);</a>
+<a name="ln1559"> </a>
+<a name="ln1560">            op-&gt;op_timer_one = g_timeout_add(stonith_watchdog_timeout_ms, remote_op_watchdog_done, op);</a>
+<a name="ln1561">            return;</a>
+<a name="ln1562">        }</a>
+<a name="ln1563"> </a>
+<a name="ln1564">        if (op-&gt;state == st_query) {</a>
+<a name="ln1565">           crm_info(&quot;No peers (out of %d) have devices capable of fencing (%s) %s for %s (%d)&quot;,</a>
+<a name="ln1566">                   op-&gt;replies, op-&gt;action, op-&gt;target, op-&gt;client_name,</a>
+<a name="ln1567">                   op-&gt;state);</a>
+<a name="ln1568"> </a>
+<a name="ln1569">            rc = -ENODEV;</a>
+<a name="ln1570">        } else {</a>
+<a name="ln1571">           crm_info(&quot;No peers (out of %d) are capable of fencing (%s) %s for %s (%d)&quot;,</a>
+<a name="ln1572">                   op-&gt;replies, op-&gt;action, op-&gt;target, op-&gt;client_name,</a>
+<a name="ln1573">                   op-&gt;state);</a>
+<a name="ln1574">        }</a>
+<a name="ln1575"> </a>
+<a name="ln1576">        op-&gt;state = st_failed;</a>
+<a name="ln1577">        remote_op_done(op, NULL, rc, FALSE);</a>
+<a name="ln1578"> </a>
+<a name="ln1579">    } else if (device) {</a>
+<a name="ln1580">        crm_info(&quot;Waiting for additional peers capable of fencing (%s) %s with %s for %s.%.8s&quot;,</a>
+<a name="ln1581">                 op-&gt;action, op-&gt;target, device, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln1582">    } else {</a>
+<a name="ln1583">        crm_info(&quot;Waiting for additional peers capable of fencing (%s) %s for %s%.8s&quot;,</a>
+<a name="ln1584">                 op-&gt;action, op-&gt;target, op-&gt;client_name, op-&gt;id);</a>
+<a name="ln1585">    }</a>
+<a name="ln1586">}</a>
+<a name="ln1587"> </a>
+<a name="ln1588">/*!</a>
+<a name="ln1589"> * \internal</a>
+<a name="ln1590"> * \brief Comparison function for sorting query results</a>
+<a name="ln1591"> *</a>
+<a name="ln1592"> * \param[in] a  GList item to compare</a>
+<a name="ln1593"> * \param[in] b  GList item to compare</a>
+<a name="ln1594"> *</a>
+<a name="ln1595"> * \return Per the glib documentation, &quot;a negative integer if the first value</a>
+<a name="ln1596"> *         comes before the second, 0 if they are equal, or a positive integer</a>
+<a name="ln1597"> *         if the first value comes after the second.&quot;</a>
+<a name="ln1598"> */</a>
+<a name="ln1599">static gint</a>
+<a name="ln1600">sort_peers(gconstpointer a, gconstpointer b)</a>
+<a name="ln1601">{</a>
+<a name="ln1602">    const st_query_result_t *peer_a = a;</a>
+<a name="ln1603">    const st_query_result_t *peer_b = b;</a>
+<a name="ln1604"> </a>
+<a name="ln1605">    return (peer_b-&gt;ndevices - peer_a-&gt;ndevices);</a>
+<a name="ln1606">}</a>
+<a name="ln1607"> </a>
+<a name="ln1608">/*!</a>
+<a name="ln1609"> * \internal</a>
+<a name="ln1610"> * \brief Determine if all the devices in the topology are found or not</a>
+<a name="ln1611"> */</a>
+<a name="ln1612">static gboolean</a>
+<a name="ln1613">all_topology_devices_found(remote_fencing_op_t * op)</a>
+<a name="ln1614">{</a>
+<a name="ln1615">    GListPtr device = NULL;</a>
+<a name="ln1616">    GListPtr iter = NULL;</a>
+<a name="ln1617">    device_properties_t *match = NULL;</a>
+<a name="ln1618">    stonith_topology_t *tp = NULL;</a>
+<a name="ln1619">    gboolean skip_target = FALSE;</a>
+<a name="ln1620">    int i;</a>
+<a name="ln1621"> </a>
+<a name="ln1622">    tp = find_topology_for_host(op-&gt;target);</a>
+<a name="ln1623">    if (!tp) {</a>
+<a name="ln1624">        return FALSE;</a>
+<a name="ln1625">    }</a>
+<a name="ln1626">    if (safe_str_eq(op-&gt;action, &quot;off&quot;) || safe_str_eq(op-&gt;action, &quot;reboot&quot;)) {</a>
+<a name="ln1627">        /* Don't count the devices on the target node if we are killing</a>
+<a name="ln1628">         * the target node. */</a>
+<a name="ln1629">        skip_target = TRUE;</a>
+<a name="ln1630">    }</a>
+<a name="ln1631"> </a>
+<a name="ln1632">    for (i = 0; i &lt; ST_LEVEL_MAX; i++) {</a>
+<a name="ln1633">        for (device = tp-&gt;levels[i]; device; device = device-&gt;next) {</a>
+<a name="ln1634">            match = NULL;</a>
+<a name="ln1635">            for (iter = op-&gt;query_results; iter &amp;&amp; !match; iter = iter-&gt;next) {</a>
+<a name="ln1636">                st_query_result_t *peer = iter-&gt;data;</a>
+<a name="ln1637"> </a>
+<a name="ln1638">                if (skip_target &amp;&amp; safe_str_eq(peer-&gt;host, op-&gt;target)) {</a>
+<a name="ln1639">                    continue;</a>
+<a name="ln1640">                }</a>
+<a name="ln1641">                match = find_peer_device(op, peer, device-&gt;data);</a>
+<a name="ln1642">            }</a>
+<a name="ln1643">            if (!match) {</a>
+<a name="ln1644">                return FALSE;</a>
+<a name="ln1645">            }</a>
+<a name="ln1646">        }</a>
+<a name="ln1647">    }</a>
+<a name="ln1648"> </a>
+<a name="ln1649">    return TRUE;</a>
+<a name="ln1650">}</a>
+<a name="ln1651"> </a>
+<a name="ln1652">/*!</a>
+<a name="ln1653"> * \internal</a>
+<a name="ln1654"> * \brief Parse action-specific device properties from XML</a>
+<a name="ln1655"> *</a>
+<a name="ln1656"> * \param[in]     msg     XML element containing the properties</a>
+<a name="ln1657"> * \param[in]     peer    Name of peer that sent XML (for logs)</a>
+<a name="ln1658"> * \param[in]     device  Device ID (for logs)</a>
+<a name="ln1659"> * \param[in]     action  Action the properties relate to (for logs)</a>
+<a name="ln1660"> * \param[in]     phase   Phase the properties relate to</a>
+<a name="ln1661"> * \param[in,out] props   Device properties to update</a>
+<a name="ln1662"> */</a>
+<a name="ln1663">static void</a>
+<a name="ln1664">parse_action_specific(xmlNode *xml, const char *peer, const char *device,</a>
+<a name="ln1665">                      const char *action, remote_fencing_op_t *op,</a>
+<a name="ln1666">                      enum st_remap_phase phase, device_properties_t *props)</a>
+<a name="ln1667">{</a>
+<a name="ln1668">    props-&gt;custom_action_timeout[phase] = 0;</a>
+<a name="ln1669">    crm_element_value_int(xml, F_STONITH_ACTION_TIMEOUT,</a>
+<a name="ln1670">                          &amp;props-&gt;custom_action_timeout[phase]);</a>
+<a name="ln1671">    if (props-&gt;custom_action_timeout[phase]) {</a>
+<a name="ln1672">        crm_trace(&quot;Peer %s with device %s returned %s action timeout %d&quot;,</a>
+<a name="ln1673">                  peer, device, action, props-&gt;custom_action_timeout[phase]);</a>
+<a name="ln1674">    }</a>
+<a name="ln1675"> </a>
+<a name="ln1676">    props-&gt;delay_max[phase] = 0;</a>
+<a name="ln1677">    crm_element_value_int(xml, F_STONITH_DELAY_MAX, &amp;props-&gt;delay_max[phase]);</a>
+<a name="ln1678">    if (props-&gt;delay_max[phase]) {</a>
+<a name="ln1679">        crm_trace(&quot;Peer %s with device %s returned maximum of random delay %d for %s&quot;,</a>
+<a name="ln1680">                  peer, device, props-&gt;delay_max[phase], action);</a>
+<a name="ln1681">    }</a>
+<a name="ln1682"> </a>
+<a name="ln1683">    /* Handle devices with automatic unfencing */</a>
+<a name="ln1684">    if (safe_str_eq(action, &quot;on&quot;)) {</a>
+<a name="ln1685">        int required = 0;</a>
+<a name="ln1686"> </a>
+<a name="ln1687">        crm_element_value_int(xml, F_STONITH_DEVICE_REQUIRED, &amp;required);</a>
+<a name="ln1688">        if (required) {</a>
+<a name="ln1689">            crm_trace(&quot;Peer %s requires device %s to execute for action %s&quot;,</a>
+<a name="ln1690">                      peer, device, action);</a>
+<a name="ln1691">            add_required_device(op, device);</a>
+<a name="ln1692">        }</a>
+<a name="ln1693">    }</a>
+<a name="ln1694"> </a>
+<a name="ln1695">    /* If a reboot is remapped to off+on, it's possible that a node is allowed</a>
+<a name="ln1696">     * to perform one action but not another.</a>
+<a name="ln1697">     */</a>
+<a name="ln1698">    if (crm_is_true(crm_element_value(xml, F_STONITH_ACTION_DISALLOWED))) {</a>
+<a name="ln1699">        props-&gt;disallowed[phase] = TRUE;</a>
+<a name="ln1700">        crm_trace(&quot;Peer %s is disallowed from executing %s for device %s&quot;,</a>
+<a name="ln1701">                  peer, action, device);</a>
+<a name="ln1702">    }</a>
+<a name="ln1703">}</a>
+<a name="ln1704"> </a>
+<a name="ln1705">/*!</a>
+<a name="ln1706"> * \internal</a>
+<a name="ln1707"> * \brief Parse one device's properties from peer's XML query reply</a>
+<a name="ln1708"> *</a>
+<a name="ln1709"> * \param[in]     xml       XML node containing device properties</a>
+<a name="ln1710"> * \param[in,out] op        Operation that query and reply relate to</a>
+<a name="ln1711"> * \param[in,out] result    Peer's results</a>
+<a name="ln1712"> * \param[in]     device    ID of device being parsed</a>
+<a name="ln1713"> */</a>
+<a name="ln1714">static void</a>
+<a name="ln1715">add_device_properties(xmlNode *xml, remote_fencing_op_t *op,</a>
+<a name="ln1716">                      st_query_result_t *result, const char *device)</a>
+<a name="ln1717">{</a>
+<a name="ln1718">    xmlNode *child;</a>
+<a name="ln1719">    int verified = 0;</a>
+<a name="ln1720">    device_properties_t *props = calloc(1, sizeof(device_properties_t));</a>
+<a name="ln1721"> </a>
+<a name="ln1722">    /* Add a new entry to this result's devices list */</a>
+<a name="ln1723">    CRM_ASSERT(props != NULL);</a>
+<a name="ln1724">    g_hash_table_insert(result-&gt;devices, strdup(device), props);</a>
+<a name="ln1725"> </a>
+<a name="ln1726">    /* Peers with verified (monitored) access will be preferred */</a>
+<a name="ln1727">    crm_element_value_int(xml, F_STONITH_DEVICE_VERIFIED, &amp;verified);</a>
+<a name="ln1728">    if (verified) {</a>
+<a name="ln1729">        crm_trace(&quot;Peer %s has confirmed a verified device %s&quot;,</a>
+<a name="ln1730">                  result-&gt;host, device);</a>
+<a name="ln1731">        props-&gt;verified = TRUE;</a>
+<a name="ln1732">    }</a>
+<a name="ln1733"> </a>
+<a name="ln1734">    /* Parse action-specific device properties */</a>
+<a name="ln1735">    parse_action_specific(xml, result-&gt;host, device, op_requested_action(op),</a>
+<a name="ln1736">                          op, st_phase_requested, props);</a>
+<a name="ln1737">    for (child = __xml_first_child(xml); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln1738">        /* Replies for &quot;reboot&quot; operations will include the action-specific</a>
+<a name="ln1739">         * values for &quot;off&quot; and &quot;on&quot; in child elements, just in case the reboot</a>
+<a name="ln1740">         * winds up getting remapped.</a>
+<a name="ln1741">         */</a>
+<a name="ln1742">        if (safe_str_eq(ID(child), &quot;off&quot;)) {</a>
+<a name="ln1743">            parse_action_specific(child, result-&gt;host, device, &quot;off&quot;,</a>
+<a name="ln1744">                                  op, st_phase_off, props);</a>
+<a name="ln1745">        } else if (safe_str_eq(ID(child), &quot;on&quot;)) {</a>
+<a name="ln1746">            parse_action_specific(child, result-&gt;host, device, &quot;on&quot;,</a>
+<a name="ln1747">                                  op, st_phase_on, props);</a>
+<a name="ln1748">        }</a>
+<a name="ln1749">    }</a>
+<a name="ln1750">}</a>
+<a name="ln1751"> </a>
+<a name="ln1752">/*!</a>
+<a name="ln1753"> * \internal</a>
+<a name="ln1754"> * \brief Parse a peer's XML query reply and add it to operation's results</a>
+<a name="ln1755"> *</a>
+<a name="ln1756"> * \param[in,out] op        Operation that query and reply relate to</a>
+<a name="ln1757"> * \param[in]     host      Name of peer that sent this reply</a>
+<a name="ln1758"> * \param[in]     ndevices  Number of devices expected in reply</a>
+<a name="ln1759"> * \param[in]     xml       XML node containing device list</a>
+<a name="ln1760"> *</a>
+<a name="ln1761"> * \return Newly allocated result structure with parsed reply</a>
+<a name="ln1762"> */</a>
+<a name="ln1763">static st_query_result_t *</a>
+<a name="ln1764">add_result(remote_fencing_op_t *op, const char *host, int ndevices, xmlNode *xml)</a>
+<a name="ln1765">{</a>
+<a name="ln1766">    st_query_result_t *result = calloc(1, sizeof(st_query_result_t));</a>
+<a name="ln1767">    xmlNode *child;</a>
+<a name="ln1768"> </a>
+<a name="ln1769">    CRM_CHECK(result != NULL, return NULL);</a>
+<a name="ln1770">    result-&gt;host = strdup(host);</a>
+<a name="ln1771">    result-&gt;devices = g_hash_table_new_full(crm_str_hash, g_str_equal, free, free);</a>
+<a name="ln1772"> </a>
+<a name="ln1773">    /* Each child element describes one capable device available to the peer */</a>
+<a name="ln1774">    for (child = __xml_first_child(xml); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln1775">        const char *device = ID(child);</a>
+<a name="ln1776"> </a>
+<a name="ln1777">        if (device) {</a>
+<a name="ln1778">            add_device_properties(child, op, result, device);</a>
+<a name="ln1779">        }</a>
+<a name="ln1780">    }</a>
+<a name="ln1781"> </a>
+<a name="ln1782">    result-&gt;ndevices = g_hash_table_size(result-&gt;devices);</a>
+<a name="ln1783">    CRM_CHECK(ndevices == result-&gt;ndevices,</a>
+<a name="ln1784">              crm_err(&quot;Query claimed to have %d devices but %d found&quot;,</a>
+<a name="ln1785">                      ndevices, result-&gt;ndevices));</a>
+<a name="ln1786"> </a>
+<a name="ln1787">    op-&gt;query_results = g_list_insert_sorted(op-&gt;query_results, result, sort_peers);</a>
+<a name="ln1788">    return result;</a>
+<a name="ln1789">}</a>
+<a name="ln1790"> </a>
+<a name="ln1791">/*!</a>
+<a name="ln1792"> * \internal</a>
+<a name="ln1793"> * \brief Handle a peer's reply to our fencing query</a>
+<a name="ln1794"> *</a>
+<a name="ln1795"> * Parse a query result from XML and store it in the remote operation</a>
+<a name="ln1796"> * table, and when enough replies have been received, issue a fencing request.</a>
+<a name="ln1797"> *</a>
+<a name="ln1798"> * \param[in] msg  XML reply received</a>
+<a name="ln1799"> *</a>
+<a name="ln1800"> * \return pcmk_ok on success, -errno on error</a>
+<a name="ln1801"> *</a>
+<a name="ln1802"> * \note See initiate_remote_stonith_op() for how the XML query was initially</a>
+<a name="ln1803"> *       formed, and stonith_query() for how the peer formed its XML reply.</a>
+<a name="ln1804"> */</a>
+<a name="ln1805">int</a>
+<a name="ln1806">process_remote_stonith_query(xmlNode * msg)</a>
+<a name="ln1807">{</a>
+<a name="ln1808">    int ndevices = 0;</a>
+<a name="ln1809">    gboolean host_is_target = FALSE;</a>
+<a name="ln1810">    gboolean have_all_replies = FALSE;</a>
+<a name="ln1811">    const char *id = NULL;</a>
+<a name="ln1812">    const char *host = NULL;</a>
+<a name="ln1813">    remote_fencing_op_t *op = NULL;</a>
+<a name="ln1814">    st_query_result_t *result = NULL;</a>
+<a name="ln1815">    uint32_t replies_expected;</a>
+<a name="ln1816">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_REMOTE_OP_ID, msg, LOG_ERR);</a>
+<a name="ln1817"> </a>
+<a name="ln1818">    CRM_CHECK(dev != NULL, return -EPROTO);</a>
+<a name="ln1819"> </a>
+<a name="ln1820">    id = crm_element_value(dev, F_STONITH_REMOTE_OP_ID);</a>
+<a name="ln1821">    CRM_CHECK(id != NULL, return -EPROTO);</a>
+<a name="ln1822"> </a>
+<a name="ln1823">    dev = get_xpath_object(&quot;//@&quot; F_STONITH_AVAILABLE_DEVICES, msg, LOG_ERR);</a>
+<a name="ln1824">    CRM_CHECK(dev != NULL, return -EPROTO);</a>
+<a name="ln1825">    crm_element_value_int(dev, F_STONITH_AVAILABLE_DEVICES, &amp;ndevices);</a>
+<a name="ln1826"> </a>
+<a name="ln1827">    op = g_hash_table_lookup(remote_op_list, id);</a>
+<a name="ln1828">    if (op == NULL) {</a>
+<a name="ln1829">        crm_debug(&quot;Received query reply for unknown or expired operation %s&quot;,</a>
+<a name="ln1830">                  id);</a>
+<a name="ln1831">        return -EOPNOTSUPP;</a>
+<a name="ln1832">    }</a>
+<a name="ln1833"> </a>
+<a name="ln1834">    replies_expected = QB_MIN(op-&gt;replies_expected, fencing_active_peers());</a>
+<a name="ln1835">    if ((++op-&gt;replies &gt;= replies_expected) &amp;&amp; (op-&gt;state == st_query)) {</a>
+<a name="ln1836">        have_all_replies = TRUE;</a>
+<a name="ln1837">    }</a>
+<a name="ln1838">    host = crm_element_value(msg, F_ORIG);</a>
+<a name="ln1839">    host_is_target = safe_str_eq(host, op-&gt;target);</a>
+<a name="ln1840"> </a>
+<a name="ln1841">    crm_info(&quot;Query result %d of %d from %s for %s/%s (%d devices) %s&quot;,</a>
+<a name="ln1842">             op-&gt;replies, replies_expected, host,</a>
+<a name="ln1843">             op-&gt;target, op-&gt;action, ndevices, id);</a>
+<a name="ln1844">    if (ndevices &gt; 0) {</a>
+<a name="ln1845">        result = add_result(op, host, ndevices, dev);</a>
+<a name="ln1846">    }</a>
+<a name="ln1847"> </a>
+<a name="ln1848">    if (is_set(op-&gt;call_options, st_opt_topology)) {</a>
+<a name="ln1849">        /* If we start the fencing before all the topology results are in,</a>
+<a name="ln1850">         * it is possible fencing levels will be skipped because of the missing</a>
+<a name="ln1851">         * query results. */</a>
+<a name="ln1852">        if (op-&gt;state == st_query &amp;&amp; all_topology_devices_found(op)) {</a>
+<a name="ln1853">            /* All the query results are in for the topology, start the fencing ops. */</a>
+<a name="ln1854">            crm_trace(&quot;All topology devices found&quot;);</a>
+<a name="ln1855">            call_remote_stonith(op, result);</a>
+<a name="ln1856"> </a>
+<a name="ln1857">        } else if (have_all_replies) {</a>
+<a name="ln1858">            crm_info(&quot;All topology query replies have arrived, continuing (%d expected/%d received) &quot;,</a>
+<a name="ln1859">                     replies_expected, op-&gt;replies);</a>
+<a name="ln1860">            call_remote_stonith(op, NULL);</a>
+<a name="ln1861">        }</a>
+<a name="ln1862"> </a>
+<a name="ln1863">    } else if (op-&gt;state == st_query) {</a>
+<a name="ln1864">        int nverified = count_peer_devices(op, result, TRUE);</a>
+<a name="ln1865"> </a>
+<a name="ln1866">        /* We have a result for a non-topology fencing op that looks promising,</a>
+<a name="ln1867">         * go ahead and start fencing before query timeout */</a>
+<a name="ln1868">        if (result &amp;&amp; (host_is_target == FALSE) &amp;&amp; nverified) {</a>
+<a name="ln1869">            /* we have a verified device living on a peer that is not the target */</a>
+<a name="ln1870">            crm_trace(&quot;Found %d verified devices&quot;, nverified);</a>
+<a name="ln1871">            call_remote_stonith(op, result);</a>
+<a name="ln1872"> </a>
+<a name="ln1873">        } else if (have_all_replies) {</a>
+<a name="ln1874">            crm_info(&quot;All query replies have arrived, continuing (%d expected/%d received) &quot;,</a>
+<a name="ln1875">                     replies_expected, op-&gt;replies);</a>
+<a name="ln1876">            call_remote_stonith(op, NULL);</a>
+<a name="ln1877"> </a>
+<a name="ln1878">        } else {</a>
+<a name="ln1879">            crm_trace(&quot;Waiting for more peer results before launching fencing operation&quot;);</a>
+<a name="ln1880">        }</a>
+<a name="ln1881"> </a>
+<a name="ln1882">    } else if (result &amp;&amp; (op-&gt;state == st_done)) {</a>
+<a name="ln1883">        crm_info(&quot;Discarding query result from %s (%d devices): Operation is in state %d&quot;,</a>
+<a name="ln1884">                 result-&gt;host, result-&gt;ndevices, op-&gt;state);</a>
+<a name="ln1885">    }</a>
+<a name="ln1886"> </a>
+<a name="ln1887">    return pcmk_ok;</a>
+<a name="ln1888">}</a>
+<a name="ln1889"> </a>
+<a name="ln1890">/*!</a>
+<a name="ln1891"> * \internal</a>
+<a name="ln1892"> * \brief Handle a peer's reply to a fencing request</a>
+<a name="ln1893"> *</a>
+<a name="ln1894"> * Parse a fencing reply from XML, and either finalize the operation</a>
+<a name="ln1895"> * or attempt another device as appropriate.</a>
+<a name="ln1896"> *</a>
+<a name="ln1897"> * \param[in] msg  XML reply received</a>
+<a name="ln1898"> *</a>
+<a name="ln1899"> * \return pcmk_ok on success, -errno on error</a>
+<a name="ln1900"> */</a>
+<a name="ln1901">int</a>
+<a name="ln1902">process_remote_stonith_exec(xmlNode * msg)</a>
+<a name="ln1903">{</a>
+<a name="ln1904">    int rc = 0;</a>
+<a name="ln1905">    const char *id = NULL;</a>
+<a name="ln1906">    const char *device = NULL;</a>
+<a name="ln1907">    remote_fencing_op_t *op = NULL;</a>
+<a name="ln1908">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_REMOTE_OP_ID, msg, LOG_ERR);</a>
+<a name="ln1909"> </a>
+<a name="ln1910">    CRM_CHECK(dev != NULL, return -EPROTO);</a>
+<a name="ln1911"> </a>
+<a name="ln1912">    id = crm_element_value(dev, F_STONITH_REMOTE_OP_ID);</a>
+<a name="ln1913">    CRM_CHECK(id != NULL, return -EPROTO);</a>
+<a name="ln1914"> </a>
+<a name="ln1915">    dev = get_xpath_object(&quot;//@&quot; F_STONITH_RC, msg, LOG_ERR);</a>
+<a name="ln1916">    CRM_CHECK(dev != NULL, return -EPROTO);</a>
+<a name="ln1917"> </a>
+<a name="ln1918">    crm_element_value_int(dev, F_STONITH_RC, &amp;rc);</a>
+<a name="ln1919"> </a>
+<a name="ln1920">    device = crm_element_value(dev, F_STONITH_DEVICE);</a>
+<a name="ln1921"> </a>
+<a name="ln1922">    if (remote_op_list) {</a>
+<a name="ln1923">        op = g_hash_table_lookup(remote_op_list, id);</a>
+<a name="ln1924">    }</a>
+<a name="ln1925"> </a>
+<a name="ln1926">    if (op == NULL &amp;&amp; rc == pcmk_ok) {</a>
+<a name="ln1927">        /* Record successful fencing operations */</a>
+<a name="ln1928">        const char *client_id = crm_element_value(dev, F_STONITH_CLIENTID);</a>
+<a name="ln1929"> </a>
+<a name="ln1930">        op = create_remote_stonith_op(client_id, dev, TRUE);</a>
+<a name="ln1931">    }</a>
+<a name="ln1932"> </a>
+<a name="ln1933">    if (op == NULL) {</a>
+<a name="ln1934">        /* Could be for an event that began before we started */</a>
+<a name="ln1935">        /* TODO: Record the op for later querying */</a>
+<a name="ln1936">        crm_info(&quot;Received peer result of unknown or expired operation %s&quot;, id);</a>
+<a name="ln1937">        return -EOPNOTSUPP;</a>
+<a name="ln1938">    }</a>
+<a name="ln1939"> </a>
+<a name="ln1940">    if (op-&gt;devices &amp;&amp; device &amp;&amp; safe_str_neq(op-&gt;devices-&gt;data, device)) {</a>
+<a name="ln1941">        crm_err(&quot;Received outdated reply for device %s (instead of %s) to &quot;</a>
+<a name="ln1942">                &quot;fence (%s) %s. Operation already timed out at peer level.&quot;,</a>
+<a name="ln1943">                device, op-&gt;devices-&gt;data, op-&gt;action, op-&gt;target);</a>
+<a name="ln1944">        return rc;</a>
+<a name="ln1945">    }</a>
+<a name="ln1946"> </a>
+<a name="ln1947">    if (safe_str_eq(crm_element_value(msg, F_SUBTYPE), &quot;broadcast&quot;)) {</a>
+<a name="ln1948">        crm_debug(&quot;Marking call to %s for %s on behalf of %s@%s.%.8s: %s (%d)&quot;,</a>
+<a name="ln1949">                  op-&gt;action, op-&gt;target, op-&gt;client_name, op-&gt;id, op-&gt;originator,</a>
+<a name="ln1950">                  pcmk_strerror(rc), rc);</a>
+<a name="ln1951">        if (rc == pcmk_ok) {</a>
+<a name="ln1952">            op-&gt;state = st_done;</a>
+<a name="ln1953">        } else {</a>
+<a name="ln1954">            op-&gt;state = st_failed;</a>
+<a name="ln1955">        }</a>
+<a name="ln1956">        remote_op_done(op, msg, rc, FALSE);</a>
+<a name="ln1957">        return pcmk_ok;</a>
+<a name="ln1958">    } else if (safe_str_neq(op-&gt;originator, stonith_our_uname)) {</a>
+<a name="ln1959">        /* If this isn't a remote level broadcast, and we are not the</a>
+<a name="ln1960">         * originator of the operation, we should not be receiving this msg. */</a>
+<a name="ln1961">        crm_err</a>
+<a name="ln1962">            (&quot;%s received non-broadcast fencing result for operation it does not own (device %s targeting %s)&quot;,</a>
+<a name="ln1963">             stonith_our_uname, device, op-&gt;target);</a>
+<a name="ln1964">        return rc;</a>
+<a name="ln1965">    }</a>
+<a name="ln1966"> </a>
+<a name="ln1967">    if (is_set(op-&gt;call_options, st_opt_topology)) {</a>
+<a name="ln1968">        const char *device = crm_element_value(msg, F_STONITH_DEVICE);</a>
+<a name="ln1969"> </a>
+<a name="ln1970">        crm_notice(&quot;Call to %s for '%s %s' on behalf of %s@%s: %s (%d)&quot;,</a>
+<a name="ln1971">                   device, op-&gt;target, op-&gt;action, op-&gt;client_name, op-&gt;originator,</a>
+<a name="ln1972">                   pcmk_strerror(rc), rc);</a>
+<a name="ln1973"> </a>
+<a name="ln1974">        /* We own the op, and it is complete. broadcast the result to all nodes</a>
+<a name="ln1975">         * and notify our local clients. */</a>
+<a name="ln1976">        if (op-&gt;state == st_done) {</a>
+<a name="ln1977">            remote_op_done(op, msg, rc, FALSE);</a>
+<a name="ln1978">            return rc;</a>
+<a name="ln1979">        }</a>
+<a name="ln1980"> </a>
+<a name="ln1981">        if ((op-&gt;phase == 2) &amp;&amp; (rc != pcmk_ok)) {</a>
+<a name="ln1982">            /* A remapped &quot;on&quot; failed, but the node was already turned off</a>
+<a name="ln1983">             * successfully, so ignore the error and continue.</a>
+<a name="ln1984">             */</a>
+<a name="ln1985">            crm_warn(&quot;Ignoring %s 'on' failure (exit code %d) for %s after successful 'off'&quot;,</a>
+<a name="ln1986">                     device, rc, op-&gt;target);</a>
+<a name="ln1987">            rc = pcmk_ok;</a>
+<a name="ln1988">        }</a>
+<a name="ln1989"> </a>
+<a name="ln1990">        if (rc == pcmk_ok) {</a>
+<a name="ln1991">            /* An operation completed successfully. Try another device if</a>
+<a name="ln1992">             * necessary, otherwise mark the operation as done. */</a>
+<a name="ln1993">            advance_op_topology(op, device, msg, rc);</a>
+<a name="ln1994">            return rc;</a>
+<a name="ln1995">        } else {</a>
+<a name="ln1996">            /* This device failed, time to try another topology level. If no other</a>
+<a name="ln1997">             * levels are available, mark this operation as failed and report results. */</a>
+<a name="ln1998">            if (stonith_topology_next(op) != pcmk_ok) {</a>
+<a name="ln1999">                op-&gt;state = st_failed;</a>
+<a name="ln2000">                remote_op_done(op, msg, rc, FALSE);</a>
+<a name="ln2001">                return rc;</a>
+<a name="ln2002">            }</a>
+<a name="ln2003">        }</a>
+<a name="ln2004">    } else if (rc == pcmk_ok &amp;&amp; op-&gt;devices == NULL) {</a>
+<a name="ln2005">        crm_trace(&quot;All done for %s&quot;, op-&gt;target);</a>
+<a name="ln2006"> </a>
+<a name="ln2007">        op-&gt;state = st_done;</a>
+<a name="ln2008">        remote_op_done(op, msg, rc, FALSE);</a>
+<a name="ln2009">        return rc;</a>
+<a name="ln2010">    } else if (rc == -ETIME &amp;&amp; op-&gt;devices == NULL) {</a>
+<a name="ln2011">        /* If the operation timed out don't bother retrying other peers. */</a>
+<a name="ln2012">        op-&gt;state = st_failed;</a>
+<a name="ln2013">        remote_op_done(op, msg, rc, FALSE);</a>
+<a name="ln2014">        return rc;</a>
+<a name="ln2015">    } else {</a>
+<a name="ln2016">        /* fall-through and attempt other fencing action using another peer */</a>
+<a name="ln2017">    }</a>
+<a name="ln2018"> </a>
+<a name="ln2019">    /* Retry on failure */</a>
+<a name="ln2020">    crm_trace(&quot;Next for %s on behalf of %s@%s (rc was %d)&quot;, op-&gt;target, op-&gt;originator,</a>
+<a name="ln2021">              op-&gt;client_name, rc);</a>
+<a name="ln2022">    call_remote_stonith(op, NULL);</a>
+<a name="ln2023">    return rc;</a>
+<a name="ln2024">}</a>
+<a name="ln2025"> </a>
+<a name="ln2026">int</a>
+<a name="ln2027">stonith_fence_history(xmlNode * msg, xmlNode ** output)</a>
+<a name="ln2028">{</a>
+<a name="ln2029">    int rc = 0;</a>
+<a name="ln2030">    const char *target = NULL;</a>
+<a name="ln2031">    xmlNode *dev = get_xpath_object(&quot;//@&quot; F_STONITH_TARGET, msg, LOG_TRACE);</a>
+<a name="ln2032">    char *nodename = NULL;</a>
+<a name="ln2033"> </a>
+<a name="ln2034">    if (dev) {</a>
+<a name="ln2035">        int options = 0;</a>
+<a name="ln2036"> </a>
+<a name="ln2037">        target = crm_element_value(dev, F_STONITH_TARGET);</a>
+<a name="ln2038">        crm_element_value_int(msg, F_STONITH_CALLOPTS, &amp;options);</a>
+<a name="ln2039">        if (target &amp;&amp; (options &amp; st_opt_cs_nodeid)) {</a>
+<a name="ln2040">            int nodeid = crm_atoi(target, NULL);</a>
+<a name="ln2041"> </a>
+<a name="ln2042">            nodename = stonith_get_peer_name(nodeid);</a>
+<a name="ln2043">            if (nodename) {</a>
+<a name="ln2044">                target = nodename;</a>
+<a name="ln2045">            }</a>
+<a name="ln2046">        }</a>
+<a name="ln2047">    }</a>
+<a name="ln2048"> </a>
+<a name="ln2049">    crm_trace(&quot;Looking for operations on %s in %p&quot;, target, remote_op_list);</a>
+<a name="ln2050"> </a>
+<a name="ln2051">    *output = create_xml_node(NULL, F_STONITH_HISTORY_LIST);</a>
+<a name="ln2052">    if (remote_op_list) {</a>
+<a name="ln2053">        GHashTableIter iter;</a>
+<a name="ln2054">        remote_fencing_op_t *op = NULL;</a>
+<a name="ln2055"> </a>
+<a name="ln2056">        g_hash_table_iter_init(&amp;iter, remote_op_list);</a>
+<a name="ln2057">        while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;op)) {</a>
+<a name="ln2058">            xmlNode *entry = NULL;</a>
+<a name="ln2059"> </a>
+<a name="ln2060">            if (target &amp;&amp; strcmp(op-&gt;target, target) != 0) {</a>
+<a name="ln2061">                continue;</a>
+<a name="ln2062">            }</a>
+<a name="ln2063"> </a>
+<a name="ln2064">            rc = 0;</a>
+<a name="ln2065">            crm_trace(&quot;Attaching op %s&quot;, op-&gt;id);</a>
+<a name="ln2066">            entry = create_xml_node(*output, STONITH_OP_EXEC);</a>
+<a name="ln2067">            crm_xml_add(entry, F_STONITH_TARGET, op-&gt;target);</a>
+<a name="ln2068">            crm_xml_add(entry, F_STONITH_ACTION, op-&gt;action);</a>
+<a name="ln2069">            crm_xml_add(entry, F_STONITH_ORIGIN, op-&gt;originator);</a>
+<a name="ln2070">            crm_xml_add(entry, F_STONITH_DELEGATE, op-&gt;delegate);</a>
+<a name="ln2071">            crm_xml_add(entry, F_STONITH_CLIENTNAME, op-&gt;client_name);</a>
+<a name="ln2072">            crm_xml_add_int(entry, F_STONITH_DATE, op-&gt;completed);</a>
+<a name="ln2073">            crm_xml_add_int(entry, F_STONITH_STATE, op-&gt;state);</a>
+<a name="ln2074">        }</a>
+<a name="ln2075">    }</a>
+<a name="ln2076"> </a>
+<a name="ln2077">    free(nodename);</a>
+<a name="ln2078">    return rc;</a>
+<a name="ln2079">}</a>
+<a name="ln2080"> </a>
+<a name="ln2081">gboolean</a>
+<a name="ln2082">stonith_check_fence_tolerance(int tolerance, const char *target, const char *action)</a>
+<a name="ln2083">{</a>
+<a name="ln2084">    GHashTableIter iter;</a>
+<a name="ln2085">    time_t now = time(NULL);</a>
+<a name="ln2086">    remote_fencing_op_t *rop = NULL;</a>
+<a name="ln2087"> </a>
+<a name="ln2088">    crm_trace(&quot;tolerance=%d, remote_op_list=%p&quot;, tolerance, remote_op_list);</a>
+<a name="ln2089"> </a>
+<a name="ln2090">    if (tolerance &lt;= 0 || !remote_op_list || target == NULL || action == NULL) {</a>
+<a name="ln2091">        return FALSE;</a>
+<a name="ln2092">    }</a>
+<a name="ln2093"> </a>
+<a name="ln2094">    g_hash_table_iter_init(&amp;iter, remote_op_list);</a>
+<a name="ln2095">    while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;rop)) {</a>
+<a name="ln2096">        if (strcmp(rop-&gt;target, target) != 0) {</a>
+<a name="ln2097">            continue;</a>
+<a name="ln2098">        } else if (rop-&gt;state != st_done) {</a>
+<a name="ln2099">            continue;</a>
+<a name="ln2100">        /* We don't have to worry about remapped reboots here</a>
+<a name="ln2101">         * because if state is done, any remapping has been undone</a>
+<a name="ln2102">         */</a>
+<a name="ln2103">        } else if (strcmp(rop-&gt;action, action) != 0) {</a>
+<a name="ln2104">            continue;</a>
+<a name="ln2105">        } else if ((rop-&gt;completed + tolerance) &lt; now) {</a>
+<a name="ln2106">            continue;</a>
+<a name="ln2107">        }</a>
+<a name="ln2108"> </a>
+<a name="ln2109">        crm_notice(&quot;Target %s was fenced (%s) less than %ds ago by %s on behalf of %s&quot;,</a>
+<a name="ln2110">                   target, action, tolerance, rop-&gt;delegate, rop-&gt;originator);</a>
+<a name="ln2111">        return TRUE;</a>
+<a name="ln2112">    }</a>
+<a name="ln2113">    return FALSE;</a>
+<a name="ln2114">}</a>
+
+</code></pre>
+<div class="balloon" rel="987"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op'. Check lines: 987, 985.</p></div>
+<div class="balloon" rel="1724"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 1724, 1724.</p></div>
+<div class="balloon" rel="1731"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'props'. Check lines: 1731, 1720.</p></div>
+<div class="balloon" rel="1769"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'result' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="1770"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'result'. Check lines: 1770, 1766.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

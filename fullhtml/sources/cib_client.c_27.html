@@ -1,0 +1,738 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;unistd.h&gt;</a>
+<a name="ln25">#include &lt;stdlib.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;stdarg.h&gt;</a>
+<a name="ln28">#include &lt;string.h&gt;</a>
+<a name="ln29">#include &lt;pwd.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;sys/stat.h&gt;</a>
+<a name="ln32">#include &lt;sys/types.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;glib.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln40"> </a>
+<a name="ln41">GHashTable *cib_op_callback_table = NULL;</a>
+<a name="ln42"> </a>
+<a name="ln43">int cib_client_set_op_callback(cib_t * cib, void (*callback) (const xmlNode * msg, int call_id,</a>
+<a name="ln44">                                                              int rc, xmlNode * output));</a>
+<a name="ln45"> </a>
+<a name="ln46">int cib_client_add_notify_callback(cib_t * cib, const char *event,</a>
+<a name="ln47">                                   void (*callback) (const char *event, xmlNode * msg));</a>
+<a name="ln48"> </a>
+<a name="ln49">int cib_client_del_notify_callback(cib_t * cib, const char *event,</a>
+<a name="ln50">                                   void (*callback) (const char *event, xmlNode * msg));</a>
+<a name="ln51"> </a>
+<a name="ln52">gint ciblib_GCompareFunc(gconstpointer a, gconstpointer b);</a>
+<a name="ln53"> </a>
+<a name="ln54">#define op_common(cib) do {                                             \</a>
+<a name="ln55">        if(cib == NULL) {                                               \</a>
+<a name="ln56">            return -EINVAL;						\</a>
+<a name="ln57">        } else if(cib-&gt;delegate_fn == NULL) {                           \</a>
+<a name="ln58">            return -EPROTONOSUPPORT;                                    \</a>
+<a name="ln59">        }                                                               \</a>
+<a name="ln60">    } while(0)</a>
+<a name="ln61"> </a>
+<a name="ln62">static int</a>
+<a name="ln63">cib_client_noop(cib_t * cib, int call_options)</a>
+<a name="ln64">{</a>
+<a name="ln65">    op_common(cib);</a>
+<a name="ln66">    return cib_internal_op(cib, CRM_OP_NOOP, NULL, NULL, NULL, NULL, call_options, NULL);</a>
+<a name="ln67">}</a>
+<a name="ln68"> </a>
+<a name="ln69">static int</a>
+<a name="ln70">cib_client_ping(cib_t * cib, xmlNode ** output_data, int call_options)</a>
+<a name="ln71">{</a>
+<a name="ln72">    op_common(cib);</a>
+<a name="ln73">    return cib_internal_op(cib, CRM_OP_PING, NULL, NULL, NULL, output_data, call_options, NULL);</a>
+<a name="ln74">}</a>
+<a name="ln75"> </a>
+<a name="ln76">static int</a>
+<a name="ln77">cib_client_query(cib_t * cib, const char *section, xmlNode ** output_data, int call_options)</a>
+<a name="ln78">{</a>
+<a name="ln79">    return cib-&gt;cmds-&gt;query_from(cib, NULL, section, output_data, call_options);</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">static int</a>
+<a name="ln83">cib_client_query_from(cib_t * cib, const char *host, const char *section,</a>
+<a name="ln84">                      xmlNode ** output_data, int call_options)</a>
+<a name="ln85">{</a>
+<a name="ln86">    op_common(cib);</a>
+<a name="ln87">    return cib_internal_op(cib, CIB_OP_QUERY, host, section, NULL, output_data, call_options, NULL);</a>
+<a name="ln88">}</a>
+<a name="ln89"> </a>
+<a name="ln90">static int</a>
+<a name="ln91">cib_client_is_master(cib_t * cib)</a>
+<a name="ln92">{</a>
+<a name="ln93">    op_common(cib);</a>
+<a name="ln94">    return cib_internal_op(cib, CIB_OP_ISMASTER, NULL, NULL, NULL, NULL,</a>
+<a name="ln95">                           cib_scope_local | cib_sync_call, NULL);</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">static int</a>
+<a name="ln99">cib_client_set_slave(cib_t * cib, int call_options)</a>
+<a name="ln100">{</a>
+<a name="ln101">    op_common(cib);</a>
+<a name="ln102">    return cib_internal_op(cib, CIB_OP_SLAVE, NULL, NULL, NULL, NULL, call_options, NULL);</a>
+<a name="ln103">}</a>
+<a name="ln104"> </a>
+<a name="ln105">static int</a>
+<a name="ln106">cib_client_set_slave_all(cib_t * cib, int call_options)</a>
+<a name="ln107">{</a>
+<a name="ln108">    return -EPROTONOSUPPORT;</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">static int</a>
+<a name="ln112">cib_client_set_master(cib_t * cib, int call_options)</a>
+<a name="ln113">{</a>
+<a name="ln114">    op_common(cib);</a>
+<a name="ln115">    crm_trace(&quot;Adding cib_scope_local to options&quot;);</a>
+<a name="ln116">    return cib_internal_op(cib, CIB_OP_MASTER, NULL, NULL, NULL, NULL,</a>
+<a name="ln117">                           call_options | cib_scope_local, NULL);</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">static int</a>
+<a name="ln121">cib_client_bump_epoch(cib_t * cib, int call_options)</a>
+<a name="ln122">{</a>
+<a name="ln123">    op_common(cib);</a>
+<a name="ln124">    return cib_internal_op(cib, CIB_OP_BUMP, NULL, NULL, NULL, NULL, call_options, NULL);</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">static int</a>
+<a name="ln128">cib_client_upgrade(cib_t * cib, int call_options)</a>
+<a name="ln129">{</a>
+<a name="ln130">    op_common(cib);</a>
+<a name="ln131">    return cib_internal_op(cib, CIB_OP_UPGRADE, NULL, NULL, NULL, NULL, call_options, NULL);</a>
+<a name="ln132">}</a>
+<a name="ln133"> </a>
+<a name="ln134">static int</a>
+<a name="ln135">cib_client_sync(cib_t * cib, const char *section, int call_options)</a>
+<a name="ln136">{</a>
+<a name="ln137">    return cib-&gt;cmds-&gt;sync_from(cib, NULL, section, call_options);</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">static int</a>
+<a name="ln141">cib_client_sync_from(cib_t * cib, const char *host, const char *section, int call_options)</a>
+<a name="ln142">{</a>
+<a name="ln143">    op_common(cib);</a>
+<a name="ln144">    return cib_internal_op(cib, CIB_OP_SYNC, host, section, NULL, NULL, call_options, NULL);</a>
+<a name="ln145">}</a>
+<a name="ln146"> </a>
+<a name="ln147">static int</a>
+<a name="ln148">cib_client_create(cib_t * cib, const char *section, xmlNode * data, int call_options)</a>
+<a name="ln149">{</a>
+<a name="ln150">    op_common(cib);</a>
+<a name="ln151">    return cib_internal_op(cib, CIB_OP_CREATE, NULL, section, data, NULL, call_options, NULL);</a>
+<a name="ln152">}</a>
+<a name="ln153"> </a>
+<a name="ln154">static int</a>
+<a name="ln155">cib_client_modify(cib_t * cib, const char *section, xmlNode * data, int call_options)</a>
+<a name="ln156">{</a>
+<a name="ln157">    op_common(cib);</a>
+<a name="ln158">    return cib_internal_op(cib, CIB_OP_MODIFY, NULL, section, data, NULL, call_options, NULL);</a>
+<a name="ln159">}</a>
+<a name="ln160"> </a>
+<a name="ln161">static int</a>
+<a name="ln162">cib_client_update(cib_t * cib, const char *section, xmlNode * data, int call_options)</a>
+<a name="ln163">{</a>
+<a name="ln164">    op_common(cib);</a>
+<a name="ln165">    return cib_internal_op(cib, CIB_OP_MODIFY, NULL, section, data, NULL, call_options, NULL);</a>
+<a name="ln166">}</a>
+<a name="ln167"> </a>
+<a name="ln168">static int</a>
+<a name="ln169">cib_client_replace(cib_t * cib, const char *section, xmlNode * data, int call_options)</a>
+<a name="ln170">{</a>
+<a name="ln171">    op_common(cib);</a>
+<a name="ln172">    return cib_internal_op(cib, CIB_OP_REPLACE, NULL, section, data, NULL, call_options, NULL);</a>
+<a name="ln173">}</a>
+<a name="ln174"> </a>
+<a name="ln175">static int</a>
+<a name="ln176">cib_client_delete(cib_t * cib, const char *section, xmlNode * data, int call_options)</a>
+<a name="ln177">{</a>
+<a name="ln178">    op_common(cib);</a>
+<a name="ln179">    return cib_internal_op(cib, CIB_OP_DELETE, NULL, section, data, NULL, call_options, NULL);</a>
+<a name="ln180">}</a>
+<a name="ln181"> </a>
+<a name="ln182">static int</a>
+<a name="ln183">cib_client_delete_absolute(cib_t * cib, const char *section, xmlNode * data, int call_options)</a>
+<a name="ln184">{</a>
+<a name="ln185">    op_common(cib);</a>
+<a name="ln186">    return cib_internal_op(cib, CIB_OP_DELETE_ALT, NULL, section, data, NULL, call_options, NULL);</a>
+<a name="ln187">}</a>
+<a name="ln188"> </a>
+<a name="ln189">static int</a>
+<a name="ln190">cib_client_erase(cib_t * cib, xmlNode ** output_data, int call_options)</a>
+<a name="ln191">{</a>
+<a name="ln192">    op_common(cib);</a>
+<a name="ln193">    return cib_internal_op(cib, CIB_OP_ERASE, NULL, NULL, NULL, output_data, call_options, NULL);</a>
+<a name="ln194">}</a>
+<a name="ln195"> </a>
+<a name="ln196">static void</a>
+<a name="ln197">cib_destroy_op_callback(gpointer data)</a>
+<a name="ln198">{</a>
+<a name="ln199">    cib_callback_client_t *blob = data;</a>
+<a name="ln200"> </a>
+<a name="ln201">    if (blob-&gt;timer &amp;&amp; blob-&gt;timer-&gt;ref &gt; 0) {</a>
+<a name="ln202">        g_source_remove(blob-&gt;timer-&gt;ref);</a>
+<a name="ln203">    }</a>
+<a name="ln204">    free(blob-&gt;timer);</a>
+<a name="ln205"> </a>
+<a name="ln206">    if (blob-&gt;user_data &amp;&amp; blob-&gt;free_func) {</a>
+<a name="ln207">        blob-&gt;free_func(blob-&gt;user_data);</a>
+<a name="ln208">    }</a>
+<a name="ln209"> </a>
+<a name="ln210">    free(blob);</a>
+<a name="ln211">}</a>
+<a name="ln212"> </a>
+<a name="ln213">static void</a>
+<a name="ln214">destroy_op_callback_table()</a>
+<a name="ln215">{</a>
+<a name="ln216">    if (cib_op_callback_table != NULL) {</a>
+<a name="ln217">        g_hash_table_destroy(cib_op_callback_table);</a>
+<a name="ln218">        cib_op_callback_table = NULL;</a>
+<a name="ln219">    }</a>
+<a name="ln220">}</a>
+<a name="ln221"> </a>
+<a name="ln222">char *</a>
+<a name="ln223">get_shadow_file(const char *suffix)</a>
+<a name="ln224">{</a>
+<a name="ln225">    char *cib_home = NULL;</a>
+<a name="ln226">    char *fullname = NULL;</a>
+<a name="ln227">    char *name = crm_concat(&quot;shadow&quot;, suffix, '.');</a>
+<a name="ln228">    const char *dir = getenv(&quot;CIB_shadow_dir&quot;);</a>
+<a name="ln229"> </a>
+<a name="ln230">    if (dir == NULL) {</a>
+<a name="ln231">        uid_t uid = geteuid();</a>
+<a name="ln232">        struct passwd *pwent = getpwuid(uid);</a>
+<a name="ln233">        const char *user = NULL;</a>
+<a name="ln234"> </a>
+<a name="ln235">        if (pwent) {</a>
+<a name="ln236">            user = pwent-&gt;pw_name;</a>
+<a name="ln237">        } else {</a>
+<a name="ln238">            crm_perror(LOG_ERR, &quot;Cannot get password entry for uid: %d&quot;, uid);</a>
+<a name="ln239">            user = getenv(&quot;USER&quot;);</a>
+<a name="ln240">        }</a>
+<a name="ln241"> </a>
+<a name="ln242">        if (safe_str_eq(user, &quot;root&quot;) || safe_str_eq(user, CRM_DAEMON_USER)) {</a>
+<a name="ln243">            dir = CRM_CONFIG_DIR;</a>
+<a name="ln244"> </a>
+<a name="ln245">        } else {</a>
+<a name="ln246">            const char *home = NULL;</a>
+<a name="ln247"> </a>
+<a name="ln248">            if ((home = getenv(&quot;HOME&quot;)) == NULL) {</a>
+<a name="ln249">                if (pwent) {</a>
+<a name="ln250">                    home = pwent-&gt;pw_dir;</a>
+<a name="ln251">                }</a>
+<a name="ln252">            }</a>
+<a name="ln253"> </a>
+<a name="ln254">            if ((dir = getenv(&quot;TMPDIR&quot;)) == NULL) {</a>
+<a name="ln255">                dir = &quot;/tmp&quot;;</a>
+<a name="ln256">            }</a>
+<a name="ln257">            if (home &amp;&amp; home[0] == '/') {</a>
+<a name="ln258">                int rc = 0;</a>
+<a name="ln259"> </a>
+<a name="ln260">                cib_home = crm_concat(home, &quot;.cib&quot;, '/');</a>
+<a name="ln261"> </a>
+<a name="ln262">                rc = mkdir(cib_home, 0700);</a>
+<a name="ln263">                if (rc &lt; 0 &amp;&amp; errno != EEXIST) {</a>
+<a name="ln264">                    crm_perror(LOG_ERR, &quot;Couldn't create user-specific shadow directory: %s&quot;,</a>
+<a name="ln265">                               cib_home);</a>
+<a name="ln266">                    errno = 0;</a>
+<a name="ln267"> </a>
+<a name="ln268">                } else {</a>
+<a name="ln269">                    dir = cib_home;</a>
+<a name="ln270">                }</a>
+<a name="ln271">            }</a>
+<a name="ln272">        }</a>
+<a name="ln273">    }</a>
+<a name="ln274"> </a>
+<a name="ln275">    fullname = crm_concat(dir, name, '/');</a>
+<a name="ln276">    free(cib_home);</a>
+<a name="ln277">    free(name);</a>
+<a name="ln278"> </a>
+<a name="ln279">    return fullname;</a>
+<a name="ln280">}</a>
+<a name="ln281"> </a>
+<a name="ln282">cib_t *</a>
+<a name="ln283">cib_shadow_new(const char *shadow)</a>
+<a name="ln284">{</a>
+<a name="ln285">    cib_t *new_cib = NULL;</a>
+<a name="ln286">    char *shadow_file = NULL;</a>
+<a name="ln287"> </a>
+<a name="ln288">    CRM_CHECK(shadow != NULL, return NULL);</a>
+<a name="ln289"> </a>
+<a name="ln290">    shadow_file = get_shadow_file(shadow);</a>
+<a name="ln291">    new_cib = cib_file_new(shadow_file);</a>
+<a name="ln292">    free(shadow_file);</a>
+<a name="ln293"> </a>
+<a name="ln294">    return new_cib;</a>
+<a name="ln295">}</a>
+<a name="ln296"> </a>
+<a name="ln297">cib_t *</a>
+<a name="ln298">cib_new_no_shadow(void)</a>
+<a name="ln299">{</a>
+<a name="ln300">    unsetenv(&quot;CIB_shadow&quot;);</a>
+<a name="ln301">    return cib_new();</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">cib_t *</a>
+<a name="ln305">cib_new(void)</a>
+<a name="ln306">{</a>
+<a name="ln307">    const char *value = getenv(&quot;CIB_shadow&quot;);</a>
+<a name="ln308"> </a>
+<a name="ln309">    if (value &amp;&amp; value[0] != 0) {</a>
+<a name="ln310">        return cib_shadow_new(value);</a>
+<a name="ln311">    }</a>
+<a name="ln312"> </a>
+<a name="ln313">    value = getenv(&quot;CIB_file&quot;);</a>
+<a name="ln314">    if (value) {</a>
+<a name="ln315">        return cib_file_new(value);</a>
+<a name="ln316">    }</a>
+<a name="ln317"> </a>
+<a name="ln318">    value = getenv(&quot;CIB_port&quot;);</a>
+<a name="ln319">    if (value) {</a>
+<a name="ln320">        gboolean encrypted = TRUE;</a>
+<a name="ln321">        int port = crm_parse_int(value, NULL);</a>
+<a name="ln322">        const char *server = getenv(&quot;CIB_server&quot;);</a>
+<a name="ln323">        const char *user = getenv(&quot;CIB_user&quot;);</a>
+<a name="ln324">        const char *pass = getenv(&quot;CIB_passwd&quot;);</a>
+<a name="ln325"> </a>
+<a name="ln326">        value = getenv(&quot;CIB_encrypted&quot;);</a>
+<a name="ln327">        if (value &amp;&amp; crm_is_true(value) == FALSE) {</a>
+<a name="ln328">            crm_info(&quot;Disabling TLS&quot;);</a>
+<a name="ln329">            encrypted = FALSE;</a>
+<a name="ln330">        }</a>
+<a name="ln331"> </a>
+<a name="ln332">        if (user == NULL) {</a>
+<a name="ln333">            user = CRM_DAEMON_USER;</a>
+<a name="ln334">            crm_info(&quot;Defaulting to user: %s&quot;, user);</a>
+<a name="ln335">        }</a>
+<a name="ln336"> </a>
+<a name="ln337">        if (server == NULL) {</a>
+<a name="ln338">            server = &quot;localhost&quot;;</a>
+<a name="ln339">            crm_info(&quot;Defaulting to localhost&quot;);</a>
+<a name="ln340">        }</a>
+<a name="ln341"> </a>
+<a name="ln342">        return cib_remote_new(server, user, pass, port, encrypted);</a>
+<a name="ln343">    }</a>
+<a name="ln344"> </a>
+<a name="ln345">    return cib_native_new();</a>
+<a name="ln346">}</a>
+<a name="ln347"> </a>
+<a name="ln348">/*!</a>
+<a name="ln349"> * \internal</a>
+<a name="ln350"> * \brief Create a generic CIB connection instance</a>
+<a name="ln351"> *</a>
+<a name="ln352"> * \return Newly allocated and initialized cib_t instance</a>
+<a name="ln353"> *</a>
+<a name="ln354"> * \note This is called by each variant's cib_*_new() function before setting</a>
+<a name="ln355"> *       variant-specific values.</a>
+<a name="ln356"> */</a>
+<a name="ln357">cib_t *</a>
+<a name="ln358">cib_new_variant(void)</a>
+<a name="ln359">{</a>
+<a name="ln360">    cib_t *new_cib = NULL;</a>
+<a name="ln361"> </a>
+<a name="ln362">    new_cib = calloc(1, sizeof(cib_t));</a>
+<a name="ln363"> </a>
+<a name="ln364">    remove_cib_op_callback(0, TRUE); /* remove all */</a>
+<a name="ln365"> </a>
+<a name="ln366">    new_cib-&gt;call_id = 1;</a>
+<a name="ln367">    new_cib-&gt;variant = cib_undefined;</a>
+<a name="ln368"> </a>
+<a name="ln369">    new_cib-&gt;type = cib_no_connection;</a>
+<a name="ln370">    new_cib-&gt;state = cib_disconnected;</a>
+<a name="ln371"> </a>
+<a name="ln372">    new_cib-&gt;op_callback = NULL;</a>
+<a name="ln373">    new_cib-&gt;variant_opaque = NULL;</a>
+<a name="ln374">    new_cib-&gt;notify_list = NULL;</a>
+<a name="ln375"> </a>
+<a name="ln376">    /* the rest will get filled in by the variant constructor */</a>
+<a name="ln377">    new_cib-&gt;cmds = calloc(1, sizeof(cib_api_operations_t));</a>
+<a name="ln378"> </a>
+<a name="ln379">    new_cib-&gt;cmds-&gt;set_op_callback = cib_client_set_op_callback;</a>
+<a name="ln380">    new_cib-&gt;cmds-&gt;add_notify_callback = cib_client_add_notify_callback;</a>
+<a name="ln381">    new_cib-&gt;cmds-&gt;del_notify_callback = cib_client_del_notify_callback;</a>
+<a name="ln382">    new_cib-&gt;cmds-&gt;register_callback = cib_client_register_callback;</a>
+<a name="ln383">    new_cib-&gt;cmds-&gt;register_callback_full = cib_client_register_callback_full;</a>
+<a name="ln384"> </a>
+<a name="ln385">    new_cib-&gt;cmds-&gt;noop = cib_client_noop;</a>
+<a name="ln386">    new_cib-&gt;cmds-&gt;ping = cib_client_ping;</a>
+<a name="ln387">    new_cib-&gt;cmds-&gt;query = cib_client_query;</a>
+<a name="ln388">    new_cib-&gt;cmds-&gt;sync = cib_client_sync;</a>
+<a name="ln389"> </a>
+<a name="ln390">    new_cib-&gt;cmds-&gt;query_from = cib_client_query_from;</a>
+<a name="ln391">    new_cib-&gt;cmds-&gt;sync_from = cib_client_sync_from;</a>
+<a name="ln392"> </a>
+<a name="ln393">    new_cib-&gt;cmds-&gt;is_master = cib_client_is_master;</a>
+<a name="ln394">    new_cib-&gt;cmds-&gt;set_master = cib_client_set_master;</a>
+<a name="ln395">    new_cib-&gt;cmds-&gt;set_slave = cib_client_set_slave;</a>
+<a name="ln396">    new_cib-&gt;cmds-&gt;set_slave_all = cib_client_set_slave_all;</a>
+<a name="ln397"> </a>
+<a name="ln398">    new_cib-&gt;cmds-&gt;upgrade = cib_client_upgrade;</a>
+<a name="ln399">    new_cib-&gt;cmds-&gt;bump_epoch = cib_client_bump_epoch;</a>
+<a name="ln400"> </a>
+<a name="ln401">    new_cib-&gt;cmds-&gt;create = cib_client_create;</a>
+<a name="ln402">    new_cib-&gt;cmds-&gt;modify = cib_client_modify;</a>
+<a name="ln403">    new_cib-&gt;cmds-&gt;update = cib_client_update;</a>
+<a name="ln404">    new_cib-&gt;cmds-&gt;replace = cib_client_replace;</a>
+<a name="ln405">    new_cib-&gt;cmds-&gt;delete = cib_client_delete;</a>
+<a name="ln406">    new_cib-&gt;cmds-&gt;erase = cib_client_erase;</a>
+<a name="ln407"> </a>
+<a name="ln408">    new_cib-&gt;cmds-&gt;delete_absolute = cib_client_delete_absolute;</a>
+<a name="ln409"> </a>
+<a name="ln410">    return new_cib;</a>
+<a name="ln411">}</a>
+<a name="ln412"> </a>
+<a name="ln413">/*!</a>
+<a name="ln414"> * \brief Free all callbacks for a CIB connection</a>
+<a name="ln415"> *</a>
+<a name="ln416"> * \param[in] cib  CIB connection to clean up</a>
+<a name="ln417"> */</a>
+<a name="ln418">void</a>
+<a name="ln419">cib_free_callbacks(cib_t *cib)</a>
+<a name="ln420">{</a>
+<a name="ln421">    if (cib) {</a>
+<a name="ln422">        GList *list = cib-&gt;notify_list;</a>
+<a name="ln423"> </a>
+<a name="ln424">        while (list != NULL) {</a>
+<a name="ln425">            cib_notify_client_t *client = g_list_nth_data(list, 0);</a>
+<a name="ln426"> </a>
+<a name="ln427">            list = g_list_remove(list, client);</a>
+<a name="ln428">            free(client);</a>
+<a name="ln429">        }</a>
+<a name="ln430">        cib-&gt;notify_list = NULL;</a>
+<a name="ln431">    }</a>
+<a name="ln432">    destroy_op_callback_table();</a>
+<a name="ln433">}</a>
+<a name="ln434"> </a>
+<a name="ln435">/*!</a>
+<a name="ln436"> * \brief Free all memory used by CIB connection</a>
+<a name="ln437"> *</a>
+<a name="ln438"> * \param[in] cib  CIB connection to delete</a>
+<a name="ln439"> */</a>
+<a name="ln440">void</a>
+<a name="ln441">cib_delete(cib_t *cib)</a>
+<a name="ln442">{</a>
+<a name="ln443">    cib_free_callbacks(cib);</a>
+<a name="ln444">    if (cib) {</a>
+<a name="ln445">        cib-&gt;cmds-&gt;free(cib);</a>
+<a name="ln446">    }</a>
+<a name="ln447">}</a>
+<a name="ln448"> </a>
+<a name="ln449">int</a>
+<a name="ln450">cib_client_set_op_callback(cib_t * cib, void (*callback) (const xmlNode * msg, int call_id,</a>
+<a name="ln451">                                                          int rc, xmlNode * output))</a>
+<a name="ln452">{</a>
+<a name="ln453">    if (callback == NULL) {</a>
+<a name="ln454">        crm_info(&quot;Un-Setting operation callback&quot;);</a>
+<a name="ln455"> </a>
+<a name="ln456">    } else {</a>
+<a name="ln457">        crm_trace(&quot;Setting operation callback&quot;);</a>
+<a name="ln458">    }</a>
+<a name="ln459">    cib-&gt;op_callback = callback;</a>
+<a name="ln460">    return pcmk_ok;</a>
+<a name="ln461">}</a>
+<a name="ln462"> </a>
+<a name="ln463">int</a>
+<a name="ln464">cib_client_add_notify_callback(cib_t * cib, const char *event,</a>
+<a name="ln465">                               void (*callback) (const char *event, xmlNode * msg))</a>
+<a name="ln466">{</a>
+<a name="ln467">    GList *list_item = NULL;</a>
+<a name="ln468">    cib_notify_client_t *new_client = NULL;</a>
+<a name="ln469"> </a>
+<a name="ln470">    if (cib-&gt;variant != cib_native &amp;&amp; cib-&gt;variant != cib_remote) {</a>
+<a name="ln471">        return -EPROTONOSUPPORT;</a>
+<a name="ln472">    }</a>
+<a name="ln473"> </a>
+<a name="ln474">    crm_trace(&quot;Adding callback for %s events (%d)&quot;, event, g_list_length(cib-&gt;notify_list));</a>
+<a name="ln475"> </a>
+<a name="ln476">    new_client = calloc(1, sizeof(cib_notify_client_t));</a>
+<a name="ln477">    new_client-&gt;event = event;</a>
+<a name="ln478">    new_client-&gt;callback = callback;</a>
+<a name="ln479"> </a>
+<a name="ln480">    list_item = g_list_find_custom(cib-&gt;notify_list, new_client, ciblib_GCompareFunc);</a>
+<a name="ln481"> </a>
+<a name="ln482">    if (list_item != NULL) {</a>
+<a name="ln483">        crm_warn(&quot;Callback already present&quot;);</a>
+<a name="ln484">        free(new_client);</a>
+<a name="ln485">        return -ENOTUNIQ;</a>
+<a name="ln486"> </a>
+<a name="ln487">    } else {</a>
+<a name="ln488">        cib-&gt;notify_list = g_list_append(cib-&gt;notify_list, new_client);</a>
+<a name="ln489"> </a>
+<a name="ln490">        cib-&gt;cmds-&gt;register_notification(cib, event, 1);</a>
+<a name="ln491"> </a>
+<a name="ln492">        crm_trace(&quot;Callback added (%d)&quot;, g_list_length(cib-&gt;notify_list));</a>
+<a name="ln493">    }</a>
+<a name="ln494">    return pcmk_ok;</a>
+<a name="ln495">}</a>
+<a name="ln496"> </a>
+<a name="ln497">static int </a>
+<a name="ln498">get_notify_list_event_count(cib_t * cib, const char *event)</a>
+<a name="ln499">{</a>
+<a name="ln500">    GList *l = NULL;</a>
+<a name="ln501">    int count = 0;</a>
+<a name="ln502"> </a>
+<a name="ln503">    for (l = g_list_first(cib-&gt;notify_list); l; l = g_list_next(l)) {</a>
+<a name="ln504">        cib_notify_client_t *client = (cib_notify_client_t *)l-&gt;data;</a>
+<a name="ln505">        </a>
+<a name="ln506">        if (strcmp(client-&gt;event, event) == 0) {</a>
+<a name="ln507">            count++;</a>
+<a name="ln508">        }</a>
+<a name="ln509">    }</a>
+<a name="ln510">    crm_trace(&quot;event(%s) count : %d&quot;, event, count);</a>
+<a name="ln511">    return count;</a>
+<a name="ln512">}</a>
+<a name="ln513"> </a>
+<a name="ln514">int</a>
+<a name="ln515">cib_client_del_notify_callback(cib_t * cib, const char *event,</a>
+<a name="ln516">                               void (*callback) (const char *event, xmlNode * msg))</a>
+<a name="ln517">{</a>
+<a name="ln518">    GList *list_item = NULL;</a>
+<a name="ln519">    cib_notify_client_t *new_client = NULL;</a>
+<a name="ln520"> </a>
+<a name="ln521">    if (cib-&gt;variant != cib_native &amp;&amp; cib-&gt;variant != cib_remote) {</a>
+<a name="ln522">        return -EPROTONOSUPPORT;</a>
+<a name="ln523">    }</a>
+<a name="ln524"> </a>
+<a name="ln525">    if (get_notify_list_event_count(cib, event) == 0) {</a>
+<a name="ln526">        crm_debug(&quot;The callback of the event does not exist(%s)&quot;, event);</a>
+<a name="ln527">        return pcmk_ok;</a>
+<a name="ln528">    }</a>
+<a name="ln529"> </a>
+<a name="ln530">    crm_debug(&quot;Removing callback for %s events&quot;, event);</a>
+<a name="ln531"> </a>
+<a name="ln532">    new_client = calloc(1, sizeof(cib_notify_client_t));</a>
+<a name="ln533">    new_client-&gt;event = event;</a>
+<a name="ln534">    new_client-&gt;callback = callback;</a>
+<a name="ln535"> </a>
+<a name="ln536">    list_item = g_list_find_custom(cib-&gt;notify_list, new_client, ciblib_GCompareFunc);</a>
+<a name="ln537"> </a>
+<a name="ln538">    if (list_item != NULL) {</a>
+<a name="ln539">        cib_notify_client_t *list_client = list_item-&gt;data;</a>
+<a name="ln540"> </a>
+<a name="ln541">        cib-&gt;notify_list = g_list_remove(cib-&gt;notify_list, list_client);</a>
+<a name="ln542">        free(list_client);</a>
+<a name="ln543"> </a>
+<a name="ln544">        crm_trace(&quot;Removed callback&quot;);</a>
+<a name="ln545"> </a>
+<a name="ln546">    } else {</a>
+<a name="ln547">        crm_trace(&quot;Callback not present&quot;);</a>
+<a name="ln548">    }</a>
+<a name="ln549"> </a>
+<a name="ln550">    if (get_notify_list_event_count(cib, event) == 0) {</a>
+<a name="ln551">        /* When there is not the registration of the event, the processing turns off a notice. */</a>
+<a name="ln552">        cib-&gt;cmds-&gt;register_notification(cib, event, 0);</a>
+<a name="ln553">    }</a>
+<a name="ln554"> </a>
+<a name="ln555">    free(new_client);</a>
+<a name="ln556">    return pcmk_ok;</a>
+<a name="ln557">}</a>
+<a name="ln558"> </a>
+<a name="ln559">gint</a>
+<a name="ln560">ciblib_GCompareFunc(gconstpointer a, gconstpointer b)</a>
+<a name="ln561">{</a>
+<a name="ln562">    int rc = 0;</a>
+<a name="ln563">    const cib_notify_client_t *a_client = a;</a>
+<a name="ln564">    const cib_notify_client_t *b_client = b;</a>
+<a name="ln565"> </a>
+<a name="ln566">    CRM_CHECK(a_client-&gt;event != NULL &amp;&amp; b_client-&gt;event != NULL, return 0);</a>
+<a name="ln567">    rc = strcmp(a_client-&gt;event, b_client-&gt;event);</a>
+<a name="ln568">    if (rc == 0) {</a>
+<a name="ln569">        if (a_client-&gt;callback == b_client-&gt;callback) {</a>
+<a name="ln570">            return 0;</a>
+<a name="ln571">        } else if (((long)a_client-&gt;callback) &lt; ((long)b_client-&gt;callback)) {</a>
+<a name="ln572">            crm_trace(&quot;callbacks for %s are not equal: %p &lt; %p&quot;,</a>
+<a name="ln573">                      a_client-&gt;event, a_client-&gt;callback, b_client-&gt;callback);</a>
+<a name="ln574">            return -1;</a>
+<a name="ln575">        }</a>
+<a name="ln576">        crm_trace(&quot;callbacks for %s are not equal: %p &gt; %p&quot;,</a>
+<a name="ln577">                  a_client-&gt;event, a_client-&gt;callback, b_client-&gt;callback);</a>
+<a name="ln578">        return 1;</a>
+<a name="ln579">    }</a>
+<a name="ln580">    return rc;</a>
+<a name="ln581">}</a>
+<a name="ln582"> </a>
+<a name="ln583">static gboolean</a>
+<a name="ln584">cib_async_timeout_handler(gpointer data)</a>
+<a name="ln585">{</a>
+<a name="ln586">    struct timer_rec_s *timer = data;</a>
+<a name="ln587"> </a>
+<a name="ln588">    crm_debug(&quot;Async call %d timed out after %ds&quot;, timer-&gt;call_id, timer-&gt;timeout);</a>
+<a name="ln589">    cib_native_callback(timer-&gt;cib, NULL, timer-&gt;call_id, -ETIME);</a>
+<a name="ln590"> </a>
+<a name="ln591">    /* Always return TRUE, never remove the handler</a>
+<a name="ln592">     * We do that in remove_cib_op_callback()</a>
+<a name="ln593">     */</a>
+<a name="ln594">    return TRUE;</a>
+<a name="ln595">}</a>
+<a name="ln596"> </a>
+<a name="ln597">gboolean</a>
+<a name="ln598">cib_client_register_callback(cib_t * cib, int call_id, int timeout, gboolean only_success,</a>
+<a name="ln599">                             void *user_data, const char *callback_name,</a>
+<a name="ln600">                             void (*callback) (xmlNode *, int, int, xmlNode *, void *))</a>
+<a name="ln601">{</a>
+<a name="ln602">    return cib_client_register_callback_full(cib, call_id, timeout,</a>
+<a name="ln603">                                             only_success, user_data,</a>
+<a name="ln604">                                             callback_name, callback, NULL);</a>
+<a name="ln605">}</a>
+<a name="ln606"> </a>
+<a name="ln607">gboolean</a>
+<a name="ln608">cib_client_register_callback_full(cib_t *cib, int call_id, int timeout,</a>
+<a name="ln609">                                  gboolean only_success, void *user_data,</a>
+<a name="ln610">                                  const char *callback_name,</a>
+<a name="ln611">                                  void (*callback)(xmlNode *, int, int,</a>
+<a name="ln612">                                                   xmlNode *, void *),</a>
+<a name="ln613">                                  void (*free_func)(void *))</a>
+<a name="ln614">{</a>
+<a name="ln615">    cib_callback_client_t *blob = NULL;</a>
+<a name="ln616"> </a>
+<a name="ln617">    if (call_id &lt; 0) {</a>
+<a name="ln618">        if (only_success == FALSE) {</a>
+<a name="ln619">            callback(NULL, call_id, call_id, NULL, user_data);</a>
+<a name="ln620">        } else {</a>
+<a name="ln621">            crm_warn(&quot;CIB call failed: %s&quot;, pcmk_strerror(call_id));</a>
+<a name="ln622">        }</a>
+<a name="ln623">        if (user_data &amp;&amp; free_func) {</a>
+<a name="ln624">            free_func(user_data);</a>
+<a name="ln625">        }</a>
+<a name="ln626">        return FALSE;</a>
+<a name="ln627">    }</a>
+<a name="ln628"> </a>
+<a name="ln629">    blob = calloc(1, sizeof(cib_callback_client_t));</a>
+<a name="ln630">    blob-&gt;id = callback_name;</a>
+<a name="ln631">    blob-&gt;only_success = only_success;</a>
+<a name="ln632">    blob-&gt;user_data = user_data;</a>
+<a name="ln633">    blob-&gt;callback = callback;</a>
+<a name="ln634">    blob-&gt;free_func = free_func;</a>
+<a name="ln635"> </a>
+<a name="ln636">    if (timeout &gt; 0) {</a>
+<a name="ln637">        struct timer_rec_s *async_timer = NULL;</a>
+<a name="ln638"> </a>
+<a name="ln639">        async_timer = calloc(1, sizeof(struct timer_rec_s));</a>
+<a name="ln640">        blob-&gt;timer = async_timer;</a>
+<a name="ln641"> </a>
+<a name="ln642">        async_timer-&gt;cib = cib;</a>
+<a name="ln643">        async_timer-&gt;call_id = call_id;</a>
+<a name="ln644">        async_timer-&gt;timeout = timeout * 1000;</a>
+<a name="ln645">        async_timer-&gt;ref =</a>
+<a name="ln646">            g_timeout_add(async_timer-&gt;timeout, cib_async_timeout_handler, async_timer);</a>
+<a name="ln647">    }</a>
+<a name="ln648"> </a>
+<a name="ln649">    crm_trace(&quot;Adding callback %s for call %d&quot;, callback_name, call_id);</a>
+<a name="ln650">    g_hash_table_insert(cib_op_callback_table, GINT_TO_POINTER(call_id), blob);</a>
+<a name="ln651"> </a>
+<a name="ln652">    return TRUE;</a>
+<a name="ln653">}</a>
+<a name="ln654"> </a>
+<a name="ln655">void</a>
+<a name="ln656">remove_cib_op_callback(int call_id, gboolean all_callbacks)</a>
+<a name="ln657">{</a>
+<a name="ln658">    if (all_callbacks) {</a>
+<a name="ln659">        destroy_op_callback_table();</a>
+<a name="ln660">        cib_op_callback_table = g_hash_table_new_full(g_direct_hash, g_direct_equal,</a>
+<a name="ln661">                                                      NULL, cib_destroy_op_callback);</a>
+<a name="ln662">    } else {</a>
+<a name="ln663">        g_hash_table_remove(cib_op_callback_table, GINT_TO_POINTER(call_id));</a>
+<a name="ln664">    }</a>
+<a name="ln665">}</a>
+<a name="ln666"> </a>
+<a name="ln667">int</a>
+<a name="ln668">num_cib_op_callbacks(void)</a>
+<a name="ln669">{</a>
+<a name="ln670">    if (cib_op_callback_table == NULL) {</a>
+<a name="ln671">        return 0;</a>
+<a name="ln672">    }</a>
+<a name="ln673">    return g_hash_table_size(cib_op_callback_table);</a>
+<a name="ln674">}</a>
+<a name="ln675"> </a>
+<a name="ln676">static void</a>
+<a name="ln677">cib_dump_pending_op(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln678">{</a>
+<a name="ln679">    int call = GPOINTER_TO_INT(key);</a>
+<a name="ln680">    cib_callback_client_t *blob = value;</a>
+<a name="ln681"> </a>
+<a name="ln682">    crm_debug(&quot;Call %d (%s): pending&quot;, call, crm_str(blob-&gt;id));</a>
+<a name="ln683">}</a>
+<a name="ln684"> </a>
+<a name="ln685">void</a>
+<a name="ln686">cib_dump_pending_callbacks(void)</a>
+<a name="ln687">{</a>
+<a name="ln688">    if (cib_op_callback_table == NULL) {</a>
+<a name="ln689">        return;</a>
+<a name="ln690">    }</a>
+<a name="ln691">    return g_hash_table_foreach(cib_op_callback_table, cib_dump_pending_op, NULL);</a>
+<a name="ln692">}</a>
+
+</code></pre>
+<div class="balloon" rel="366"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_cib'. Check lines: 366, 362.</p></div>
+<div class="balloon" rel="379"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_cib->cmds'. Check lines: 379, 377.</p></div>
+<div class="balloon" rel="477"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_client'. Check lines: 477, 476.</p></div>
+<div class="balloon" rel="533"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_client'. Check lines: 533, 532.</p></div>
+<div class="balloon" rel="630"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'blob'. Check lines: 630, 629.</p></div>
+<div class="balloon" rel="642"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'async_timer'. Check lines: 642, 639.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

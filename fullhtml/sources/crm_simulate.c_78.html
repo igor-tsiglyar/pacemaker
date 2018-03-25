@@ -1,0 +1,974 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2009 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27">#include &lt;stdlib.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;sys/stat.h&gt;</a>
+<a name="ln30">#include &lt;sys/param.h&gt;</a>
+<a name="ln31">#include &lt;sys/types.h&gt;</a>
+<a name="ln32">#include &lt;dirent.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;crm/crm.h&gt;</a>
+<a name="ln35">#include &lt;crm/cib.h&gt;</a>
+<a name="ln36">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln37">#include &lt;crm/transition.h&gt;</a>
+<a name="ln38">#include &lt;crm/common/iso8601.h&gt;</a>
+<a name="ln39">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln40">#include &lt;allocate.h&gt;</a>
+<a name="ln41">#include &quot;fake_transition.h&quot;</a>
+<a name="ln42"> </a>
+<a name="ln43">cib_t *global_cib = NULL;</a>
+<a name="ln44">GListPtr op_fail = NULL;</a>
+<a name="ln45">bool action_numbers = FALSE;</a>
+<a name="ln46">gboolean quiet = FALSE;</a>
+<a name="ln47">gboolean print_pending = TRUE;</a>
+<a name="ln48">char *temp_shadow = NULL;</a>
+<a name="ln49">extern gboolean bringing_nodes_online;</a>
+<a name="ln50"> </a>
+<a name="ln51">#define quiet_log(fmt, args...) do {		\</a>
+<a name="ln52">	if(quiet == FALSE) {			\</a>
+<a name="ln53">	    printf(fmt , ##args);		\</a>
+<a name="ln54">	}					\</a>
+<a name="ln55">    } while(0)</a>
+<a name="ln56"> </a>
+<a name="ln57">extern void cleanup_alloc_calculations(pe_working_set_t * data_set);</a>
+<a name="ln58"> </a>
+<a name="ln59">extern xmlNode *do_calculations(pe_working_set_t * data_set, xmlNode * xml_input, crm_time_t * now);</a>
+<a name="ln60"> </a>
+<a name="ln61">char *use_date = NULL;</a>
+<a name="ln62"> </a>
+<a name="ln63">static void</a>
+<a name="ln64">get_date(pe_working_set_t * data_set)</a>
+<a name="ln65">{</a>
+<a name="ln66">    int value = 0;</a>
+<a name="ln67">    time_t original_date = 0;</a>
+<a name="ln68"> </a>
+<a name="ln69">    crm_element_value_int(data_set-&gt;input, &quot;execution-date&quot;, &amp;value);</a>
+<a name="ln70">    original_date = value;</a>
+<a name="ln71"> </a>
+<a name="ln72">    if (use_date) {</a>
+<a name="ln73">        data_set-&gt;now = crm_time_new(use_date);</a>
+<a name="ln74"> </a>
+<a name="ln75">    } else if(original_date) {</a>
+<a name="ln76">        char *when = NULL;</a>
+<a name="ln77"> </a>
+<a name="ln78">        data_set-&gt;now = crm_time_new(NULL);</a>
+<a name="ln79">        crm_time_set_timet(data_set-&gt;now, &amp;original_date);</a>
+<a name="ln80"> </a>
+<a name="ln81">        when = crm_time_as_string(data_set-&gt;now, crm_time_log_date|crm_time_log_timeofday);</a>
+<a name="ln82">        printf(&quot;Using the original execution date of: %s\n&quot;, when);</a>
+<a name="ln83"> </a>
+<a name="ln84">        free(when);</a>
+<a name="ln85">    }</a>
+<a name="ln86">}</a>
+<a name="ln87"> </a>
+<a name="ln88">static void</a>
+<a name="ln89">print_cluster_status(pe_working_set_t * data_set, long options)</a>
+<a name="ln90">{</a>
+<a name="ln91">    char *online_nodes = NULL;</a>
+<a name="ln92">    char *online_remote_nodes = NULL;</a>
+<a name="ln93">    char *online_remote_containers = NULL;</a>
+<a name="ln94">    char *offline_nodes = NULL;</a>
+<a name="ln95">    char *offline_remote_nodes = NULL;</a>
+<a name="ln96"> </a>
+<a name="ln97">    GListPtr gIter = NULL;</a>
+<a name="ln98"> </a>
+<a name="ln99">    for (gIter = data_set-&gt;nodes; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln100">        node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln101">        const char *node_mode = NULL;</a>
+<a name="ln102">        char *node_name = NULL;</a>
+<a name="ln103"> </a>
+<a name="ln104">        if (is_container_remote_node(node)) {</a>
+<a name="ln105">            node_name = crm_strdup_printf(&quot;%s:%s&quot;, node-&gt;details-&gt;uname, node-&gt;details-&gt;remote_rsc-&gt;container-&gt;id);</a>
+<a name="ln106">        } else {</a>
+<a name="ln107">            node_name = crm_strdup_printf(&quot;%s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln108">        }</a>
+<a name="ln109"> </a>
+<a name="ln110">        if (node-&gt;details-&gt;unclean) {</a>
+<a name="ln111">            if (node-&gt;details-&gt;online &amp;&amp; node-&gt;details-&gt;unclean) {</a>
+<a name="ln112">                node_mode = &quot;UNCLEAN (online)&quot;;</a>
+<a name="ln113"> </a>
+<a name="ln114">            } else if (node-&gt;details-&gt;pending) {</a>
+<a name="ln115">                node_mode = &quot;UNCLEAN (pending)&quot;;</a>
+<a name="ln116"> </a>
+<a name="ln117">            } else {</a>
+<a name="ln118">                node_mode = &quot;UNCLEAN (offline)&quot;;</a>
+<a name="ln119">            }</a>
+<a name="ln120"> </a>
+<a name="ln121">        } else if (node-&gt;details-&gt;pending) {</a>
+<a name="ln122">            node_mode = &quot;pending&quot;;</a>
+<a name="ln123"> </a>
+<a name="ln124">        } else if (node-&gt;details-&gt;standby_onfail &amp;&amp; node-&gt;details-&gt;online) {</a>
+<a name="ln125">            node_mode = &quot;standby (on-fail)&quot;;</a>
+<a name="ln126"> </a>
+<a name="ln127">        } else if (node-&gt;details-&gt;standby) {</a>
+<a name="ln128">            if (node-&gt;details-&gt;online) {</a>
+<a name="ln129">                node_mode = &quot;standby&quot;;</a>
+<a name="ln130">            } else {</a>
+<a name="ln131">                node_mode = &quot;OFFLINE (standby)&quot;;</a>
+<a name="ln132">            }</a>
+<a name="ln133"> </a>
+<a name="ln134">        } else if (node-&gt;details-&gt;maintenance) {</a>
+<a name="ln135">            if (node-&gt;details-&gt;online) {</a>
+<a name="ln136">                node_mode = &quot;maintenance&quot;;</a>
+<a name="ln137">            } else {</a>
+<a name="ln138">                node_mode = &quot;OFFLINE (maintenance)&quot;;</a>
+<a name="ln139">            }</a>
+<a name="ln140"> </a>
+<a name="ln141">        } else if (node-&gt;details-&gt;online) {</a>
+<a name="ln142">            if (is_container_remote_node(node)) {</a>
+<a name="ln143">                online_remote_containers = add_list_element(online_remote_containers, node_name);</a>
+<a name="ln144">            } else if (is_baremetal_remote_node(node)) {</a>
+<a name="ln145">                online_remote_nodes = add_list_element(online_remote_nodes, node_name);</a>
+<a name="ln146">            } else {</a>
+<a name="ln147">                online_nodes = add_list_element(online_nodes, node_name);</a>
+<a name="ln148">            }</a>
+<a name="ln149">            free(node_name);</a>
+<a name="ln150">            continue;</a>
+<a name="ln151"> </a>
+<a name="ln152">        } else {</a>
+<a name="ln153">            if (is_baremetal_remote_node(node)) {</a>
+<a name="ln154">                offline_remote_nodes = add_list_element(offline_remote_nodes, node_name);</a>
+<a name="ln155">            } else if (is_container_remote_node(node)) {</a>
+<a name="ln156">                /* ignore offline container nodes */</a>
+<a name="ln157">            } else {</a>
+<a name="ln158">                offline_nodes = add_list_element(offline_nodes, node_name);</a>
+<a name="ln159">            }</a>
+<a name="ln160">            free(node_name);</a>
+<a name="ln161">            continue;</a>
+<a name="ln162">        }</a>
+<a name="ln163"> </a>
+<a name="ln164">        if (is_container_remote_node(node)) {</a>
+<a name="ln165">            printf(&quot;ContainerNode %s: %s\n&quot;, node_name, node_mode);</a>
+<a name="ln166">        } else if (is_baremetal_remote_node(node)) {</a>
+<a name="ln167">            printf(&quot;RemoteNode %s: %s\n&quot;, node_name, node_mode);</a>
+<a name="ln168">        } else if (safe_str_eq(node-&gt;details-&gt;uname, node-&gt;details-&gt;id)) {</a>
+<a name="ln169">            printf(&quot;Node %s: %s\n&quot;, node_name, node_mode);</a>
+<a name="ln170">        } else {</a>
+<a name="ln171">            printf(&quot;Node %s (%s): %s\n&quot;, node_name, node-&gt;details-&gt;id, node_mode);</a>
+<a name="ln172">        }</a>
+<a name="ln173"> </a>
+<a name="ln174">        free(node_name);</a>
+<a name="ln175">    }</a>
+<a name="ln176"> </a>
+<a name="ln177">    if (online_nodes) {</a>
+<a name="ln178">        printf(&quot;Online: [%s ]\n&quot;, online_nodes);</a>
+<a name="ln179">        free(online_nodes);</a>
+<a name="ln180">    }</a>
+<a name="ln181">    if (offline_nodes) {</a>
+<a name="ln182">        printf(&quot;OFFLINE: [%s ]\n&quot;, offline_nodes);</a>
+<a name="ln183">        free(offline_nodes);</a>
+<a name="ln184">    }</a>
+<a name="ln185">    if (online_remote_nodes) {</a>
+<a name="ln186">        printf(&quot;RemoteOnline: [%s ]\n&quot;, online_remote_nodes);</a>
+<a name="ln187">        free(online_remote_nodes);</a>
+<a name="ln188">    }</a>
+<a name="ln189">    if (offline_remote_nodes) {</a>
+<a name="ln190">        printf(&quot;RemoteOFFLINE: [%s ]\n&quot;, offline_remote_nodes);</a>
+<a name="ln191">        free(offline_remote_nodes);</a>
+<a name="ln192">    }</a>
+<a name="ln193">    if (online_remote_containers) {</a>
+<a name="ln194">        printf(&quot;Containers: [%s ]\n&quot;, online_remote_containers);</a>
+<a name="ln195">        free(online_remote_containers);</a>
+<a name="ln196">    }</a>
+<a name="ln197"> </a>
+<a name="ln198">    fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln199">    for (gIter = data_set-&gt;resources; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln200">        resource_t *rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln201"> </a>
+<a name="ln202">        if (is_set(rsc-&gt;flags, pe_rsc_orphan)</a>
+<a name="ln203">            &amp;&amp; rsc-&gt;role == RSC_ROLE_STOPPED) {</a>
+<a name="ln204">            continue;</a>
+<a name="ln205">        }</a>
+<a name="ln206">        rsc-&gt;fns-&gt;print(rsc, NULL, pe_print_printf | options, stdout);</a>
+<a name="ln207">    }</a>
+<a name="ln208">    fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln209">}</a>
+<a name="ln210"> </a>
+<a name="ln211">static char *</a>
+<a name="ln212">create_action_name(action_t * action)</a>
+<a name="ln213">{</a>
+<a name="ln214">    char *action_name = NULL;</a>
+<a name="ln215">    const char *prefix = NULL;</a>
+<a name="ln216">    const char *action_host = NULL;</a>
+<a name="ln217">    const char *task = action-&gt;task;</a>
+<a name="ln218"> </a>
+<a name="ln219">    if (action-&gt;node) {</a>
+<a name="ln220">        action_host = action-&gt;node-&gt;details-&gt;uname;</a>
+<a name="ln221">    } else if (is_not_set(action-&gt;flags, pe_action_pseudo)) {</a>
+<a name="ln222">        action_host = &quot;&lt;none&gt;&quot;;</a>
+<a name="ln223">    }</a>
+<a name="ln224"> </a>
+<a name="ln225">    if (safe_str_eq(action-&gt;task, RSC_CANCEL)) {</a>
+<a name="ln226">        prefix = &quot;Cancel &quot;;</a>
+<a name="ln227">        task = &quot;monitor&quot;;       /* TO-DO: Hack! */</a>
+<a name="ln228">    }</a>
+<a name="ln229"> </a>
+<a name="ln230">    if (action-&gt;rsc &amp;&amp; action-&gt;rsc-&gt;clone_name) {</a>
+<a name="ln231">        char *key = NULL;</a>
+<a name="ln232">        const char *name = action-&gt;rsc-&gt;clone_name;</a>
+<a name="ln233">        const char *interval_s = g_hash_table_lookup(action-&gt;meta, XML_LRM_ATTR_INTERVAL);</a>
+<a name="ln234"> </a>
+<a name="ln235">        int interval = crm_parse_int(interval_s, &quot;0&quot;);</a>
+<a name="ln236"> </a>
+<a name="ln237">        if (safe_str_eq(action-&gt;task, RSC_NOTIFY)</a>
+<a name="ln238">            || safe_str_eq(action-&gt;task, RSC_NOTIFIED)) {</a>
+<a name="ln239">            const char *n_type = g_hash_table_lookup(action-&gt;meta, &quot;notify_key_type&quot;);</a>
+<a name="ln240">            const char *n_task = g_hash_table_lookup(action-&gt;meta, &quot;notify_key_operation&quot;);</a>
+<a name="ln241"> </a>
+<a name="ln242">            CRM_ASSERT(n_type != NULL);</a>
+<a name="ln243">            CRM_ASSERT(n_task != NULL);</a>
+<a name="ln244">            key = generate_notify_key(name, n_type, n_task);</a>
+<a name="ln245"> </a>
+<a name="ln246">        } else {</a>
+<a name="ln247">            key = generate_op_key(name, task, interval);</a>
+<a name="ln248">        }</a>
+<a name="ln249"> </a>
+<a name="ln250">        if (action_host) {</a>
+<a name="ln251">            action_name = crm_strdup_printf(&quot;%s%s %s&quot;, prefix ? prefix : &quot;&quot;, key, action_host);</a>
+<a name="ln252">        } else {</a>
+<a name="ln253">            action_name = crm_strdup_printf(&quot;%s%s&quot;, prefix ? prefix : &quot;&quot;, key);</a>
+<a name="ln254">        }</a>
+<a name="ln255">        free(key);</a>
+<a name="ln256"> </a>
+<a name="ln257">    } else if (safe_str_eq(action-&gt;task, CRM_OP_FENCE)) {</a>
+<a name="ln258">        const char *op = g_hash_table_lookup(action-&gt;meta, &quot;stonith_action&quot;);</a>
+<a name="ln259"> </a>
+<a name="ln260">        action_name = crm_strdup_printf(&quot;%s%s '%s' %s&quot;, prefix ? prefix : &quot;&quot;, action-&gt;task, op, action_host);</a>
+<a name="ln261"> </a>
+<a name="ln262">    } else if (action-&gt;rsc &amp;&amp; action_host) {</a>
+<a name="ln263">        action_name = crm_strdup_printf(&quot;%s%s %s&quot;, prefix ? prefix : &quot;&quot;, action-&gt;uuid, action_host);</a>
+<a name="ln264"> </a>
+<a name="ln265">    } else if (action_host) {</a>
+<a name="ln266">        action_name = crm_strdup_printf(&quot;%s%s %s&quot;, prefix ? prefix : &quot;&quot;, action-&gt;task, action_host);</a>
+<a name="ln267"> </a>
+<a name="ln268">    } else {</a>
+<a name="ln269">        action_name = crm_strdup_printf(&quot;%s&quot;, action-&gt;uuid);</a>
+<a name="ln270">    }</a>
+<a name="ln271"> </a>
+<a name="ln272">    if(action_numbers) {</a>
+<a name="ln273">        char *with_id = crm_strdup_printf(&quot;%s (%d)&quot;, action_name, action-&gt;id);</a>
+<a name="ln274"> </a>
+<a name="ln275">        free(action_name);</a>
+<a name="ln276">        action_name = with_id;</a>
+<a name="ln277">    }</a>
+<a name="ln278">    return action_name;</a>
+<a name="ln279">}</a>
+<a name="ln280"> </a>
+<a name="ln281">static void</a>
+<a name="ln282">create_dotfile(pe_working_set_t * data_set, const char *dot_file, gboolean all_actions)</a>
+<a name="ln283">{</a>
+<a name="ln284">    GListPtr gIter = NULL;</a>
+<a name="ln285">    FILE *dot_strm = fopen(dot_file, &quot;w&quot;);</a>
+<a name="ln286"> </a>
+<a name="ln287">    if (dot_strm == NULL) {</a>
+<a name="ln288">        crm_perror(LOG_ERR, &quot;Could not open %s for writing&quot;, dot_file);</a>
+<a name="ln289">        return;</a>
+<a name="ln290">    }</a>
+<a name="ln291"> </a>
+<a name="ln292">    fprintf(dot_strm, &quot; digraph \&quot;g\&quot; {\n&quot;);</a>
+<a name="ln293">    for (gIter = data_set-&gt;actions; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln294">        action_t *action = (action_t *) gIter-&gt;data;</a>
+<a name="ln295">        const char *style = &quot;dashed&quot;;</a>
+<a name="ln296">        const char *font = &quot;black&quot;;</a>
+<a name="ln297">        const char *color = &quot;black&quot;;</a>
+<a name="ln298">        char *action_name = create_action_name(action);</a>
+<a name="ln299"> </a>
+<a name="ln300">        crm_trace(&quot;Action %d: %s %s %p&quot;, action-&gt;id, action_name, action-&gt;uuid, action);</a>
+<a name="ln301"> </a>
+<a name="ln302">        if (is_set(action-&gt;flags, pe_action_pseudo)) {</a>
+<a name="ln303">            font = &quot;orange&quot;;</a>
+<a name="ln304">        }</a>
+<a name="ln305"> </a>
+<a name="ln306">        if (is_set(action-&gt;flags, pe_action_dumped)) {</a>
+<a name="ln307">            style = &quot;bold&quot;;</a>
+<a name="ln308">            color = &quot;green&quot;;</a>
+<a name="ln309"> </a>
+<a name="ln310">        } else if (action-&gt;rsc != NULL &amp;&amp; is_not_set(action-&gt;rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln311">            color = &quot;red&quot;;</a>
+<a name="ln312">            font = &quot;purple&quot;;</a>
+<a name="ln313">            if (all_actions == FALSE) {</a>
+<a name="ln314">                goto dont_write;</a>
+<a name="ln315">            }</a>
+<a name="ln316"> </a>
+<a name="ln317">        } else if (is_set(action-&gt;flags, pe_action_optional)) {</a>
+<a name="ln318">            color = &quot;blue&quot;;</a>
+<a name="ln319">            if (all_actions == FALSE) {</a>
+<a name="ln320">                goto dont_write;</a>
+<a name="ln321">            }</a>
+<a name="ln322"> </a>
+<a name="ln323">        } else {</a>
+<a name="ln324">            color = &quot;red&quot;;</a>
+<a name="ln325">            CRM_CHECK(is_set(action-&gt;flags, pe_action_runnable) == FALSE,;</a>
+<a name="ln326">                );</a>
+<a name="ln327">        }</a>
+<a name="ln328"> </a>
+<a name="ln329">        set_bit(action-&gt;flags, pe_action_dumped);</a>
+<a name="ln330">        crm_trace(&quot;\&quot;%s\&quot; [ style=%s color=\&quot;%s\&quot; fontcolor=\&quot;%s\&quot;]&quot;,</a>
+<a name="ln331">                action_name, style, color, font);</a>
+<a name="ln332">        fprintf(dot_strm, &quot;\&quot;%s\&quot; [ style=%s color=\&quot;%s\&quot; fontcolor=\&quot;%s\&quot;]\n&quot;,</a>
+<a name="ln333">                action_name, style, color, font);</a>
+<a name="ln334">  dont_write:</a>
+<a name="ln335">        free(action_name);</a>
+<a name="ln336">    }</a>
+<a name="ln337"> </a>
+<a name="ln338">    for (gIter = data_set-&gt;actions; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln339">        action_t *action = (action_t *) gIter-&gt;data;</a>
+<a name="ln340"> </a>
+<a name="ln341">        GListPtr gIter2 = NULL;</a>
+<a name="ln342"> </a>
+<a name="ln343">        for (gIter2 = action-&gt;actions_before; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln344">            action_wrapper_t *before = (action_wrapper_t *) gIter2-&gt;data;</a>
+<a name="ln345"> </a>
+<a name="ln346">            char *before_name = NULL;</a>
+<a name="ln347">            char *after_name = NULL;</a>
+<a name="ln348">            const char *style = &quot;dashed&quot;;</a>
+<a name="ln349">            gboolean optional = TRUE;</a>
+<a name="ln350"> </a>
+<a name="ln351">            if (before-&gt;state == pe_link_dumped) {</a>
+<a name="ln352">                optional = FALSE;</a>
+<a name="ln353">                style = &quot;bold&quot;;</a>
+<a name="ln354">            } else if (is_set(action-&gt;flags, pe_action_pseudo)</a>
+<a name="ln355">                       &amp;&amp; (before-&gt;type &amp; pe_order_stonith_stop)) {</a>
+<a name="ln356">                continue;</a>
+<a name="ln357">            } else if (before-&gt;state == pe_link_dup) {</a>
+<a name="ln358">                continue;</a>
+<a name="ln359">            } else if (before-&gt;type == pe_order_none) {</a>
+<a name="ln360">                continue;</a>
+<a name="ln361">            } else if (is_set(before-&gt;action-&gt;flags, pe_action_dumped)</a>
+<a name="ln362">                       &amp;&amp; is_set(action-&gt;flags, pe_action_dumped)</a>
+<a name="ln363">                       &amp;&amp; before-&gt;type != pe_order_load) {</a>
+<a name="ln364">                optional = FALSE;</a>
+<a name="ln365">            }</a>
+<a name="ln366"> </a>
+<a name="ln367">            if (all_actions || optional == FALSE) {</a>
+<a name="ln368">                before_name = create_action_name(before-&gt;action);</a>
+<a name="ln369">                after_name = create_action_name(action);</a>
+<a name="ln370">                crm_trace(&quot;\&quot;%s\&quot; -&gt; \&quot;%s\&quot; [ style = %s]&quot;,</a>
+<a name="ln371">                        before_name, after_name, style);</a>
+<a name="ln372">                fprintf(dot_strm, &quot;\&quot;%s\&quot; -&gt; \&quot;%s\&quot; [ style = %s]\n&quot;,</a>
+<a name="ln373">                        before_name, after_name, style);</a>
+<a name="ln374">                free(before_name);</a>
+<a name="ln375">                free(after_name);</a>
+<a name="ln376">            }</a>
+<a name="ln377">        }</a>
+<a name="ln378">    }</a>
+<a name="ln379"> </a>
+<a name="ln380">    fprintf(dot_strm, &quot;}\n&quot;);</a>
+<a name="ln381">    if (dot_strm != NULL) {</a>
+<a name="ln382">        fflush(dot_strm);</a>
+<a name="ln383">        fclose(dot_strm);</a>
+<a name="ln384">    }</a>
+<a name="ln385">}</a>
+<a name="ln386"> </a>
+<a name="ln387">static void</a>
+<a name="ln388">setup_input(const char *input, const char *output)</a>
+<a name="ln389">{</a>
+<a name="ln390">    int rc = pcmk_ok;</a>
+<a name="ln391">    cib_t *cib_conn = NULL;</a>
+<a name="ln392">    xmlNode *cib_object = NULL;</a>
+<a name="ln393">    char *local_output = NULL;</a>
+<a name="ln394"> </a>
+<a name="ln395">    if (input == NULL) {</a>
+<a name="ln396">        /* Use live CIB */</a>
+<a name="ln397">        cib_conn = cib_new();</a>
+<a name="ln398">        rc = cib_conn-&gt;cmds-&gt;signon(cib_conn, crm_system_name, cib_command);</a>
+<a name="ln399"> </a>
+<a name="ln400">        if (rc == pcmk_ok) {</a>
+<a name="ln401">            rc = cib_conn-&gt;cmds-&gt;query(cib_conn, NULL, &amp;cib_object, cib_scope_local | cib_sync_call);</a>
+<a name="ln402">        }</a>
+<a name="ln403"> </a>
+<a name="ln404">        cib_conn-&gt;cmds-&gt;signoff(cib_conn);</a>
+<a name="ln405">        cib_delete(cib_conn);</a>
+<a name="ln406">        cib_conn = NULL;</a>
+<a name="ln407"> </a>
+<a name="ln408">        if (rc != pcmk_ok) {</a>
+<a name="ln409">            fprintf(stderr, &quot;Live CIB query failed: %s (%d)\n&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln410">            crm_exit(rc);</a>
+<a name="ln411"> </a>
+<a name="ln412">        } else if (cib_object == NULL) {</a>
+<a name="ln413">            fprintf(stderr, &quot;Live CIB query failed: empty result\n&quot;);</a>
+<a name="ln414">            crm_exit(ENOTCONN);</a>
+<a name="ln415">        }</a>
+<a name="ln416"> </a>
+<a name="ln417">    } else if (safe_str_eq(input, &quot;-&quot;)) {</a>
+<a name="ln418">        cib_object = filename2xml(NULL);</a>
+<a name="ln419"> </a>
+<a name="ln420">    } else {</a>
+<a name="ln421">        cib_object = filename2xml(input);</a>
+<a name="ln422">    }</a>
+<a name="ln423"> </a>
+<a name="ln424">    if (get_object_root(XML_CIB_TAG_STATUS, cib_object) == NULL) {</a>
+<a name="ln425">        create_xml_node(cib_object, XML_CIB_TAG_STATUS);</a>
+<a name="ln426">    }</a>
+<a name="ln427"> </a>
+<a name="ln428">    if (cli_config_update(&amp;cib_object, NULL, FALSE) == FALSE) {</a>
+<a name="ln429">        free_xml(cib_object);</a>
+<a name="ln430">        crm_exit(ENOKEY);</a>
+<a name="ln431">    }</a>
+<a name="ln432"> </a>
+<a name="ln433">    if (validate_xml(cib_object, NULL, FALSE) != TRUE) {</a>
+<a name="ln434">        free_xml(cib_object);</a>
+<a name="ln435">        crm_exit(pcmk_err_schema_validation);</a>
+<a name="ln436">    }</a>
+<a name="ln437"> </a>
+<a name="ln438">    if (output == NULL) {</a>
+<a name="ln439">        char *pid = crm_itoa(getpid());</a>
+<a name="ln440"> </a>
+<a name="ln441">        local_output = get_shadow_file(pid);</a>
+<a name="ln442">        temp_shadow = strdup(local_output);</a>
+<a name="ln443">        output = local_output;</a>
+<a name="ln444">        free(pid);</a>
+<a name="ln445">    }</a>
+<a name="ln446"> </a>
+<a name="ln447">    rc = write_xml_file(cib_object, output, FALSE);</a>
+<a name="ln448">    free_xml(cib_object);</a>
+<a name="ln449">    cib_object = NULL;</a>
+<a name="ln450"> </a>
+<a name="ln451">    if (rc &lt; 0) {</a>
+<a name="ln452">        fprintf(stderr, &quot;Could not create '%s': %s\n&quot;, output, strerror(errno));</a>
+<a name="ln453">        crm_exit(rc);</a>
+<a name="ln454">    }</a>
+<a name="ln455">    setenv(&quot;CIB_file&quot;, output, 1);</a>
+<a name="ln456">    free(local_output);</a>
+<a name="ln457">}</a>
+<a name="ln458"> </a>
+<a name="ln459"> </a>
+<a name="ln460">/* *INDENT-OFF* */</a>
+<a name="ln461">static struct crm_option long_options[] = {</a>
+<a name="ln462">    /* Top-level Options */</a>
+<a name="ln463">    {&quot;help&quot;,    0, 0, '?', &quot;\tThis text&quot;},</a>
+<a name="ln464">    {&quot;version&quot;, 0, 0, '$', &quot;\tVersion information&quot;  },</a>
+<a name="ln465">    {&quot;quiet&quot;,   0, 0, 'Q', &quot;\tDisplay only essentialoutput&quot;},</a>
+<a name="ln466">    {&quot;verbose&quot;, 0, 0, 'V', &quot;\tIncrease debug output&quot;},</a>
+<a name="ln467"> </a>
+<a name="ln468">    {&quot;-spacer-&quot;,      0, 0, '-', &quot;\nOperations:&quot;},</a>
+<a name="ln469">    {&quot;run&quot;,           0, 0, 'R', &quot;\tDetermine the cluster's response to the given configuration and status&quot;},</a>
+<a name="ln470">    {&quot;simulate&quot;,      0, 0, 'S', &quot;Simulate the transition's execution and display the resulting cluster status&quot;},</a>
+<a name="ln471">    {&quot;in-place&quot;,      0, 0, 'X', &quot;Simulate the transition's execution and store the result back to the input file&quot;},</a>
+<a name="ln472">    {&quot;show-scores&quot;,   0, 0, 's', &quot;Show allocation scores&quot;},</a>
+<a name="ln473">    {&quot;show-utilization&quot;,   0, 0, 'U', &quot;Show utilization information&quot;},</a>
+<a name="ln474">    {&quot;profile&quot;,       1, 0, 'P', &quot;Run all tests in the named directory to create profiling data&quot;},</a>
+<a name="ln475">    {&quot;pending&quot;,       0, 0, 'j', &quot;\tDisplay pending state if 'record-pending' is enabled&quot;, pcmk_option_hidden},</a>
+<a name="ln476"> </a>
+<a name="ln477">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\nSynthetic Cluster Events:&quot;},</a>
+<a name="ln478">    {&quot;node-up&quot;,      1, 0, 'u', &quot;\tBring a node online&quot;},</a>
+<a name="ln479">    {&quot;node-down&quot;,    1, 0, 'd', &quot;\tTake a node offline&quot;},</a>
+<a name="ln480">    {&quot;node-fail&quot;,    1, 0, 'f', &quot;\tMark a node as failed&quot;},</a>
+<a name="ln481">    {&quot;op-inject&quot;,    1, 0, 'i', &quot;\tGenerate a failure for the cluster to react to in the simulation&quot;},</a>
+<a name="ln482">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\t\tValue is of the form ${resource}_${task}_${interval}@${node}=${rc}.&quot;},</a>
+<a name="ln483">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\t\tEg. memcached_monitor_20000@bart.example.com=7&quot;},</a>
+<a name="ln484">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\t\tFor more information on OCF return codes, refer to: http://www.clusterlabs.org/doc/en-US/Pacemaker/1.1/html/Pacemaker_Explained/s-ocf-return-codes.html&quot;},</a>
+<a name="ln485">    {&quot;op-fail&quot;,      1, 0, 'F', &quot;\tIf the specified task occurs during the simulation, have it fail with return code ${rc}&quot;},</a>
+<a name="ln486">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\t\tValue is of the form ${resource}_${task}_${interval}@${node}=${rc}.&quot;},</a>
+<a name="ln487">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\t\tEg. memcached_stop_0@bart.example.com=1\n&quot;},</a>
+<a name="ln488">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\t\tThe transition will normally stop at the failed action.  Save the result with --save-output and re-run with --xml-file&quot;},</a>
+<a name="ln489">    {&quot;set-datetime&quot;, 1, 0, 't', &quot;Set date/time&quot;},</a>
+<a name="ln490">    {&quot;quorum&quot;,       1, 0, 'q', &quot;\tSpecify a value for quorum&quot;},</a>
+<a name="ln491">    {&quot;watchdog&quot;,     1, 0, 'w', &quot;\tAssume a watchdog device is active&quot;},</a>
+<a name="ln492">    {&quot;ticket-grant&quot;,     1, 0, 'g', &quot;Grant a ticket&quot;},</a>
+<a name="ln493">    {&quot;ticket-revoke&quot;,    1, 0, 'r', &quot;Revoke a ticket&quot;},</a>
+<a name="ln494">    {&quot;ticket-standby&quot;,   1, 0, 'b', &quot;Make a ticket standby&quot;},</a>
+<a name="ln495">    {&quot;ticket-activate&quot;,  1, 0, 'e', &quot;Activate a ticket&quot;},</a>
+<a name="ln496"> </a>
+<a name="ln497">    {&quot;-spacer-&quot;,     0, 0, '-', &quot;\nOutput Options:&quot;},</a>
+<a name="ln498"> </a>
+<a name="ln499">    {&quot;save-input&quot;,   1, 0, 'I', &quot;\tSave the input configuration to the named file&quot;},</a>
+<a name="ln500">    {&quot;save-output&quot;,  1, 0, 'O', &quot;Save the output configuration to the named file&quot;},</a>
+<a name="ln501">    {&quot;save-graph&quot;,   1, 0, 'G', &quot;\tSave the transition graph (XML format) to the named file&quot;},</a>
+<a name="ln502">    {&quot;save-dotfile&quot;, 1, 0, 'D', &quot;Save the transition graph (DOT format) to the named file&quot;},</a>
+<a name="ln503">    {&quot;all-actions&quot;,  0, 0, 'a', &quot;\tDisplay all possible actions in the DOT graph - even ones not part of the transition&quot;},</a>
+<a name="ln504"> </a>
+<a name="ln505">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;\nData Source:&quot;},</a>
+<a name="ln506">    {&quot;live-check&quot;,  0, 0, 'L', &quot;\tConnect to the CIB and use the current contents as input&quot;},</a>
+<a name="ln507">    {&quot;xml-file&quot;,    1, 0, 'x', &quot;\tRetrieve XML from the named file&quot;},</a>
+<a name="ln508">    {&quot;xml-pipe&quot;,    0, 0, 'p', &quot;\tRetrieve XML from stdin&quot;},</a>
+<a name="ln509"> </a>
+<a name="ln510">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;\nExamples:\n&quot;},</a>
+<a name="ln511">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Pretend a recurring monitor action found memcached stopped on node fred.example.com and, during recovery, that the memcached stop action failed&quot;, pcmk_option_paragraph},</a>
+<a name="ln512">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; crm_simulate -LS --op-inject memcached:0_monitor_20000@bart.example.com=7 --op-fail memcached:0_stop_0@fred.example.com=1 --save-output /tmp/memcached-test.xml&quot;, pcmk_option_example},</a>
+<a name="ln513">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Now see what the reaction to the stop failure would be&quot;, pcmk_option_paragraph},</a>
+<a name="ln514">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; crm_simulate -S --xml-file /tmp/memcached-test.xml&quot;, pcmk_option_example},</a>
+<a name="ln515"> </a>
+<a name="ln516">    {0, 0, 0, 0}</a>
+<a name="ln517">};</a>
+<a name="ln518">/* *INDENT-ON* */</a>
+<a name="ln519"> </a>
+<a name="ln520">static void</a>
+<a name="ln521">profile_one(const char *xml_file)</a>
+<a name="ln522">{</a>
+<a name="ln523">    xmlNode *cib_object = NULL;</a>
+<a name="ln524">    pe_working_set_t data_set;</a>
+<a name="ln525"> </a>
+<a name="ln526">    printf(&quot;* Testing %s\n&quot;, xml_file);</a>
+<a name="ln527">    cib_object = filename2xml(xml_file);</a>
+<a name="ln528">    if (get_object_root(XML_CIB_TAG_STATUS, cib_object) == NULL) {</a>
+<a name="ln529">        create_xml_node(cib_object, XML_CIB_TAG_STATUS);</a>
+<a name="ln530">    }</a>
+<a name="ln531"> </a>
+<a name="ln532">    if (cli_config_update(&amp;cib_object, NULL, FALSE) == FALSE) {</a>
+<a name="ln533">        free_xml(cib_object);</a>
+<a name="ln534">        return;</a>
+<a name="ln535">    }</a>
+<a name="ln536"> </a>
+<a name="ln537">    if (validate_xml(cib_object, NULL, FALSE) != TRUE) {</a>
+<a name="ln538">        free_xml(cib_object);</a>
+<a name="ln539">        return;</a>
+<a name="ln540">    }</a>
+<a name="ln541"> </a>
+<a name="ln542">    set_working_set_defaults(&amp;data_set);</a>
+<a name="ln543"> </a>
+<a name="ln544">    data_set.input = cib_object;</a>
+<a name="ln545">    get_date(&amp;data_set);</a>
+<a name="ln546">    do_calculations(&amp;data_set, cib_object, NULL);</a>
+<a name="ln547"> </a>
+<a name="ln548">    cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln549">}</a>
+<a name="ln550"> </a>
+<a name="ln551">#ifndef FILENAME_MAX</a>
+<a name="ln552">#  define FILENAME_MAX 512</a>
+<a name="ln553">#endif</a>
+<a name="ln554"> </a>
+<a name="ln555">static int</a>
+<a name="ln556">profile_all(const char *dir)</a>
+<a name="ln557">{</a>
+<a name="ln558">    struct dirent **namelist;</a>
+<a name="ln559"> </a>
+<a name="ln560">    int lpc = 0;</a>
+<a name="ln561">    int file_num = scandir(dir, &amp;namelist, 0, alphasort);</a>
+<a name="ln562"> </a>
+<a name="ln563">    if (file_num &gt; 0) {</a>
+<a name="ln564">        struct stat prop;</a>
+<a name="ln565">        char buffer[FILENAME_MAX + 1];</a>
+<a name="ln566"> </a>
+<a name="ln567">        while (file_num--) {</a>
+<a name="ln568">            if ('.' == namelist[file_num]-&gt;d_name[0]) {</a>
+<a name="ln569">                free(namelist[file_num]);</a>
+<a name="ln570">                continue;</a>
+<a name="ln571"> </a>
+<a name="ln572">            } else if (!crm_ends_with(namelist[file_num]-&gt;d_name, &quot;.xml&quot;)) {</a>
+<a name="ln573">                free(namelist[file_num]);</a>
+<a name="ln574">                continue;</a>
+<a name="ln575">            }</a>
+<a name="ln576"> </a>
+<a name="ln577">            lpc++;</a>
+<a name="ln578">            snprintf(buffer, FILENAME_MAX, &quot;%s/%s&quot;, dir, namelist[file_num]-&gt;d_name);</a>
+<a name="ln579">            if (stat(buffer, &amp;prop) == 0 &amp;&amp; S_ISREG(prop.st_mode)) {</a>
+<a name="ln580">                profile_one(buffer);</a>
+<a name="ln581">            }</a>
+<a name="ln582">            free(namelist[file_num]);</a>
+<a name="ln583">        }</a>
+<a name="ln584">        free(namelist);</a>
+<a name="ln585">    }</a>
+<a name="ln586"> </a>
+<a name="ln587">    return lpc;</a>
+<a name="ln588">}</a>
+<a name="ln589"> </a>
+<a name="ln590">static int</a>
+<a name="ln591">count_resources(pe_working_set_t * data_set, resource_t * rsc)</a>
+<a name="ln592">{</a>
+<a name="ln593">    int count = 0;</a>
+<a name="ln594">    GListPtr gIter = NULL;</a>
+<a name="ln595"> </a>
+<a name="ln596">    if (rsc == NULL) {</a>
+<a name="ln597">        gIter = data_set-&gt;resources;</a>
+<a name="ln598">    } else if (rsc-&gt;children) {</a>
+<a name="ln599">        gIter = rsc-&gt;children;</a>
+<a name="ln600">    } else {</a>
+<a name="ln601">        return is_not_set(rsc-&gt;flags, pe_rsc_orphan);</a>
+<a name="ln602">    }</a>
+<a name="ln603"> </a>
+<a name="ln604">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln605">        count += count_resources(data_set, gIter-&gt;data);</a>
+<a name="ln606">    }</a>
+<a name="ln607">    return count;</a>
+<a name="ln608">}</a>
+<a name="ln609"> </a>
+<a name="ln610">int</a>
+<a name="ln611">main(int argc, char **argv)</a>
+<a name="ln612">{</a>
+<a name="ln613">    int rc = 0;</a>
+<a name="ln614">    guint modified = 0;</a>
+<a name="ln615"> </a>
+<a name="ln616">    gboolean store = FALSE;</a>
+<a name="ln617">    gboolean process = FALSE;</a>
+<a name="ln618">    gboolean simulate = FALSE;</a>
+<a name="ln619">    gboolean all_actions = FALSE;</a>
+<a name="ln620">    gboolean have_stdout = FALSE;</a>
+<a name="ln621"> </a>
+<a name="ln622">    pe_working_set_t data_set;</a>
+<a name="ln623"> </a>
+<a name="ln624">    const char *xml_file = &quot;-&quot;;</a>
+<a name="ln625">    const char *quorum = NULL;</a>
+<a name="ln626">    const char *watchdog = NULL;</a>
+<a name="ln627">    const char *test_dir = NULL;</a>
+<a name="ln628">    const char *dot_file = NULL;</a>
+<a name="ln629">    const char *graph_file = NULL;</a>
+<a name="ln630">    const char *input_file = NULL;</a>
+<a name="ln631">    const char *output_file = NULL;</a>
+<a name="ln632"> </a>
+<a name="ln633">    int flag = 0;</a>
+<a name="ln634">    int index = 0;</a>
+<a name="ln635">    int argerr = 0;</a>
+<a name="ln636"> </a>
+<a name="ln637">    GListPtr node_up = NULL;</a>
+<a name="ln638">    GListPtr node_down = NULL;</a>
+<a name="ln639">    GListPtr node_fail = NULL;</a>
+<a name="ln640">    GListPtr op_inject = NULL;</a>
+<a name="ln641">    GListPtr ticket_grant = NULL;</a>
+<a name="ln642">    GListPtr ticket_revoke = NULL;</a>
+<a name="ln643">    GListPtr ticket_standby = NULL;</a>
+<a name="ln644">    GListPtr ticket_activate = NULL;</a>
+<a name="ln645"> </a>
+<a name="ln646">    xmlNode *input = NULL;</a>
+<a name="ln647"> </a>
+<a name="ln648">    crm_log_cli_init(&quot;crm_simulate&quot;);</a>
+<a name="ln649">    crm_set_options(NULL, &quot;datasource operation [additional options]&quot;,</a>
+<a name="ln650">                    long_options, &quot;Tool for simulating the cluster's response to events&quot;);</a>
+<a name="ln651"> </a>
+<a name="ln652">    if (argc &lt; 2) {</a>
+<a name="ln653">        crm_help('?', EX_USAGE);</a>
+<a name="ln654">    }</a>
+<a name="ln655"> </a>
+<a name="ln656">    while (1) {</a>
+<a name="ln657">        flag = crm_get_option(argc, argv, &amp;index);</a>
+<a name="ln658">        if (flag == -1)</a>
+<a name="ln659">            break;</a>
+<a name="ln660"> </a>
+<a name="ln661">        switch (flag) {</a>
+<a name="ln662">            case 'V':</a>
+<a name="ln663">                if (have_stdout == FALSE) {</a>
+<a name="ln664">                    /* Redirect stderr to stdout so we can grep the output */</a>
+<a name="ln665">                    have_stdout = TRUE;</a>
+<a name="ln666">                    close(STDERR_FILENO);</a>
+<a name="ln667">                    dup2(STDOUT_FILENO, STDERR_FILENO);</a>
+<a name="ln668">                }</a>
+<a name="ln669"> </a>
+<a name="ln670">                crm_bump_log_level(argc, argv);</a>
+<a name="ln671">                action_numbers = TRUE;</a>
+<a name="ln672">                break;</a>
+<a name="ln673">            case '?':</a>
+<a name="ln674">            case '$':</a>
+<a name="ln675">                crm_help(flag, EX_OK);</a>
+<a name="ln676">                break;</a>
+<a name="ln677">            case 'p':</a>
+<a name="ln678">                xml_file = &quot;-&quot;;</a>
+<a name="ln679">                break;</a>
+<a name="ln680">            case 'Q':</a>
+<a name="ln681">                quiet = TRUE;</a>
+<a name="ln682">                break;</a>
+<a name="ln683">            case 'L':</a>
+<a name="ln684">                xml_file = NULL;</a>
+<a name="ln685">                break;</a>
+<a name="ln686">            case 'x':</a>
+<a name="ln687">                xml_file = optarg;</a>
+<a name="ln688">                break;</a>
+<a name="ln689">            case 'u':</a>
+<a name="ln690">                modified++;</a>
+<a name="ln691">                bringing_nodes_online = TRUE;</a>
+<a name="ln692">                node_up = g_list_append(node_up, optarg);</a>
+<a name="ln693">                break;</a>
+<a name="ln694">            case 'd':</a>
+<a name="ln695">                modified++;</a>
+<a name="ln696">                node_down = g_list_append(node_down, optarg);</a>
+<a name="ln697">                break;</a>
+<a name="ln698">            case 'f':</a>
+<a name="ln699">                modified++;</a>
+<a name="ln700">                node_fail = g_list_append(node_fail, optarg);</a>
+<a name="ln701">                break;</a>
+<a name="ln702">            case 't':</a>
+<a name="ln703">                use_date = strdup(optarg);</a>
+<a name="ln704">                break;</a>
+<a name="ln705">            case 'i':</a>
+<a name="ln706">                modified++;</a>
+<a name="ln707">                op_inject = g_list_append(op_inject, optarg);</a>
+<a name="ln708">                break;</a>
+<a name="ln709">            case 'F':</a>
+<a name="ln710">                process = TRUE;</a>
+<a name="ln711">                simulate = TRUE;</a>
+<a name="ln712">                op_fail = g_list_append(op_fail, optarg);</a>
+<a name="ln713">                break;</a>
+<a name="ln714">            case 'w':</a>
+<a name="ln715">                modified++;</a>
+<a name="ln716">                watchdog = optarg;</a>
+<a name="ln717">                break;</a>
+<a name="ln718">            case 'q':</a>
+<a name="ln719">                modified++;</a>
+<a name="ln720">                quorum = optarg;</a>
+<a name="ln721">                break;</a>
+<a name="ln722">            case 'g':</a>
+<a name="ln723">                modified++;</a>
+<a name="ln724">                ticket_grant = g_list_append(ticket_grant, optarg);</a>
+<a name="ln725">                break;</a>
+<a name="ln726">            case 'r':</a>
+<a name="ln727">                modified++;</a>
+<a name="ln728">                ticket_revoke = g_list_append(ticket_revoke, optarg);</a>
+<a name="ln729">                break;</a>
+<a name="ln730">            case 'b':</a>
+<a name="ln731">                modified++;</a>
+<a name="ln732">                ticket_standby = g_list_append(ticket_standby, optarg);</a>
+<a name="ln733">                break;</a>
+<a name="ln734">            case 'e':</a>
+<a name="ln735">                modified++;</a>
+<a name="ln736">                ticket_activate = g_list_append(ticket_activate, optarg);</a>
+<a name="ln737">                break;</a>
+<a name="ln738">            case 'a':</a>
+<a name="ln739">                all_actions = TRUE;</a>
+<a name="ln740">                break;</a>
+<a name="ln741">            case 's':</a>
+<a name="ln742">                process = TRUE;</a>
+<a name="ln743">                show_scores = TRUE;</a>
+<a name="ln744">                break;</a>
+<a name="ln745">            case 'U':</a>
+<a name="ln746">                process = TRUE;</a>
+<a name="ln747">                show_utilization = TRUE;</a>
+<a name="ln748">                break;</a>
+<a name="ln749">            case 'j':</a>
+<a name="ln750">                print_pending = TRUE;</a>
+<a name="ln751">                break;</a>
+<a name="ln752">            case 'S':</a>
+<a name="ln753">                process = TRUE;</a>
+<a name="ln754">                simulate = TRUE;</a>
+<a name="ln755">                break;</a>
+<a name="ln756">            case 'X':</a>
+<a name="ln757">                store = TRUE;</a>
+<a name="ln758">                process = TRUE;</a>
+<a name="ln759">                simulate = TRUE;</a>
+<a name="ln760">                break;</a>
+<a name="ln761">            case 'R':</a>
+<a name="ln762">                process = TRUE;</a>
+<a name="ln763">                break;</a>
+<a name="ln764">            case 'D':</a>
+<a name="ln765">                process = TRUE;</a>
+<a name="ln766">                dot_file = optarg;</a>
+<a name="ln767">                break;</a>
+<a name="ln768">            case 'G':</a>
+<a name="ln769">                process = TRUE;</a>
+<a name="ln770">                graph_file = optarg;</a>
+<a name="ln771">                break;</a>
+<a name="ln772">            case 'I':</a>
+<a name="ln773">                input_file = optarg;</a>
+<a name="ln774">                break;</a>
+<a name="ln775">            case 'O':</a>
+<a name="ln776">                output_file = optarg;</a>
+<a name="ln777">                break;</a>
+<a name="ln778">            case 'P':</a>
+<a name="ln779">                test_dir = optarg;</a>
+<a name="ln780">                break;</a>
+<a name="ln781">            default:</a>
+<a name="ln782">                ++argerr;</a>
+<a name="ln783">                break;</a>
+<a name="ln784">        }</a>
+<a name="ln785">    }</a>
+<a name="ln786"> </a>
+<a name="ln787">    if (optind &gt; argc) {</a>
+<a name="ln788">        ++argerr;</a>
+<a name="ln789">    }</a>
+<a name="ln790"> </a>
+<a name="ln791">    if (argerr) {</a>
+<a name="ln792">        crm_help('?', EX_USAGE);</a>
+<a name="ln793">    }</a>
+<a name="ln794"> </a>
+<a name="ln795">    if (test_dir != NULL) {</a>
+<a name="ln796">        return profile_all(test_dir);</a>
+<a name="ln797">    }</a>
+<a name="ln798"> </a>
+<a name="ln799">    setup_input(xml_file, store ? xml_file : output_file);</a>
+<a name="ln800"> </a>
+<a name="ln801">    global_cib = cib_new();</a>
+<a name="ln802">    global_cib-&gt;cmds-&gt;signon(global_cib, crm_system_name, cib_command);</a>
+<a name="ln803"> </a>
+<a name="ln804">    set_working_set_defaults(&amp;data_set);</a>
+<a name="ln805"> </a>
+<a name="ln806">    if (data_set.now != NULL) {</a>
+<a name="ln807">        quiet_log(&quot; + Setting effective cluster time: %s&quot;, use_date);</a>
+<a name="ln808">        crm_time_log(LOG_WARNING, &quot;Set fake 'now' to&quot;, data_set.now,</a>
+<a name="ln809">                     crm_time_log_date | crm_time_log_timeofday);</a>
+<a name="ln810">    }</a>
+<a name="ln811"> </a>
+<a name="ln812">    rc = global_cib-&gt;cmds-&gt;query(global_cib, NULL, &amp;input, cib_sync_call | cib_scope_local);</a>
+<a name="ln813">    CRM_ASSERT(rc == pcmk_ok);</a>
+<a name="ln814"> </a>
+<a name="ln815">    data_set.input = input;</a>
+<a name="ln816">    get_date(&amp;data_set);</a>
+<a name="ln817">    if(xml_file) {</a>
+<a name="ln818">        set_bit(data_set.flags, pe_flag_sanitized);</a>
+<a name="ln819">    }</a>
+<a name="ln820">    cluster_status(&amp;data_set);</a>
+<a name="ln821"> </a>
+<a name="ln822">    if (quiet == FALSE) {</a>
+<a name="ln823">        int options = print_pending ? pe_print_pending : 0;</a>
+<a name="ln824"> </a>
+<a name="ln825">        if(is_set(data_set.flags, pe_flag_maintenance_mode)) {</a>
+<a name="ln826">            quiet_log(&quot;\n              *** Resource management is DISABLED ***&quot;);</a>
+<a name="ln827">            quiet_log(&quot;\n  The cluster will not attempt to start, stop or recover services&quot;);</a>
+<a name="ln828">            quiet_log(&quot;\n&quot;);</a>
+<a name="ln829">        }</a>
+<a name="ln830"> </a>
+<a name="ln831">        if(data_set.disabled_resources || data_set.blocked_resources) {</a>
+<a name="ln832">            quiet_log(&quot;%d of %d resources DISABLED and %d BLOCKED from being started due to failures\n&quot;,</a>
+<a name="ln833">                      data_set.disabled_resources, count_resources(&amp;data_set, NULL), data_set.blocked_resources);</a>
+<a name="ln834">        }</a>
+<a name="ln835"> </a>
+<a name="ln836">        quiet_log(&quot;\nCurrent cluster status:\n&quot;);</a>
+<a name="ln837">        print_cluster_status(&amp;data_set, options);</a>
+<a name="ln838">    }</a>
+<a name="ln839"> </a>
+<a name="ln840">    if (modified) {</a>
+<a name="ln841">        quiet_log(&quot;Performing requested modifications\n&quot;);</a>
+<a name="ln842">        modify_configuration(&amp;data_set, global_cib, quorum, watchdog, node_up, node_down, node_fail, op_inject,</a>
+<a name="ln843">                             ticket_grant, ticket_revoke, ticket_standby, ticket_activate);</a>
+<a name="ln844"> </a>
+<a name="ln845">        rc = global_cib-&gt;cmds-&gt;query(global_cib, NULL, &amp;input, cib_sync_call);</a>
+<a name="ln846">        if (rc != pcmk_ok) {</a>
+<a name="ln847">            fprintf(stderr, &quot;Could not connect to the CIB for input: %s\n&quot;, pcmk_strerror(rc));</a>
+<a name="ln848">            goto done;</a>
+<a name="ln849">        }</a>
+<a name="ln850"> </a>
+<a name="ln851">        cleanup_calculations(&amp;data_set);</a>
+<a name="ln852">        data_set.input = input;</a>
+<a name="ln853">        get_date(&amp;data_set);</a>
+<a name="ln854"> </a>
+<a name="ln855">        if(xml_file) {</a>
+<a name="ln856">            set_bit(data_set.flags, pe_flag_sanitized);</a>
+<a name="ln857">        }</a>
+<a name="ln858">        cluster_status(&amp;data_set);</a>
+<a name="ln859">    }</a>
+<a name="ln860"> </a>
+<a name="ln861">    if (input_file != NULL) {</a>
+<a name="ln862">        rc = write_xml_file(input, input_file, FALSE);</a>
+<a name="ln863">        if (rc &lt; 0) {</a>
+<a name="ln864">            fprintf(stderr, &quot;Could not create '%s': %s\n&quot;, input_file, strerror(errno));</a>
+<a name="ln865">            goto done;</a>
+<a name="ln866">        }</a>
+<a name="ln867">    }</a>
+<a name="ln868"> </a>
+<a name="ln869">    rc = 0;</a>
+<a name="ln870">    if (process || simulate) {</a>
+<a name="ln871">        crm_time_t *local_date = NULL;</a>
+<a name="ln872"> </a>
+<a name="ln873">        if (show_scores &amp;&amp; show_utilization) {</a>
+<a name="ln874">            printf(&quot;Allocation scores and utilization information:\n&quot;);</a>
+<a name="ln875">        } else if (show_scores) {</a>
+<a name="ln876">            fprintf(stdout, &quot;Allocation scores:\n&quot;);</a>
+<a name="ln877">        } else if (show_utilization) {</a>
+<a name="ln878">            printf(&quot;Utilization information:\n&quot;);</a>
+<a name="ln879">        }</a>
+<a name="ln880"> </a>
+<a name="ln881">        do_calculations(&amp;data_set, input, local_date);</a>
+<a name="ln882">        input = NULL;           /* Don't try and free it twice */</a>
+<a name="ln883"> </a>
+<a name="ln884">        if (graph_file != NULL) {</a>
+<a name="ln885">            write_xml_file(data_set.graph, graph_file, FALSE);</a>
+<a name="ln886">        }</a>
+<a name="ln887"> </a>
+<a name="ln888">        if (dot_file != NULL) {</a>
+<a name="ln889">            create_dotfile(&amp;data_set, dot_file, all_actions);</a>
+<a name="ln890">        }</a>
+<a name="ln891"> </a>
+<a name="ln892">        if (quiet == FALSE) {</a>
+<a name="ln893">            GListPtr gIter = NULL;</a>
+<a name="ln894"> </a>
+<a name="ln895">            quiet_log(&quot;%sTransition Summary:\n&quot;, show_scores || show_utilization</a>
+<a name="ln896">                      || modified ? &quot;\n&quot; : &quot;&quot;);</a>
+<a name="ln897">            fflush(stdout);</a>
+<a name="ln898"> </a>
+<a name="ln899">            for (gIter = data_set.resources; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln900">                resource_t *rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln901"> </a>
+<a name="ln902">                LogActions(rsc, &amp;data_set, TRUE);</a>
+<a name="ln903">            }</a>
+<a name="ln904">        }</a>
+<a name="ln905">    }</a>
+<a name="ln906"> </a>
+<a name="ln907">    if (simulate) {</a>
+<a name="ln908">        rc = run_simulation(&amp;data_set, global_cib, op_fail, quiet);</a>
+<a name="ln909">        if(quiet == FALSE) {</a>
+<a name="ln910">            get_date(&amp;data_set);</a>
+<a name="ln911"> </a>
+<a name="ln912">            quiet_log(&quot;\nRevised cluster status:\n&quot;);</a>
+<a name="ln913">            cluster_status(&amp;data_set);</a>
+<a name="ln914">            print_cluster_status(&amp;data_set, 0);</a>
+<a name="ln915">        }</a>
+<a name="ln916">    }</a>
+<a name="ln917"> </a>
+<a name="ln918">  done:</a>
+<a name="ln919">    cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln920"> </a>
+<a name="ln921">    global_cib-&gt;cmds-&gt;signoff(global_cib);</a>
+<a name="ln922">    cib_delete(global_cib);</a>
+<a name="ln923">    free(use_date);</a>
+<a name="ln924">    fflush(stderr);</a>
+<a name="ln925"> </a>
+<a name="ln926">    if (temp_shadow) {</a>
+<a name="ln927">        unlink(temp_shadow);</a>
+<a name="ln928">        free(temp_shadow);</a>
+<a name="ln929">    }</a>
+<a name="ln930">    return crm_exit(rc);</a>
+<a name="ln931">}</a>
+
+</code></pre>
+<div class="balloon" rel="111"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: node->details->unclean.</p></div>
+<div class="balloon" rel="111"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'node->details->unclean' condition was already verified in line 110.</p></div>
+<div class="balloon" rel="381"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'dot_strm != NULL' is always true.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,619 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2013 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/types.h&gt;</a>
+<a name="ln26">#include &lt;sys/stat.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;unistd.h&gt;</a>
+<a name="ln29">#include &lt;ctype.h&gt;</a>
+<a name="ln30">#include &lt;dirent.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;crm/crm.h&gt;</a>
+<a name="ln33">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln34">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln37">#include &lt;throttle.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39"> </a>
+<a name="ln40">enum throttle_state_e {</a>
+<a name="ln41">    throttle_extreme = 0x1000,</a>
+<a name="ln42">    throttle_high = 0x0100,</a>
+<a name="ln43">    throttle_med  = 0x0010,</a>
+<a name="ln44">    throttle_low  = 0x0001,</a>
+<a name="ln45">    throttle_none = 0x0000,</a>
+<a name="ln46">};</a>
+<a name="ln47"> </a>
+<a name="ln48">struct throttle_record_s {</a>
+<a name="ln49">    int max;</a>
+<a name="ln50">    enum throttle_state_e mode;</a>
+<a name="ln51">    char *node;</a>
+<a name="ln52">};</a>
+<a name="ln53"> </a>
+<a name="ln54">static int throttle_job_max = 0;</a>
+<a name="ln55">static float throttle_load_target = 0.0;</a>
+<a name="ln56"> </a>
+<a name="ln57">#define THROTTLE_FACTOR_LOW    1.2</a>
+<a name="ln58">#define THROTTLE_FACTOR_MEDIUM 1.6</a>
+<a name="ln59">#define THROTTLE_FACTOR_HIGH   2.0</a>
+<a name="ln60"> </a>
+<a name="ln61">static GHashTable *throttle_records = NULL;</a>
+<a name="ln62">static mainloop_timer_t *throttle_timer = NULL;</a>
+<a name="ln63"> </a>
+<a name="ln64">/*!</a>
+<a name="ln65"> * \internal</a>
+<a name="ln66"> * \brief Return name of /proc file containing the CIB deamon's load statistics</a>
+<a name="ln67"> *</a>
+<a name="ln68"> * \return Newly allocated memory with file name on success, NULL otherwise</a>
+<a name="ln69"> *</a>
+<a name="ln70"> * \note It is the caller's responsibility to free the return value.</a>
+<a name="ln71"> *       This will return NULL if the daemon is being run via valgrind.</a>
+<a name="ln72"> *       This should be called only on Linux systems.</a>
+<a name="ln73"> */</a>
+<a name="ln74">static char *</a>
+<a name="ln75">find_cib_loadfile(void)</a>
+<a name="ln76">{</a>
+<a name="ln77">    int pid = crm_procfs_pid_of(&quot;cib&quot;);</a>
+<a name="ln78"> </a>
+<a name="ln79">    return pid? crm_strdup_printf(&quot;/proc/%d/stat&quot;, pid) : NULL;</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">static bool</a>
+<a name="ln83">throttle_cib_load(float *load)</a>
+<a name="ln84">{</a>
+<a name="ln85">/*</a>
+<a name="ln86">       /proc/[pid]/stat</a>
+<a name="ln87">              Status information about the process.  This is used by ps(1).  It is defined in /usr/src/linux/fs/proc/array.c.</a>
+<a name="ln88"> </a>
+<a name="ln89">              The fields, in order, with their proper scanf(3) format specifiers, are:</a>
+<a name="ln90"> </a>
+<a name="ln91">              pid %d      (1) The process ID.</a>
+<a name="ln92"> </a>
+<a name="ln93">              comm %s     (2) The filename of the executable, in parentheses.  This is visible whether or not the executable is swapped out.</a>
+<a name="ln94"> </a>
+<a name="ln95">              state %c    (3) One character from the string &quot;RSDZTW&quot; where R is running, S is sleeping in an interruptible wait, D is waiting in uninterruptible disk sleep, Z is zombie, T is traced or stopped (on a signal), and W is paging.</a>
+<a name="ln96"> </a>
+<a name="ln97">              ppid %d     (4) The PID of the parent.</a>
+<a name="ln98"> </a>
+<a name="ln99">              pgrp %d     (5) The process group ID of the process.</a>
+<a name="ln100"> </a>
+<a name="ln101">              session %d  (6) The session ID of the process.</a>
+<a name="ln102"> </a>
+<a name="ln103">              tty_nr %d   (7) The controlling terminal of the process.  (The minor device number is contained in the combination of bits 31 to 20 and 7 to 0; the major device number is in bits 15 to 8.)</a>
+<a name="ln104"> </a>
+<a name="ln105">              tpgid %d    (8) The ID of the foreground process group of the controlling terminal of the process.</a>
+<a name="ln106"> </a>
+<a name="ln107">              flags %u (%lu before Linux 2.6.22)</a>
+<a name="ln108">                          (9) The kernel flags word of the process.  For bit meanings, see the PF_* defines in the Linux kernel source file include/linux/sched.h.  Details depend on the kernel version.</a>
+<a name="ln109"> </a>
+<a name="ln110">              minflt %lu  (10) The number of minor faults the process has made which have not required loading a memory page from disk.</a>
+<a name="ln111"> </a>
+<a name="ln112">              cminflt %lu (11) The number of minor faults that the process's waited-for children have made.</a>
+<a name="ln113"> </a>
+<a name="ln114">              majflt %lu  (12) The number of major faults the process has made which have required loading a memory page from disk.</a>
+<a name="ln115"> </a>
+<a name="ln116">              cmajflt %lu (13) The number of major faults that the process's waited-for children have made.</a>
+<a name="ln117"> </a>
+<a name="ln118">              utime %lu   (14) Amount of time that this process has been scheduled in user mode, measured in clock ticks (divide by sysconf(_SC_CLK_TCK)).  This includes guest time, guest_time (time spent running a virtual CPU, see below), so that applications that are not aware of the guest time field do not lose that time from their calculations.</a>
+<a name="ln119"> </a>
+<a name="ln120">              stime %lu   (15) Amount of time that this process has been scheduled in kernel mode, measured in clock ticks (divide by sysconf(_SC_CLK_TCK)).</a>
+<a name="ln121"> */</a>
+<a name="ln122"> </a>
+<a name="ln123">    static char *loadfile = NULL;</a>
+<a name="ln124">    static time_t last_call = 0;</a>
+<a name="ln125">    static long ticks_per_s = 0;</a>
+<a name="ln126">    static unsigned long last_utime, last_stime;</a>
+<a name="ln127"> </a>
+<a name="ln128">    char buffer[64*1024];</a>
+<a name="ln129">    FILE *stream = NULL;</a>
+<a name="ln130">    time_t now = time(NULL);</a>
+<a name="ln131"> </a>
+<a name="ln132">    if(load == NULL) {</a>
+<a name="ln133">        return FALSE;</a>
+<a name="ln134">    } else {</a>
+<a name="ln135">        *load = 0.0;</a>
+<a name="ln136">    }</a>
+<a name="ln137"> </a>
+<a name="ln138">    if(loadfile == NULL) {</a>
+<a name="ln139">        last_call = 0;</a>
+<a name="ln140">        last_utime = 0;</a>
+<a name="ln141">        last_stime = 0;</a>
+<a name="ln142">        loadfile = find_cib_loadfile();</a>
+<a name="ln143">        if (loadfile == NULL) {</a>
+<a name="ln144">            crm_warn(&quot;Couldn't find CIB load file&quot;);</a>
+<a name="ln145">            return FALSE;</a>
+<a name="ln146">        }</a>
+<a name="ln147">        ticks_per_s = sysconf(_SC_CLK_TCK);</a>
+<a name="ln148">        crm_trace(&quot;Found %s&quot;, loadfile);</a>
+<a name="ln149">    }</a>
+<a name="ln150"> </a>
+<a name="ln151">    stream = fopen(loadfile, &quot;r&quot;);</a>
+<a name="ln152">    if(stream == NULL) {</a>
+<a name="ln153">        int rc = errno;</a>
+<a name="ln154"> </a>
+<a name="ln155">        crm_warn(&quot;Couldn't read %s: %s (%d)&quot;, loadfile, pcmk_strerror(rc), rc);</a>
+<a name="ln156">        free(loadfile); loadfile = NULL;</a>
+<a name="ln157">        return FALSE;</a>
+<a name="ln158">    }</a>
+<a name="ln159"> </a>
+<a name="ln160">    if(fgets(buffer, sizeof(buffer), stream)) {</a>
+<a name="ln161">        char *comm = calloc(1, 256);</a>
+<a name="ln162">        char state = 0;</a>
+<a name="ln163">        int rc = 0, pid = 0, ppid = 0, pgrp = 0, session = 0, tty_nr = 0, tpgid = 0;</a>
+<a name="ln164">        unsigned long flags = 0, minflt = 0, cminflt = 0, majflt = 0, cmajflt = 0, utime = 0, stime = 0;</a>
+<a name="ln165"> </a>
+<a name="ln166">        rc = sscanf(buffer,  &quot;%d %[^ ] %c %d %d %d %d %d %lu %lu %lu %lu %lu %lu %lu&quot;,</a>
+<a name="ln167">                    &amp;pid, comm, &amp;state,</a>
+<a name="ln168">                    &amp;ppid, &amp;pgrp, &amp;session, &amp;tty_nr, &amp;tpgid,</a>
+<a name="ln169">                    &amp;flags, &amp;minflt, &amp;cminflt, &amp;majflt, &amp;cmajflt, &amp;utime, &amp;stime);</a>
+<a name="ln170">        free(comm);</a>
+<a name="ln171"> </a>
+<a name="ln172">        if(rc != 15) {</a>
+<a name="ln173">            crm_err(&quot;Only %d of 15 fields found in %s&quot;, rc, loadfile);</a>
+<a name="ln174">            fclose(stream);</a>
+<a name="ln175">            return FALSE;</a>
+<a name="ln176"> </a>
+<a name="ln177">        } else if(last_call &gt; 0</a>
+<a name="ln178">           &amp;&amp; last_call &lt; now</a>
+<a name="ln179">           &amp;&amp; last_utime &lt;= utime</a>
+<a name="ln180">           &amp;&amp; last_stime &lt;= stime) {</a>
+<a name="ln181"> </a>
+<a name="ln182">            time_t elapsed = now - last_call;</a>
+<a name="ln183">            unsigned long delta_utime = utime - last_utime;</a>
+<a name="ln184">            unsigned long delta_stime = stime - last_stime;</a>
+<a name="ln185"> </a>
+<a name="ln186">            *load = (delta_utime + delta_stime); /* Cast to a float before division */</a>
+<a name="ln187">            *load /= ticks_per_s;</a>
+<a name="ln188">            *load /= elapsed;</a>
+<a name="ln189">            crm_debug(&quot;cib load: %f (%lu ticks in %lds)&quot;, *load, delta_utime + delta_stime, (long)elapsed);</a>
+<a name="ln190"> </a>
+<a name="ln191">        } else {</a>
+<a name="ln192">            crm_debug(&quot;Init %lu + %lu ticks at %ld (%lu tps)&quot;, utime, stime, (long)now, ticks_per_s);</a>
+<a name="ln193">        }</a>
+<a name="ln194"> </a>
+<a name="ln195">        last_call = now;</a>
+<a name="ln196">        last_utime = utime;</a>
+<a name="ln197">        last_stime = stime;</a>
+<a name="ln198"> </a>
+<a name="ln199">        fclose(stream);</a>
+<a name="ln200">        return TRUE;</a>
+<a name="ln201">    }</a>
+<a name="ln202"> </a>
+<a name="ln203">    fclose(stream);</a>
+<a name="ln204">    return FALSE;</a>
+<a name="ln205">}</a>
+<a name="ln206"> </a>
+<a name="ln207">static bool</a>
+<a name="ln208">throttle_load_avg(float *load)</a>
+<a name="ln209">{</a>
+<a name="ln210">    char buffer[256];</a>
+<a name="ln211">    FILE *stream = NULL;</a>
+<a name="ln212">    const char *loadfile = &quot;/proc/loadavg&quot;;</a>
+<a name="ln213"> </a>
+<a name="ln214">    if(load == NULL) {</a>
+<a name="ln215">        return FALSE;</a>
+<a name="ln216">    }</a>
+<a name="ln217"> </a>
+<a name="ln218">    stream = fopen(loadfile, &quot;r&quot;);</a>
+<a name="ln219">    if(stream == NULL) {</a>
+<a name="ln220">        int rc = errno;</a>
+<a name="ln221">        crm_warn(&quot;Couldn't read %s: %s (%d)&quot;, loadfile, pcmk_strerror(rc), rc);</a>
+<a name="ln222">        return FALSE;</a>
+<a name="ln223">    }</a>
+<a name="ln224"> </a>
+<a name="ln225">    if(fgets(buffer, sizeof(buffer), stream)) {</a>
+<a name="ln226">        char *nl = strstr(buffer, &quot;\n&quot;);</a>
+<a name="ln227"> </a>
+<a name="ln228">        /* Grab the 1-minute average, ignore the rest */</a>
+<a name="ln229">        *load = strtof(buffer, NULL);</a>
+<a name="ln230">        if(nl) { nl[0] = 0; }</a>
+<a name="ln231"> </a>
+<a name="ln232">        fclose(stream);</a>
+<a name="ln233">        return TRUE;</a>
+<a name="ln234">    }</a>
+<a name="ln235"> </a>
+<a name="ln236">    fclose(stream);</a>
+<a name="ln237">    return FALSE;</a>
+<a name="ln238">}</a>
+<a name="ln239"> </a>
+<a name="ln240">/*!</a>
+<a name="ln241"> * \internal</a>
+<a name="ln242"> * \brief Check a load value against throttling thresholds</a>
+<a name="ln243"> *</a>
+<a name="ln244"> * \param[in] load        Load value to check</a>
+<a name="ln245"> * \param[in] desc        Description of metric (for logging)</a>
+<a name="ln246"> * \param[in] thresholds  Low/medium/high/extreme thresholds</a>
+<a name="ln247"> *</a>
+<a name="ln248"> * \return Throttle mode corresponding to load value</a>
+<a name="ln249"> */</a>
+<a name="ln250">static enum throttle_state_e</a>
+<a name="ln251">throttle_check_thresholds(float load, const char *desc, float thresholds[4])</a>
+<a name="ln252">{</a>
+<a name="ln253">    if (load &gt; thresholds[3]) {</a>
+<a name="ln254">        crm_notice(&quot;Extreme %s detected: %f&quot;, desc, load);</a>
+<a name="ln255">        return throttle_extreme;</a>
+<a name="ln256"> </a>
+<a name="ln257">    } else if (load &gt; thresholds[2]) {</a>
+<a name="ln258">        crm_notice(&quot;High %s detected: %f&quot;, desc, load);</a>
+<a name="ln259">        return throttle_high;</a>
+<a name="ln260"> </a>
+<a name="ln261">    } else if (load &gt; thresholds[1]) {</a>
+<a name="ln262">        crm_info(&quot;Moderate %s detected: %f&quot;, desc, load);</a>
+<a name="ln263">        return throttle_med;</a>
+<a name="ln264"> </a>
+<a name="ln265">    } else if (load &gt; thresholds[0]) {</a>
+<a name="ln266">        crm_debug(&quot;Noticeable %s detected: %f&quot;, desc, load);</a>
+<a name="ln267">        return throttle_low;</a>
+<a name="ln268">    }</a>
+<a name="ln269"> </a>
+<a name="ln270">    crm_trace(&quot;Negligible %s detected: %f&quot;, desc, load);</a>
+<a name="ln271">    return throttle_none;</a>
+<a name="ln272">}</a>
+<a name="ln273"> </a>
+<a name="ln274">static enum throttle_state_e</a>
+<a name="ln275">throttle_handle_load(float load, const char *desc, int cores)</a>
+<a name="ln276">{</a>
+<a name="ln277">    float normalize;</a>
+<a name="ln278">    float thresholds[4];</a>
+<a name="ln279"> </a>
+<a name="ln280">    if (cores == 1) {</a>
+<a name="ln281">        /* On a single core machine, a load of 1.0 is already too high */</a>
+<a name="ln282">        normalize = 0.6;</a>
+<a name="ln283"> </a>
+<a name="ln284">    } else {</a>
+<a name="ln285">        /* Normalize the load to be per-core */</a>
+<a name="ln286">        normalize = cores;</a>
+<a name="ln287">    }</a>
+<a name="ln288">    thresholds[0] = throttle_load_target * normalize * THROTTLE_FACTOR_LOW;</a>
+<a name="ln289">    thresholds[1] = throttle_load_target * normalize * THROTTLE_FACTOR_MEDIUM;</a>
+<a name="ln290">    thresholds[2] = throttle_load_target * normalize * THROTTLE_FACTOR_HIGH;</a>
+<a name="ln291">    thresholds[3] = load + 1.0; /* never extreme */</a>
+<a name="ln292"> </a>
+<a name="ln293">    return throttle_check_thresholds(load, desc, thresholds);</a>
+<a name="ln294">}</a>
+<a name="ln295"> </a>
+<a name="ln296">static enum throttle_state_e</a>
+<a name="ln297">throttle_mode(void)</a>
+<a name="ln298">{</a>
+<a name="ln299">    unsigned int cores;</a>
+<a name="ln300">    float load;</a>
+<a name="ln301">    float thresholds[4];</a>
+<a name="ln302">    enum throttle_state_e mode = throttle_none;</a>
+<a name="ln303"> </a>
+<a name="ln304">#if defined(ON_BSD) || defined(ON_SOLARIS)</a>
+<a name="ln305">    return throttle_none;</a>
+<a name="ln306">#endif</a>
+<a name="ln307"> </a>
+<a name="ln308">    cores = crm_procfs_num_cores();</a>
+<a name="ln309">    if(throttle_cib_load(&amp;load)) {</a>
+<a name="ln310">        float cib_max_cpu = 0.95;</a>
+<a name="ln311"> </a>
+<a name="ln312">        /* The CIB is a single-threaded task and thus cannot consume</a>
+<a name="ln313">         * more than 100% of a CPU (and 1/cores of the overall system</a>
+<a name="ln314">         * load).</a>
+<a name="ln315">         *</a>
+<a name="ln316">         * On a many-cored system, the CIB might therefore be maxed out</a>
+<a name="ln317">         * (causing operations to fail or appear to fail) even though</a>
+<a name="ln318">         * the overall system load is still reasonable.</a>
+<a name="ln319">         *</a>
+<a name="ln320">         * Therefore, the 'normal' thresholds can not apply here, and we</a>
+<a name="ln321">         * need a special case.</a>
+<a name="ln322">         */</a>
+<a name="ln323">        if(cores == 1) {</a>
+<a name="ln324">            cib_max_cpu = 0.4;</a>
+<a name="ln325">        }</a>
+<a name="ln326">        if(throttle_load_target &gt; 0.0 &amp;&amp; throttle_load_target &lt; cib_max_cpu) {</a>
+<a name="ln327">            cib_max_cpu = throttle_load_target;</a>
+<a name="ln328">        }</a>
+<a name="ln329"> </a>
+<a name="ln330">        thresholds[0] = cib_max_cpu * 0.8;</a>
+<a name="ln331">        thresholds[1] = cib_max_cpu * 0.9;</a>
+<a name="ln332">        thresholds[2] = cib_max_cpu;</a>
+<a name="ln333">        /* Can only happen on machines with a low number of cores */</a>
+<a name="ln334">        thresholds[3] = cib_max_cpu * 1.5;</a>
+<a name="ln335"> </a>
+<a name="ln336">        mode |= throttle_check_thresholds(load, &quot;CIB load&quot;, thresholds);</a>
+<a name="ln337">    }</a>
+<a name="ln338"> </a>
+<a name="ln339">    if(throttle_load_target &lt;= 0) {</a>
+<a name="ln340">        /* If we ever make this a valid value, the cluster will at least behave as expected */</a>
+<a name="ln341">        return mode;</a>
+<a name="ln342">    }</a>
+<a name="ln343"> </a>
+<a name="ln344">    if(throttle_load_avg(&amp;load)) {</a>
+<a name="ln345">        crm_debug(&quot;Current load is %f across %u core(s)&quot;, load, cores);</a>
+<a name="ln346">        mode |= throttle_handle_load(load, &quot;CPU load&quot;, cores);</a>
+<a name="ln347">    }</a>
+<a name="ln348"> </a>
+<a name="ln349">    if(mode &amp; throttle_extreme) {</a>
+<a name="ln350">        return throttle_extreme;</a>
+<a name="ln351">    } else if(mode &amp; throttle_high) {</a>
+<a name="ln352">        return throttle_high;</a>
+<a name="ln353">    } else if(mode &amp; throttle_med) {</a>
+<a name="ln354">        return throttle_med;</a>
+<a name="ln355">    } else if(mode &amp; throttle_low) {</a>
+<a name="ln356">        return throttle_low;</a>
+<a name="ln357">    }</a>
+<a name="ln358">    return throttle_none;</a>
+<a name="ln359">}</a>
+<a name="ln360"> </a>
+<a name="ln361">static void</a>
+<a name="ln362">throttle_send_command(enum throttle_state_e mode)</a>
+<a name="ln363">{</a>
+<a name="ln364">    xmlNode *xml = NULL;</a>
+<a name="ln365">    static enum throttle_state_e last = -1;</a>
+<a name="ln366"> </a>
+<a name="ln367">    if(mode != last) {</a>
+<a name="ln368">        crm_info(&quot;New throttle mode: %.4x (was %.4x)&quot;, mode, last);</a>
+<a name="ln369">        last = mode;</a>
+<a name="ln370"> </a>
+<a name="ln371">        xml = create_request(CRM_OP_THROTTLE, NULL, NULL, CRM_SYSTEM_CRMD, CRM_SYSTEM_CRMD, NULL);</a>
+<a name="ln372">        crm_xml_add_int(xml, F_CRM_THROTTLE_MODE, mode);</a>
+<a name="ln373">        crm_xml_add_int(xml, F_CRM_THROTTLE_MAX, throttle_job_max);</a>
+<a name="ln374"> </a>
+<a name="ln375">        send_cluster_message(NULL, crm_msg_crmd, xml, TRUE);</a>
+<a name="ln376">        free_xml(xml);</a>
+<a name="ln377">    }</a>
+<a name="ln378">}</a>
+<a name="ln379"> </a>
+<a name="ln380">static gboolean</a>
+<a name="ln381">throttle_timer_cb(gpointer data)</a>
+<a name="ln382">{</a>
+<a name="ln383">    static bool send_updates = FALSE;</a>
+<a name="ln384">    enum throttle_state_e now = throttle_none;</a>
+<a name="ln385"> </a>
+<a name="ln386">    if(send_updates) {</a>
+<a name="ln387">        now = throttle_mode();</a>
+<a name="ln388">        throttle_send_command(now);</a>
+<a name="ln389"> </a>
+<a name="ln390">    } else if(compare_version(fsa_our_dc_version, &quot;3.0.8&quot;) &lt; 0) {</a>
+<a name="ln391">        /* Optimize for the true case */</a>
+<a name="ln392">        crm_trace(&quot;DC version %s doesn't support throttling&quot;, fsa_our_dc_version);</a>
+<a name="ln393"> </a>
+<a name="ln394">    } else {</a>
+<a name="ln395">        send_updates = TRUE;</a>
+<a name="ln396">        now = throttle_mode();</a>
+<a name="ln397">        throttle_send_command(now);</a>
+<a name="ln398">    }</a>
+<a name="ln399"> </a>
+<a name="ln400">    return TRUE;</a>
+<a name="ln401">}</a>
+<a name="ln402"> </a>
+<a name="ln403">static void</a>
+<a name="ln404">throttle_record_free(gpointer p)</a>
+<a name="ln405">{</a>
+<a name="ln406">    struct throttle_record_s *r = p;</a>
+<a name="ln407">    free(r-&gt;node);</a>
+<a name="ln408">    free(r);</a>
+<a name="ln409">}</a>
+<a name="ln410"> </a>
+<a name="ln411">void</a>
+<a name="ln412">throttle_set_load_target(float target)</a>
+<a name="ln413">{</a>
+<a name="ln414">    throttle_load_target = target;</a>
+<a name="ln415">}</a>
+<a name="ln416"> </a>
+<a name="ln417">void</a>
+<a name="ln418">throttle_update_job_max(const char *preference)</a>
+<a name="ln419">{</a>
+<a name="ln420">    int max = 0;</a>
+<a name="ln421"> </a>
+<a name="ln422">    throttle_job_max = 2 * crm_procfs_num_cores();</a>
+<a name="ln423"> </a>
+<a name="ln424">    if(preference) {</a>
+<a name="ln425">        /* Global preference from the CIB */</a>
+<a name="ln426">        max = crm_int_helper(preference, NULL);</a>
+<a name="ln427">        if(max &gt; 0) {</a>
+<a name="ln428">            throttle_job_max = max;</a>
+<a name="ln429">        }</a>
+<a name="ln430">    }</a>
+<a name="ln431"> </a>
+<a name="ln432">    preference = getenv(&quot;LRMD_MAX_CHILDREN&quot;);</a>
+<a name="ln433">    if(preference) {</a>
+<a name="ln434">        /* Legacy env variable */</a>
+<a name="ln435">        max = crm_int_helper(preference, NULL);</a>
+<a name="ln436">        if(max &gt; 0) {</a>
+<a name="ln437">            throttle_job_max = max;</a>
+<a name="ln438">        }</a>
+<a name="ln439">    }</a>
+<a name="ln440"> </a>
+<a name="ln441">    preference = getenv(&quot;PCMK_node_action_limit&quot;);</a>
+<a name="ln442">    if(preference) {</a>
+<a name="ln443">        /* Per-node override */</a>
+<a name="ln444">        max = crm_int_helper(preference, NULL);</a>
+<a name="ln445">        if(max &gt; 0) {</a>
+<a name="ln446">            throttle_job_max = max;</a>
+<a name="ln447">        }</a>
+<a name="ln448">    }</a>
+<a name="ln449">}</a>
+<a name="ln450"> </a>
+<a name="ln451">void</a>
+<a name="ln452">throttle_init(void)</a>
+<a name="ln453">{</a>
+<a name="ln454">    if(throttle_records == NULL) {</a>
+<a name="ln455">        throttle_records = g_hash_table_new_full(</a>
+<a name="ln456">            crm_str_hash, g_str_equal, NULL, throttle_record_free);</a>
+<a name="ln457">        throttle_timer = mainloop_timer_add(&quot;throttle&quot;, 30 * 1000, TRUE, throttle_timer_cb, NULL);</a>
+<a name="ln458">    }</a>
+<a name="ln459"> </a>
+<a name="ln460">    throttle_update_job_max(NULL);</a>
+<a name="ln461">    mainloop_timer_start(throttle_timer);</a>
+<a name="ln462">}</a>
+<a name="ln463"> </a>
+<a name="ln464">void</a>
+<a name="ln465">throttle_fini(void)</a>
+<a name="ln466">{</a>
+<a name="ln467">    mainloop_timer_del(throttle_timer); throttle_timer = NULL;</a>
+<a name="ln468">    g_hash_table_destroy(throttle_records); throttle_records = NULL;</a>
+<a name="ln469">}</a>
+<a name="ln470"> </a>
+<a name="ln471">int</a>
+<a name="ln472">throttle_get_total_job_limit(int l)</a>
+<a name="ln473">{</a>
+<a name="ln474">    /* Cluster-wide limit */</a>
+<a name="ln475">    GHashTableIter iter;</a>
+<a name="ln476">    int limit = l;</a>
+<a name="ln477">    int peers = crm_active_peers();</a>
+<a name="ln478">    struct throttle_record_s *r = NULL;</a>
+<a name="ln479"> </a>
+<a name="ln480">    g_hash_table_iter_init(&amp;iter, throttle_records);</a>
+<a name="ln481"> </a>
+<a name="ln482">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp;r)) {</a>
+<a name="ln483">        switch(r-&gt;mode) {</a>
+<a name="ln484"> </a>
+<a name="ln485">            case throttle_extreme:</a>
+<a name="ln486">                if(limit == 0 || limit &gt; peers/4) {</a>
+<a name="ln487">                    limit = QB_MAX(1, peers/4);</a>
+<a name="ln488">                }</a>
+<a name="ln489">                break;</a>
+<a name="ln490"> </a>
+<a name="ln491">            case throttle_high:</a>
+<a name="ln492">                if(limit == 0 || limit &gt; peers/2) {</a>
+<a name="ln493">                    limit = QB_MAX(1, peers/2);</a>
+<a name="ln494">                }</a>
+<a name="ln495">                break;</a>
+<a name="ln496">            default:</a>
+<a name="ln497">                break;</a>
+<a name="ln498">        }</a>
+<a name="ln499">    }</a>
+<a name="ln500">    if(limit == l) {</a>
+<a name="ln501">        /* crm_trace(&quot;No change to batch-limit=%d&quot;, limit); */</a>
+<a name="ln502"> </a>
+<a name="ln503">    } else if(l == 0) {</a>
+<a name="ln504">        crm_trace(&quot;Using batch-limit=%d&quot;, limit);</a>
+<a name="ln505"> </a>
+<a name="ln506">    } else {</a>
+<a name="ln507">        crm_trace(&quot;Using batch-limit=%d instead of %d&quot;, limit, l);</a>
+<a name="ln508">    }</a>
+<a name="ln509">    return limit;</a>
+<a name="ln510">}</a>
+<a name="ln511"> </a>
+<a name="ln512">int</a>
+<a name="ln513">throttle_get_job_limit(const char *node)</a>
+<a name="ln514">{</a>
+<a name="ln515">    int jobs = 1;</a>
+<a name="ln516">    struct throttle_record_s *r = NULL;</a>
+<a name="ln517"> </a>
+<a name="ln518">    r = g_hash_table_lookup(throttle_records, node);</a>
+<a name="ln519">    if(r == NULL) {</a>
+<a name="ln520">        r = calloc(1, sizeof(struct throttle_record_s));</a>
+<a name="ln521">        r-&gt;node = strdup(node);</a>
+<a name="ln522">        r-&gt;mode = throttle_low;</a>
+<a name="ln523">        r-&gt;max = throttle_job_max;</a>
+<a name="ln524">        crm_trace(&quot;Defaulting to local values for unknown node %s&quot;, node);</a>
+<a name="ln525"> </a>
+<a name="ln526">        g_hash_table_insert(throttle_records, r-&gt;node, r);</a>
+<a name="ln527">    }</a>
+<a name="ln528"> </a>
+<a name="ln529">    switch(r-&gt;mode) {</a>
+<a name="ln530">        case throttle_extreme:</a>
+<a name="ln531">        case throttle_high:</a>
+<a name="ln532">            jobs = 1; /* At least one job must always be allowed */</a>
+<a name="ln533">            break;</a>
+<a name="ln534">        case throttle_med:</a>
+<a name="ln535">            jobs = QB_MAX(1, r-&gt;max / 4);</a>
+<a name="ln536">            break;</a>
+<a name="ln537">        case throttle_low:</a>
+<a name="ln538">            jobs = QB_MAX(1, r-&gt;max / 2);</a>
+<a name="ln539">            break;</a>
+<a name="ln540">        case throttle_none:</a>
+<a name="ln541">            jobs = QB_MAX(1, r-&gt;max);</a>
+<a name="ln542">            break;</a>
+<a name="ln543">        default:</a>
+<a name="ln544">            crm_err(&quot;Unknown throttle mode %.4x on %s&quot;, r-&gt;mode, node);</a>
+<a name="ln545">            break;</a>
+<a name="ln546">    }</a>
+<a name="ln547">    return jobs;</a>
+<a name="ln548">}</a>
+<a name="ln549"> </a>
+<a name="ln550">void</a>
+<a name="ln551">throttle_update(xmlNode *xml)</a>
+<a name="ln552">{</a>
+<a name="ln553">    int max = 0;</a>
+<a name="ln554">    enum throttle_state_e mode = 0;</a>
+<a name="ln555">    struct throttle_record_s *r = NULL;</a>
+<a name="ln556">    const char *from = crm_element_value(xml, F_CRM_HOST_FROM);</a>
+<a name="ln557"> </a>
+<a name="ln558">    crm_element_value_int(xml, F_CRM_THROTTLE_MODE, (int*)&amp;mode);</a>
+<a name="ln559">    crm_element_value_int(xml, F_CRM_THROTTLE_MAX, &amp;max);</a>
+<a name="ln560"> </a>
+<a name="ln561">    r = g_hash_table_lookup(throttle_records, from);</a>
+<a name="ln562"> </a>
+<a name="ln563">    if(r == NULL) {</a>
+<a name="ln564">        r = calloc(1, sizeof(struct throttle_record_s));</a>
+<a name="ln565">        r-&gt;node = strdup(from);</a>
+<a name="ln566">        g_hash_table_insert(throttle_records, r-&gt;node, r);</a>
+<a name="ln567">    }</a>
+<a name="ln568"> </a>
+<a name="ln569">    r-&gt;max = max;</a>
+<a name="ln570">    r-&gt;mode = mode;</a>
+<a name="ln571"> </a>
+<a name="ln572">    crm_debug(&quot;Host %s supports a maximum of %d jobs and throttle mode %.4x.  New job limit is %d&quot;,</a>
+<a name="ln573">              from, max, mode, throttle_get_job_limit(from));</a>
+<a name="ln574">}</a>
+
+</code></pre>
+<div class="balloon" rel="166"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fourth actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="521"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'r'. Check lines: 521, 520.</p></div>
+<div class="balloon" rel="526"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 526, 521.</p></div>
+<div class="balloon" rel="565"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'r'. Check lines: 565, 564.</p></div>
+<div class="balloon" rel="566"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 566, 565.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

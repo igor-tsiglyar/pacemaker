@@ -1,0 +1,564 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004-2016 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This source code is licensed under the GNU Lesser General Public License</a>
+<a name="ln9"> * version 2.1 or later (LGPLv2.1+) WITHOUT ANY WARRANTY.</a>
+<a name="ln10"> */</a>
+<a name="ln11"> </a>
+<a name="ln12">#include &lt;crm_internal.h&gt;</a>
+<a name="ln13"> </a>
+<a name="ln14">#include &lt;sys/time.h&gt;</a>
+<a name="ln15">#include &lt;sys/resource.h&gt;</a>
+<a name="ln16"> </a>
+<a name="ln17">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln18">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln19"> </a>
+<a name="ln20">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln21">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln22">#include &lt;crm/cluster/election.h&gt;</a>
+<a name="ln23">#include &lt;crm/crm.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#define STORM_INTERVAL   2      /* in seconds */</a>
+<a name="ln26"> </a>
+<a name="ln27">struct election_s</a>
+<a name="ln28">{</a>
+<a name="ln29">        enum election_result state;</a>
+<a name="ln30">        guint count;</a>
+<a name="ln31">        char *name;</a>
+<a name="ln32">        char *uname;</a>
+<a name="ln33">        GSourceFunc cb;</a>
+<a name="ln34">        GHashTable *voted;</a>
+<a name="ln35">        mainloop_timer_t *timeout; /* When to stop if not everyone casts a vote */</a>
+<a name="ln36">};</a>
+<a name="ln37"> </a>
+<a name="ln38">static void election_complete(election_t *e)</a>
+<a name="ln39">{</a>
+<a name="ln40">    crm_info(&quot;Election %s complete&quot;, e-&gt;name);</a>
+<a name="ln41">    e-&gt;state = election_won;</a>
+<a name="ln42"> </a>
+<a name="ln43">    if(e-&gt;cb) {</a>
+<a name="ln44">        e-&gt;cb(e);</a>
+<a name="ln45">    }</a>
+<a name="ln46"> </a>
+<a name="ln47">    election_reset(e);</a>
+<a name="ln48">}</a>
+<a name="ln49"> </a>
+<a name="ln50">static gboolean election_timer_cb(gpointer user_data)</a>
+<a name="ln51">{</a>
+<a name="ln52">    election_t *e = user_data;</a>
+<a name="ln53"> </a>
+<a name="ln54">    crm_info(&quot;Election %s %p timed out&quot;, e-&gt;name, e);</a>
+<a name="ln55">    election_complete(e);</a>
+<a name="ln56">    return FALSE;</a>
+<a name="ln57">}</a>
+<a name="ln58"> </a>
+<a name="ln59">enum election_result</a>
+<a name="ln60">election_state(election_t *e)</a>
+<a name="ln61">{</a>
+<a name="ln62">    if(e) {</a>
+<a name="ln63">        return e-&gt;state;</a>
+<a name="ln64">    }</a>
+<a name="ln65">    return election_error;</a>
+<a name="ln66">}</a>
+<a name="ln67"> </a>
+<a name="ln68">election_t *</a>
+<a name="ln69">election_init(const char *name, const char *uname, guint period_ms, GSourceFunc cb)</a>
+<a name="ln70">{</a>
+<a name="ln71">    static guint count = 0;</a>
+<a name="ln72">    election_t *e = calloc(1, sizeof(election_t));</a>
+<a name="ln73"> </a>
+<a name="ln74">    if(e != NULL) {</a>
+<a name="ln75">        if(name) {</a>
+<a name="ln76">            e-&gt;name = crm_strdup_printf(&quot;election-%s&quot;, name);</a>
+<a name="ln77">        } else {</a>
+<a name="ln78">            e-&gt;name = crm_strdup_printf(&quot;election-%u&quot;, count++);</a>
+<a name="ln79">        }</a>
+<a name="ln80"> </a>
+<a name="ln81">        e-&gt;cb = cb;</a>
+<a name="ln82">        e-&gt;uname = strdup(uname);</a>
+<a name="ln83">        e-&gt;timeout = mainloop_timer_add(e-&gt;name, period_ms, FALSE, election_timer_cb, e);</a>
+<a name="ln84">        crm_trace(&quot;Created %s %p&quot;, e-&gt;name, e);</a>
+<a name="ln85">    }</a>
+<a name="ln86">    return e;</a>
+<a name="ln87">}</a>
+<a name="ln88"> </a>
+<a name="ln89">void</a>
+<a name="ln90">election_remove(election_t *e, const char *uname)</a>
+<a name="ln91">{</a>
+<a name="ln92">    if(e &amp;&amp; uname &amp;&amp; e-&gt;voted) {</a>
+<a name="ln93">        g_hash_table_remove(e-&gt;voted, uname);</a>
+<a name="ln94">    }</a>
+<a name="ln95">}</a>
+<a name="ln96"> </a>
+<a name="ln97">void</a>
+<a name="ln98">election_reset(election_t *e)</a>
+<a name="ln99">{</a>
+<a name="ln100">    crm_trace(&quot;Resetting election %s&quot;, e-&gt;name);</a>
+<a name="ln101">    if(e) {</a>
+<a name="ln102">        mainloop_timer_stop(e-&gt;timeout);</a>
+<a name="ln103">    }</a>
+<a name="ln104">    if (e &amp;&amp; e-&gt;voted) {</a>
+<a name="ln105">        crm_trace(&quot;Destroying voted cache with %d members&quot;, g_hash_table_size(e-&gt;voted));</a>
+<a name="ln106">        g_hash_table_destroy(e-&gt;voted);</a>
+<a name="ln107">        e-&gt;voted = NULL;</a>
+<a name="ln108">    }</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">void</a>
+<a name="ln112">election_fini(election_t *e)</a>
+<a name="ln113">{</a>
+<a name="ln114">    if(e) {</a>
+<a name="ln115">        election_reset(e);</a>
+<a name="ln116">        crm_trace(&quot;Destroying %s&quot;, e-&gt;name);</a>
+<a name="ln117">        mainloop_timer_del(e-&gt;timeout);</a>
+<a name="ln118">        free(e-&gt;uname);</a>
+<a name="ln119">        free(e-&gt;name);</a>
+<a name="ln120">        free(e);</a>
+<a name="ln121">    }</a>
+<a name="ln122">}</a>
+<a name="ln123"> </a>
+<a name="ln124">static void</a>
+<a name="ln125">election_timeout_start(election_t *e)</a>
+<a name="ln126">{</a>
+<a name="ln127">    if(e) {</a>
+<a name="ln128">        mainloop_timer_start(e-&gt;timeout);</a>
+<a name="ln129">    }</a>
+<a name="ln130">}</a>
+<a name="ln131"> </a>
+<a name="ln132">void</a>
+<a name="ln133">election_timeout_stop(election_t *e)</a>
+<a name="ln134">{</a>
+<a name="ln135">    if(e) {</a>
+<a name="ln136">        mainloop_timer_stop(e-&gt;timeout);</a>
+<a name="ln137">    }</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">void</a>
+<a name="ln141">election_timeout_set_period(election_t *e, guint period)</a>
+<a name="ln142">{</a>
+<a name="ln143">    if(e) {</a>
+<a name="ln144">        mainloop_timer_set_period(e-&gt;timeout, period);</a>
+<a name="ln145">    } else {</a>
+<a name="ln146">        crm_err(&quot;No election defined&quot;);</a>
+<a name="ln147">    }</a>
+<a name="ln148">}</a>
+<a name="ln149"> </a>
+<a name="ln150">static int</a>
+<a name="ln151">crm_uptime(struct timeval *output)</a>
+<a name="ln152">{</a>
+<a name="ln153">    static time_t expires = 0;</a>
+<a name="ln154">    static struct rusage info;</a>
+<a name="ln155"> </a>
+<a name="ln156">    time_t tm_now = time(NULL);</a>
+<a name="ln157"> </a>
+<a name="ln158">    if (expires &lt; tm_now) {</a>
+<a name="ln159">        int rc = 0;</a>
+<a name="ln160"> </a>
+<a name="ln161">        info.ru_utime.tv_sec = 0;</a>
+<a name="ln162">        info.ru_utime.tv_usec = 0;</a>
+<a name="ln163">        rc = getrusage(RUSAGE_SELF, &amp;info);</a>
+<a name="ln164"> </a>
+<a name="ln165">        output-&gt;tv_sec = 0;</a>
+<a name="ln166">        output-&gt;tv_usec = 0;</a>
+<a name="ln167"> </a>
+<a name="ln168">        if (rc &lt; 0) {</a>
+<a name="ln169">            crm_perror(LOG_ERR, &quot;Could not calculate the current uptime&quot;);</a>
+<a name="ln170">            expires = 0;</a>
+<a name="ln171">            return -1;</a>
+<a name="ln172">        }</a>
+<a name="ln173"> </a>
+<a name="ln174">        crm_debug(&quot;Current CPU usage is: %lds, %ldus&quot;, (long)info.ru_utime.tv_sec,</a>
+<a name="ln175">                  (long)info.ru_utime.tv_usec);</a>
+<a name="ln176">    }</a>
+<a name="ln177"> </a>
+<a name="ln178">    expires = tm_now + STORM_INTERVAL;  /* N seconds after the last _access_ */</a>
+<a name="ln179">    output-&gt;tv_sec = info.ru_utime.tv_sec;</a>
+<a name="ln180">    output-&gt;tv_usec = info.ru_utime.tv_usec;</a>
+<a name="ln181"> </a>
+<a name="ln182">    return 1;</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">static int</a>
+<a name="ln186">crm_compare_age(struct timeval your_age)</a>
+<a name="ln187">{</a>
+<a name="ln188">    struct timeval our_age;</a>
+<a name="ln189"> </a>
+<a name="ln190">    crm_uptime(&amp;our_age); /* If an error occurred, our_age will be compared as {0,0} */</a>
+<a name="ln191"> </a>
+<a name="ln192">    if (our_age.tv_sec &gt; your_age.tv_sec) {</a>
+<a name="ln193">        crm_debug(&quot;Win: %ld vs %ld (seconds)&quot;, (long)our_age.tv_sec, (long)your_age.tv_sec);</a>
+<a name="ln194">        return 1;</a>
+<a name="ln195">    } else if (our_age.tv_sec &lt; your_age.tv_sec) {</a>
+<a name="ln196">        crm_debug(&quot;Lose: %ld vs %ld (seconds)&quot;, (long)our_age.tv_sec, (long)your_age.tv_sec);</a>
+<a name="ln197">        return -1;</a>
+<a name="ln198">    } else if (our_age.tv_usec &gt; your_age.tv_usec) {</a>
+<a name="ln199">        crm_debug(&quot;Win: %ld.%ld vs %ld.%ld (usec)&quot;,</a>
+<a name="ln200">                  (long)our_age.tv_sec, (long)our_age.tv_usec, (long)your_age.tv_sec, (long)your_age.tv_usec);</a>
+<a name="ln201">        return 1;</a>
+<a name="ln202">    } else if (our_age.tv_usec &lt; your_age.tv_usec) {</a>
+<a name="ln203">        crm_debug(&quot;Lose: %ld.%ld vs %ld.%ld (usec)&quot;,</a>
+<a name="ln204">                  (long)our_age.tv_sec, (long)our_age.tv_usec, (long)your_age.tv_sec, (long)your_age.tv_usec);</a>
+<a name="ln205">        return -1;</a>
+<a name="ln206">    }</a>
+<a name="ln207"> </a>
+<a name="ln208">    return 0;</a>
+<a name="ln209">}</a>
+<a name="ln210"> </a>
+<a name="ln211">void</a>
+<a name="ln212">election_vote(election_t *e)</a>
+<a name="ln213">{</a>
+<a name="ln214">    struct timeval age;</a>
+<a name="ln215">    xmlNode *vote = NULL;</a>
+<a name="ln216">    crm_node_t *our_node;</a>
+<a name="ln217"> </a>
+<a name="ln218">    if(e == NULL) {</a>
+<a name="ln219">        crm_trace(&quot;Not voting in election: not initialized&quot;);</a>
+<a name="ln220">        return;</a>
+<a name="ln221">    }</a>
+<a name="ln222"> </a>
+<a name="ln223">    our_node = crm_get_peer(0, e-&gt;uname);</a>
+<a name="ln224">    if (our_node == NULL || crm_is_peer_active(our_node) == FALSE) {</a>
+<a name="ln225">        crm_trace(&quot;Cannot vote yet: %p&quot;, our_node);</a>
+<a name="ln226">        return;</a>
+<a name="ln227">    }</a>
+<a name="ln228"> </a>
+<a name="ln229">    e-&gt;state = election_in_progress;</a>
+<a name="ln230">    vote = create_request(CRM_OP_VOTE, NULL, NULL, CRM_SYSTEM_CRMD, CRM_SYSTEM_CRMD, NULL);</a>
+<a name="ln231"> </a>
+<a name="ln232">    e-&gt;count++;</a>
+<a name="ln233">    crm_xml_add(vote, F_CRM_ELECTION_OWNER, our_node-&gt;uuid);</a>
+<a name="ln234">    crm_xml_add_int(vote, F_CRM_ELECTION_ID, e-&gt;count);</a>
+<a name="ln235"> </a>
+<a name="ln236">    crm_uptime(&amp;age);</a>
+<a name="ln237">    crm_xml_add_int(vote, F_CRM_ELECTION_AGE_S, age.tv_sec);</a>
+<a name="ln238">    crm_xml_add_int(vote, F_CRM_ELECTION_AGE_US, age.tv_usec);</a>
+<a name="ln239"> </a>
+<a name="ln240">    send_cluster_message(NULL, crm_msg_crmd, vote, TRUE);</a>
+<a name="ln241">    free_xml(vote);</a>
+<a name="ln242"> </a>
+<a name="ln243">    crm_debug(&quot;Started election %d&quot;, e-&gt;count);</a>
+<a name="ln244">    if (e-&gt;voted) {</a>
+<a name="ln245">        g_hash_table_destroy(e-&gt;voted);</a>
+<a name="ln246">        e-&gt;voted = NULL;</a>
+<a name="ln247">    }</a>
+<a name="ln248"> </a>
+<a name="ln249">    election_timeout_start(e);</a>
+<a name="ln250">    return;</a>
+<a name="ln251">}</a>
+<a name="ln252"> </a>
+<a name="ln253">bool</a>
+<a name="ln254">election_check(election_t *e)</a>
+<a name="ln255">{</a>
+<a name="ln256">    int voted_size = 0;</a>
+<a name="ln257">    int num_members = crm_active_peers();</a>
+<a name="ln258"> </a>
+<a name="ln259">    if(e == NULL) {</a>
+<a name="ln260">        crm_trace(&quot;not initialized&quot;);</a>
+<a name="ln261">        return FALSE;</a>
+<a name="ln262">    }</a>
+<a name="ln263"> </a>
+<a name="ln264">    if (e-&gt;voted) {</a>
+<a name="ln265">        voted_size = g_hash_table_size(e-&gt;voted);</a>
+<a name="ln266">    }</a>
+<a name="ln267">    /* in the case of #voted &gt; #members, it is better to</a>
+<a name="ln268">     *   wait for the timeout and give the cluster time to</a>
+<a name="ln269">     *   stabilize</a>
+<a name="ln270">     */</a>
+<a name="ln271">    if (voted_size &gt;= num_members) {</a>
+<a name="ln272">        /* we won and everyone has voted */</a>
+<a name="ln273">        election_timeout_stop(e);</a>
+<a name="ln274">        if (voted_size &gt; num_members) {</a>
+<a name="ln275">            GHashTableIter gIter;</a>
+<a name="ln276">            const crm_node_t *node;</a>
+<a name="ln277">            char *key = NULL;</a>
+<a name="ln278"> </a>
+<a name="ln279">            g_hash_table_iter_init(&amp;gIter, crm_peer_cache);</a>
+<a name="ln280">            while (g_hash_table_iter_next(&amp;gIter, NULL, (gpointer *) &amp; node)) {</a>
+<a name="ln281">                if (crm_is_peer_active(node)) {</a>
+<a name="ln282">                    crm_err(&quot;member: %s proc=%.32x&quot;, node-&gt;uname, node-&gt;processes);</a>
+<a name="ln283">                }</a>
+<a name="ln284">            }</a>
+<a name="ln285"> </a>
+<a name="ln286">            g_hash_table_iter_init(&amp;gIter, e-&gt;voted);</a>
+<a name="ln287">            while (g_hash_table_iter_next(&amp;gIter, (gpointer *) &amp; key, NULL)) {</a>
+<a name="ln288">                crm_err(&quot;voted: %s&quot;, key);</a>
+<a name="ln289">            }</a>
+<a name="ln290"> </a>
+<a name="ln291">        }</a>
+<a name="ln292"> </a>
+<a name="ln293">        election_complete(e);</a>
+<a name="ln294">        return TRUE;</a>
+<a name="ln295"> </a>
+<a name="ln296">    } else {</a>
+<a name="ln297">        crm_debug(&quot;Still waiting on %d non-votes (%d total)&quot;,</a>
+<a name="ln298">                  num_members - voted_size, num_members);</a>
+<a name="ln299">    }</a>
+<a name="ln300"> </a>
+<a name="ln301">    return FALSE;</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">#define loss_dampen 2           /* in seconds */</a>
+<a name="ln305"> </a>
+<a name="ln306">/*	A_ELECTION_COUNT	*/</a>
+<a name="ln307">enum election_result</a>
+<a name="ln308">election_count_vote(election_t *e, xmlNode *vote, bool can_win)</a>
+<a name="ln309">{</a>
+<a name="ln310">    int age = 0;</a>
+<a name="ln311">    int election_id = -1;</a>
+<a name="ln312">    int log_level = LOG_INFO;</a>
+<a name="ln313">    gboolean use_born_on = FALSE;</a>
+<a name="ln314">    gboolean done = FALSE;</a>
+<a name="ln315">    gboolean we_lose = FALSE;</a>
+<a name="ln316">    const char *op = NULL;</a>
+<a name="ln317">    const char *from = NULL;</a>
+<a name="ln318">    const char *reason = &quot;unknown&quot;;</a>
+<a name="ln319">    const char *election_owner = NULL;</a>
+<a name="ln320">    crm_node_t *our_node = NULL, *your_node = NULL;</a>
+<a name="ln321"> </a>
+<a name="ln322">    static int election_wins = 0;</a>
+<a name="ln323"> </a>
+<a name="ln324">    xmlNode *novote = NULL;</a>
+<a name="ln325">    time_t tm_now = time(NULL);</a>
+<a name="ln326">    static time_t expires = 0;</a>
+<a name="ln327">    static time_t last_election_loss = 0;</a>
+<a name="ln328"> </a>
+<a name="ln329">    /* if the membership copy is NULL we REALLY shouldn't be voting</a>
+<a name="ln330">     * the question is how we managed to get here.</a>
+<a name="ln331">     */</a>
+<a name="ln332"> </a>
+<a name="ln333">    CRM_CHECK(vote != NULL, return election_error);</a>
+<a name="ln334"> </a>
+<a name="ln335">    if(e == NULL) {</a>
+<a name="ln336">        crm_info(&quot;Not voting in election: not initialized&quot;);</a>
+<a name="ln337">        return election_lost;</a>
+<a name="ln338"> </a>
+<a name="ln339">    } else if(crm_peer_cache == NULL) {</a>
+<a name="ln340">        crm_info(&quot;Not voting in election: no peer cache&quot;);</a>
+<a name="ln341">        return election_lost;</a>
+<a name="ln342">    }</a>
+<a name="ln343"> </a>
+<a name="ln344">    op = crm_element_value(vote, F_CRM_TASK);</a>
+<a name="ln345">    from = crm_element_value(vote, F_CRM_HOST_FROM);</a>
+<a name="ln346">    election_owner = crm_element_value(vote, F_CRM_ELECTION_OWNER);</a>
+<a name="ln347">    crm_element_value_int(vote, F_CRM_ELECTION_ID, &amp;election_id);</a>
+<a name="ln348"> </a>
+<a name="ln349">    your_node = crm_get_peer(0, from);</a>
+<a name="ln350">    our_node = crm_get_peer(0, e-&gt;uname);</a>
+<a name="ln351"> </a>
+<a name="ln352">    if (e-&gt;voted == NULL) {</a>
+<a name="ln353">        crm_debug(&quot;Created voted hash&quot;);</a>
+<a name="ln354">        e-&gt;voted = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln355">                                         g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln356">    }</a>
+<a name="ln357"> </a>
+<a name="ln358">    if (is_heartbeat_cluster()) {</a>
+<a name="ln359">        use_born_on = TRUE;</a>
+<a name="ln360">    } else if (is_classic_ais_cluster()) {</a>
+<a name="ln361">        use_born_on = TRUE;</a>
+<a name="ln362">    }</a>
+<a name="ln363"> </a>
+<a name="ln364">    if(can_win == FALSE) {</a>
+<a name="ln365">        reason = &quot;Not eligible&quot;;</a>
+<a name="ln366">        we_lose = TRUE;</a>
+<a name="ln367"> </a>
+<a name="ln368">    } else if (our_node == NULL || crm_is_peer_active(our_node) == FALSE) {</a>
+<a name="ln369">        reason = &quot;We are not part of the cluster&quot;;</a>
+<a name="ln370">        log_level = LOG_ERR;</a>
+<a name="ln371">        we_lose = TRUE;</a>
+<a name="ln372"> </a>
+<a name="ln373">    } else if (election_id != e-&gt;count &amp;&amp; crm_str_eq(our_node-&gt;uuid, election_owner, TRUE)) {</a>
+<a name="ln374">        log_level = LOG_TRACE;</a>
+<a name="ln375">        reason = &quot;Superseded&quot;;</a>
+<a name="ln376">        done = TRUE;</a>
+<a name="ln377"> </a>
+<a name="ln378">    } else if (your_node == NULL || crm_is_peer_active(your_node) == FALSE) {</a>
+<a name="ln379">        /* Possibly we cached the message in the FSA queue at a point that it wasn't */</a>
+<a name="ln380">        reason = &quot;Peer is not part of our cluster&quot;;</a>
+<a name="ln381">        log_level = LOG_WARNING;</a>
+<a name="ln382">        done = TRUE;</a>
+<a name="ln383"> </a>
+<a name="ln384">    } else if (crm_str_eq(op, CRM_OP_NOVOTE, TRUE)) {</a>
+<a name="ln385">        char *op_copy = strdup(op);</a>
+<a name="ln386">        char *uname_copy = strdup(from);</a>
+<a name="ln387"> </a>
+<a name="ln388">        CRM_ASSERT(crm_str_eq(our_node-&gt;uuid, election_owner, TRUE));</a>
+<a name="ln389"> </a>
+<a name="ln390">        /* update the list of nodes that have voted */</a>
+<a name="ln391">        g_hash_table_replace(e-&gt;voted, uname_copy, op_copy);</a>
+<a name="ln392">        reason = &quot;Recorded&quot;;</a>
+<a name="ln393">        done = TRUE;</a>
+<a name="ln394"> </a>
+<a name="ln395">    } else {</a>
+<a name="ln396">        struct timeval your_age;</a>
+<a name="ln397">        const char *your_version = crm_element_value(vote, F_CRM_VERSION);</a>
+<a name="ln398">        int tv_sec = 0;</a>
+<a name="ln399">        int tv_usec = 0;</a>
+<a name="ln400"> </a>
+<a name="ln401">        crm_element_value_int(vote, F_CRM_ELECTION_AGE_S, &amp;tv_sec);</a>
+<a name="ln402">        crm_element_value_int(vote, F_CRM_ELECTION_AGE_US, &amp;tv_usec);</a>
+<a name="ln403"> </a>
+<a name="ln404">        your_age.tv_sec = tv_sec;</a>
+<a name="ln405">        your_age.tv_usec = tv_usec;</a>
+<a name="ln406"> </a>
+<a name="ln407">        age = crm_compare_age(your_age);</a>
+<a name="ln408">        if (crm_str_eq(from, e-&gt;uname, TRUE)) {</a>
+<a name="ln409">            char *op_copy = strdup(op);</a>
+<a name="ln410">            char *uname_copy = strdup(from);</a>
+<a name="ln411"> </a>
+<a name="ln412">            CRM_ASSERT(crm_str_eq(our_node-&gt;uuid, election_owner, TRUE));</a>
+<a name="ln413"> </a>
+<a name="ln414">            /* update ourselves in the list of nodes that have voted */</a>
+<a name="ln415">            g_hash_table_replace(e-&gt;voted, uname_copy, op_copy);</a>
+<a name="ln416">            reason = &quot;Recorded&quot;;</a>
+<a name="ln417">            done = TRUE;</a>
+<a name="ln418"> </a>
+<a name="ln419">        } else if (compare_version(your_version, CRM_FEATURE_SET) &lt; 0) {</a>
+<a name="ln420">            reason = &quot;Version&quot;;</a>
+<a name="ln421">            we_lose = TRUE;</a>
+<a name="ln422"> </a>
+<a name="ln423">        } else if (compare_version(your_version, CRM_FEATURE_SET) &gt; 0) {</a>
+<a name="ln424">            reason = &quot;Version&quot;;</a>
+<a name="ln425"> </a>
+<a name="ln426">        } else if (age &lt; 0) {</a>
+<a name="ln427">            reason = &quot;Uptime&quot;;</a>
+<a name="ln428">            we_lose = TRUE;</a>
+<a name="ln429"> </a>
+<a name="ln430">        } else if (age &gt; 0) {</a>
+<a name="ln431">            reason = &quot;Uptime&quot;;</a>
+<a name="ln432"> </a>
+<a name="ln433">            /* TODO: Check for y(our) born &lt; 0 */</a>
+<a name="ln434">        } else if (use_born_on &amp;&amp; your_node-&gt;born &lt; our_node-&gt;born) {</a>
+<a name="ln435">            reason = &quot;Born&quot;;</a>
+<a name="ln436">            we_lose = TRUE;</a>
+<a name="ln437"> </a>
+<a name="ln438">        } else if (use_born_on &amp;&amp; your_node-&gt;born &gt; our_node-&gt;born) {</a>
+<a name="ln439">            reason = &quot;Born&quot;;</a>
+<a name="ln440"> </a>
+<a name="ln441">        } else if (e-&gt;uname == NULL) {</a>
+<a name="ln442">            reason = &quot;Unknown host name&quot;;</a>
+<a name="ln443">            we_lose = TRUE;</a>
+<a name="ln444"> </a>
+<a name="ln445">        } else if (strcasecmp(e-&gt;uname, from) &gt; 0) {</a>
+<a name="ln446">            reason = &quot;Host name&quot;;</a>
+<a name="ln447">            we_lose = TRUE;</a>
+<a name="ln448"> </a>
+<a name="ln449">        } else {</a>
+<a name="ln450">            reason = &quot;Host name&quot;;</a>
+<a name="ln451">            CRM_ASSERT(strcasecmp(e-&gt;uname, from) &lt; 0);</a>
+<a name="ln452">/* can't happen...</a>
+<a name="ln453"> *	} else if(strcasecmp(e-&gt;uname, from) == 0) {</a>
+<a name="ln454"> *</a>
+<a name="ln455"> */</a>
+<a name="ln456">        }</a>
+<a name="ln457">    }</a>
+<a name="ln458"> </a>
+<a name="ln459">    if (expires &lt; tm_now) {</a>
+<a name="ln460">        election_wins = 0;</a>
+<a name="ln461">        expires = tm_now + STORM_INTERVAL;</a>
+<a name="ln462"> </a>
+<a name="ln463">    } else if (done == FALSE &amp;&amp; we_lose == FALSE) {</a>
+<a name="ln464">        int peers = 1 + g_hash_table_size(crm_peer_cache);</a>
+<a name="ln465"> </a>
+<a name="ln466">        /* If every node has to vote down every other node, thats N*(N-1) total elections</a>
+<a name="ln467">         * Allow some leeway before _really_ complaining</a>
+<a name="ln468">         */</a>
+<a name="ln469">        election_wins++;</a>
+<a name="ln470">        if (election_wins &gt; (peers * peers)) {</a>
+<a name="ln471">            crm_warn(&quot;Election storm detected: %d elections in %d seconds&quot;, election_wins,</a>
+<a name="ln472">                     STORM_INTERVAL);</a>
+<a name="ln473">            election_wins = 0;</a>
+<a name="ln474">            expires = tm_now + STORM_INTERVAL;</a>
+<a name="ln475">            crm_write_blackbox(0, NULL);</a>
+<a name="ln476">        }</a>
+<a name="ln477">    }</a>
+<a name="ln478"> </a>
+<a name="ln479">    if (done) {</a>
+<a name="ln480">        do_crm_log(log_level + 1, &quot;Election %d (current: %d, owner: %s): Processed %s from %s (%s)&quot;,</a>
+<a name="ln481">                   election_id, e-&gt;count, election_owner, op, from, reason);</a>
+<a name="ln482">        return e-&gt;state;</a>
+<a name="ln483"> </a>
+<a name="ln484">    } else if (we_lose == FALSE) {</a>
+<a name="ln485">        do_crm_log(log_level, &quot;Election %d (owner: %s) pass: %s from %s (%s)&quot;,</a>
+<a name="ln486">                   election_id, election_owner, op, from, reason);</a>
+<a name="ln487"> </a>
+<a name="ln488">        if (last_election_loss == 0</a>
+<a name="ln489">            || tm_now - last_election_loss &gt; (time_t) loss_dampen) {</a>
+<a name="ln490"> </a>
+<a name="ln491">            last_election_loss = 0;</a>
+<a name="ln492">            election_timeout_stop(e);</a>
+<a name="ln493"> </a>
+<a name="ln494">            /* Start a new election by voting down this, and other, peers */</a>
+<a name="ln495">            e-&gt;state = election_start;</a>
+<a name="ln496">            return e-&gt;state;</a>
+<a name="ln497">        }</a>
+<a name="ln498"> </a>
+<a name="ln499">        crm_info(&quot;Election %d ignore: We already lost an election less than %ds ago (%s)&quot;,</a>
+<a name="ln500">                 election_id, loss_dampen, ctime(&amp;last_election_loss));</a>
+<a name="ln501">    }</a>
+<a name="ln502"> </a>
+<a name="ln503">    novote = create_request(CRM_OP_NOVOTE, NULL, from,</a>
+<a name="ln504">                            CRM_SYSTEM_CRMD, CRM_SYSTEM_CRMD, NULL);</a>
+<a name="ln505"> </a>
+<a name="ln506">    do_crm_log(log_level, &quot;Election %d (owner: %s) lost: %s from %s (%s)&quot;,</a>
+<a name="ln507">               election_id, election_owner, op, from, reason);</a>
+<a name="ln508"> </a>
+<a name="ln509">    election_timeout_stop(e);</a>
+<a name="ln510"> </a>
+<a name="ln511">    crm_xml_add(novote, F_CRM_ELECTION_OWNER, election_owner);</a>
+<a name="ln512">    crm_xml_add_int(novote, F_CRM_ELECTION_ID, election_id);</a>
+<a name="ln513"> </a>
+<a name="ln514">    send_cluster_message(your_node, crm_msg_crmd, novote, TRUE);</a>
+<a name="ln515">    free_xml(novote);</a>
+<a name="ln516"> </a>
+<a name="ln517">    last_election_loss = tm_now;</a>
+<a name="ln518">    e-&gt;state = election_lost;</a>
+<a name="ln519">    return e-&gt;state;</a>
+<a name="ln520">}</a>
+
+</code></pre>
+<div class="balloon" rel="100"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V595/" target="_blank">V595</a> The 'e' pointer was utilized before it was verified against nullptr. Check lines: 100, 101.</p></div>
+<div class="balloon" rel="391"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 391, 386.</p></div>
+<div class="balloon" rel="415"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 415, 410.</p></div>
+<div class="balloon" rel="451"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (strcasecmp(e->uname, from) < 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

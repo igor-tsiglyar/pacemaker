@@ -1,0 +1,537 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27">#include &lt;string.h&gt;</a>
+<a name="ln28">#include &lt;stdlib.h&gt;</a>
+<a name="ln29">#include &lt;errno.h&gt;</a>
+<a name="ln30">#include &lt;fcntl.h&gt;</a>
+<a name="ln31">#include &lt;dirent.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;sys/param.h&gt;</a>
+<a name="ln34">#include &lt;sys/types.h&gt;</a>
+<a name="ln35">#include &lt;sys/wait.h&gt;</a>
+<a name="ln36">#include &lt;sys/stat.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;crm/crm.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">#include &lt;cibio.h&gt;</a>
+<a name="ln41">#include &lt;crm/cib.h&gt;</a>
+<a name="ln42">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln43">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln44">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln45">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln46">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln47"> </a>
+<a name="ln48">extern const char *cib_root;</a>
+<a name="ln49"> </a>
+<a name="ln50">crm_trigger_t *cib_writer = NULL;</a>
+<a name="ln51">gboolean initialized = FALSE;</a>
+<a name="ln52"> </a>
+<a name="ln53">extern int cib_status;</a>
+<a name="ln54"> </a>
+<a name="ln55">int write_cib_contents(gpointer p);</a>
+<a name="ln56"> </a>
+<a name="ln57">static void</a>
+<a name="ln58">cib_rename(const char *old)</a>
+<a name="ln59">{</a>
+<a name="ln60">    int new_fd;</a>
+<a name="ln61">    char *new = crm_strdup_printf(&quot;%s/cib.auto.XXXXXX&quot;, cib_root);</a>
+<a name="ln62"> </a>
+<a name="ln63">    crm_err(&quot;Archiving unusable file %s as %s&quot;, old, new);</a>
+<a name="ln64">    umask(S_IWGRP | S_IWOTH | S_IROTH);</a>
+<a name="ln65">    if ((new_fd = mkstemp(new) &lt; 0) || (rename(old, new) &lt; 0)) {</a>
+<a name="ln66">        crm_perror(LOG_ERR, &quot;Couldn't rename %s as %s&quot;, old, new);</a>
+<a name="ln67">        crm_err(&quot;Disabling disk writes and continuing&quot;);</a>
+<a name="ln68">        cib_writes_enabled = FALSE;</a>
+<a name="ln69">    }</a>
+<a name="ln70">    if (new_fd &gt; 0) {</a>
+<a name="ln71">        close(new_fd);</a>
+<a name="ln72">    }</a>
+<a name="ln73">    free(new);</a>
+<a name="ln74">}</a>
+<a name="ln75"> </a>
+<a name="ln76">/*</a>
+<a name="ln77"> * It is the callers responsibility to free the output of this function</a>
+<a name="ln78"> */</a>
+<a name="ln79"> </a>
+<a name="ln80">static xmlNode *</a>
+<a name="ln81">retrieveCib(const char *filename, const char *sigfile)</a>
+<a name="ln82">{</a>
+<a name="ln83">    xmlNode *root = NULL;</a>
+<a name="ln84"> </a>
+<a name="ln85">    crm_info(&quot;Reading cluster configuration file %s (digest: %s)&quot;,</a>
+<a name="ln86">             filename, sigfile);</a>
+<a name="ln87">    switch (cib_file_read_and_verify(filename, sigfile, &amp;root)) {</a>
+<a name="ln88">        case -pcmk_err_cib_corrupt:</a>
+<a name="ln89">            crm_warn(&quot;Continuing but %s will NOT be used.&quot;, filename);</a>
+<a name="ln90">            break;</a>
+<a name="ln91"> </a>
+<a name="ln92">        case -pcmk_err_cib_modified:</a>
+<a name="ln93">            /* Archive the original files so the contents are not lost */</a>
+<a name="ln94">            crm_warn(&quot;Continuing but %s will NOT be used.&quot;, filename);</a>
+<a name="ln95">            cib_rename(filename);</a>
+<a name="ln96">            cib_rename(sigfile);</a>
+<a name="ln97">            break;</a>
+<a name="ln98">    }</a>
+<a name="ln99">    return root;</a>
+<a name="ln100">}</a>
+<a name="ln101"> </a>
+<a name="ln102">/*</a>
+<a name="ln103"> * for OSs without support for direntry-&gt;d_type, like Solaris</a>
+<a name="ln104"> */</a>
+<a name="ln105">#ifndef DT_UNKNOWN</a>
+<a name="ln106"># define DT_UNKNOWN     0</a>
+<a name="ln107"># define DT_FIFO        1</a>
+<a name="ln108"># define DT_CHR         2</a>
+<a name="ln109"># define DT_DIR         4</a>
+<a name="ln110"># define DT_BLK         6</a>
+<a name="ln111"># define DT_REG         8</a>
+<a name="ln112"># define DT_LNK         10</a>
+<a name="ln113"># define DT_SOCK        12</a>
+<a name="ln114"># define DT_WHT         14</a>
+<a name="ln115">#endif /*DT_UNKNOWN*/</a>
+<a name="ln116"> </a>
+<a name="ln117">static int cib_archive_filter(const struct dirent * a)</a>
+<a name="ln118">{</a>
+<a name="ln119">    int rc = 0;</a>
+<a name="ln120">    /* Looking for regular files (d_type = 8) starting with 'cib-' and not ending in .sig */</a>
+<a name="ln121">    struct stat s;</a>
+<a name="ln122">    char *a_path = crm_strdup_printf(&quot;%s/%s&quot;, cib_root, a-&gt;d_name);</a>
+<a name="ln123"> </a>
+<a name="ln124">    if(stat(a_path, &amp;s) != 0) {</a>
+<a name="ln125">        rc = errno;</a>
+<a name="ln126">        crm_trace(&quot;%s - stat failed: %s (%d)&quot;, a-&gt;d_name, pcmk_strerror(rc), rc);</a>
+<a name="ln127">        rc = 0;</a>
+<a name="ln128"> </a>
+<a name="ln129">    } else if ((s.st_mode &amp; S_IFREG) != S_IFREG) {</a>
+<a name="ln130">        unsigned char dtype;</a>
+<a name="ln131">#ifdef HAVE_STRUCT_DIRENT_D_TYPE</a>
+<a name="ln132">        dtype = a-&gt;d_type;</a>
+<a name="ln133">#else</a>
+<a name="ln134">        switch (s.st_mode &amp; S_IFMT) {</a>
+<a name="ln135">            case S_IFREG:  dtype = DT_REG;      break;</a>
+<a name="ln136">            case S_IFDIR:  dtype = DT_DIR;      break;</a>
+<a name="ln137">            case S_IFCHR:  dtype = DT_CHR;      break;</a>
+<a name="ln138">            case S_IFBLK:  dtype = DT_BLK;      break;</a>
+<a name="ln139">            case S_IFLNK:  dtype = DT_LNK;      break;</a>
+<a name="ln140">            case S_IFIFO:  dtype = DT_FIFO;     break;</a>
+<a name="ln141">            case S_IFSOCK: dtype = DT_SOCK;     break;</a>
+<a name="ln142">            default:       dtype = DT_UNKNOWN;  break;</a>
+<a name="ln143">        }</a>
+<a name="ln144">#endif</a>
+<a name="ln145">         crm_trace(&quot;%s - wrong type (%d)&quot;, a-&gt;d_name, dtype);</a>
+<a name="ln146"> </a>
+<a name="ln147">    } else if(strstr(a-&gt;d_name, &quot;cib-&quot;) != a-&gt;d_name) {</a>
+<a name="ln148">        crm_trace(&quot;%s - wrong prefix&quot;, a-&gt;d_name);</a>
+<a name="ln149"> </a>
+<a name="ln150">    } else if (crm_ends_with(a-&gt;d_name, &quot;.sig&quot;)) {</a>
+<a name="ln151">        crm_trace(&quot;%s - wrong suffix&quot;, a-&gt;d_name);</a>
+<a name="ln152"> </a>
+<a name="ln153">    } else {</a>
+<a name="ln154">        crm_debug(&quot;%s - candidate&quot;, a-&gt;d_name);</a>
+<a name="ln155">        rc = 1;</a>
+<a name="ln156">    }</a>
+<a name="ln157"> </a>
+<a name="ln158">    free(a_path);</a>
+<a name="ln159">    return rc;</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">static int cib_archive_sort(const struct dirent ** a, const struct dirent **b)</a>
+<a name="ln163">{</a>
+<a name="ln164">    /* Order by creation date - most recently created file first */</a>
+<a name="ln165">    int rc = 0;</a>
+<a name="ln166">    struct stat buf;</a>
+<a name="ln167"> </a>
+<a name="ln168">    time_t a_age = 0;</a>
+<a name="ln169">    time_t b_age = 0;</a>
+<a name="ln170"> </a>
+<a name="ln171">    char *a_path = crm_strdup_printf(&quot;%s/%s&quot;, cib_root, a[0]-&gt;d_name);</a>
+<a name="ln172">    char *b_path = crm_strdup_printf(&quot;%s/%s&quot;, cib_root, b[0]-&gt;d_name);</a>
+<a name="ln173"> </a>
+<a name="ln174">    if(stat(a_path, &amp;buf) == 0) {</a>
+<a name="ln175">        a_age = buf.st_ctime;</a>
+<a name="ln176">    }</a>
+<a name="ln177">    if(stat(b_path, &amp;buf) == 0) {</a>
+<a name="ln178">        b_age = buf.st_ctime;</a>
+<a name="ln179">    }</a>
+<a name="ln180"> </a>
+<a name="ln181">    free(a_path);</a>
+<a name="ln182">    free(b_path);</a>
+<a name="ln183"> </a>
+<a name="ln184">    if(a_age &gt; b_age) {</a>
+<a name="ln185">        rc = 1;</a>
+<a name="ln186">    } else if(a_age &lt; b_age) {</a>
+<a name="ln187">        rc = -1;</a>
+<a name="ln188">    }</a>
+<a name="ln189"> </a>
+<a name="ln190">    crm_trace(&quot;%s (%lu) vs. %s (%lu) : %d&quot;,</a>
+<a name="ln191">	a[0]-&gt;d_name, (unsigned long)a_age,</a>
+<a name="ln192">	b[0]-&gt;d_name, (unsigned long)b_age, rc);</a>
+<a name="ln193">    return rc;</a>
+<a name="ln194">}</a>
+<a name="ln195"> </a>
+<a name="ln196">xmlNode *</a>
+<a name="ln197">readCibXmlFile(const char *dir, const char *file, gboolean discard_status)</a>
+<a name="ln198">{</a>
+<a name="ln199">    struct dirent **namelist = NULL;</a>
+<a name="ln200"> </a>
+<a name="ln201">    int lpc = 0;</a>
+<a name="ln202">    char *sigfile = NULL;</a>
+<a name="ln203">    char *filename = NULL;</a>
+<a name="ln204">    const char *name = NULL;</a>
+<a name="ln205">    const char *value = NULL;</a>
+<a name="ln206">    const char *validation = NULL;</a>
+<a name="ln207">    const char *use_valgrind = getenv(&quot;PCMK_valgrind_enabled&quot;);</a>
+<a name="ln208"> </a>
+<a name="ln209">    xmlNode *root = NULL;</a>
+<a name="ln210">    xmlNode *status = NULL;</a>
+<a name="ln211"> </a>
+<a name="ln212">    if (!crm_is_writable(dir, file, CRM_DAEMON_USER, NULL, FALSE)) {</a>
+<a name="ln213">        cib_status = -EACCES;</a>
+<a name="ln214">        return NULL;</a>
+<a name="ln215">    }</a>
+<a name="ln216"> </a>
+<a name="ln217">    filename = crm_concat(dir, file, '/');</a>
+<a name="ln218">    sigfile = crm_concat(filename, &quot;sig&quot;, '.');</a>
+<a name="ln219"> </a>
+<a name="ln220">    cib_status = pcmk_ok;</a>
+<a name="ln221">    root = retrieveCib(filename, sigfile);</a>
+<a name="ln222">    free(filename);</a>
+<a name="ln223">    free(sigfile);</a>
+<a name="ln224"> </a>
+<a name="ln225">    if (root == NULL) {</a>
+<a name="ln226">        crm_warn(&quot;Primary configuration corrupt or unusable, trying backups in %s&quot;, cib_root);</a>
+<a name="ln227">        lpc = scandir(cib_root, &amp;namelist, cib_archive_filter, cib_archive_sort);</a>
+<a name="ln228">        if (lpc &lt; 0) {</a>
+<a name="ln229">            crm_perror(LOG_NOTICE, &quot;scandir(%s) failed&quot;, cib_root);</a>
+<a name="ln230">        }</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    while (root == NULL &amp;&amp; lpc &gt; 1) {</a>
+<a name="ln234">        crm_debug(&quot;Testing %d candidates&quot;, lpc);</a>
+<a name="ln235"> </a>
+<a name="ln236">        lpc--;</a>
+<a name="ln237"> </a>
+<a name="ln238">        filename = crm_strdup_printf(&quot;%s/%s&quot;, cib_root, namelist[lpc]-&gt;d_name);</a>
+<a name="ln239">        sigfile = crm_concat(filename, &quot;sig&quot;, '.');</a>
+<a name="ln240"> </a>
+<a name="ln241">        crm_info(&quot;Reading cluster configuration file %s (digest: %s)&quot;,</a>
+<a name="ln242">                 filename, sigfile);</a>
+<a name="ln243">        if (cib_file_read_and_verify(filename, sigfile, &amp;root) &lt; 0) {</a>
+<a name="ln244">            crm_warn(&quot;Continuing but %s will NOT be used.&quot;, filename);</a>
+<a name="ln245">        } else {</a>
+<a name="ln246">            crm_notice(&quot;Continuing with last valid configuration archive: %s&quot;, filename);</a>
+<a name="ln247">        }</a>
+<a name="ln248"> </a>
+<a name="ln249">        free(namelist[lpc]);</a>
+<a name="ln250">        free(filename);</a>
+<a name="ln251">        free(sigfile);</a>
+<a name="ln252">    }</a>
+<a name="ln253">    free(namelist);</a>
+<a name="ln254"> </a>
+<a name="ln255">    if (root == NULL) {</a>
+<a name="ln256">        root = createEmptyCib(0);</a>
+<a name="ln257">        crm_warn(&quot;Continuing with an empty configuration.&quot;);</a>
+<a name="ln258">    }</a>
+<a name="ln259"> </a>
+<a name="ln260">    if (cib_writes_enabled &amp;&amp; use_valgrind) {</a>
+<a name="ln261">        if (crm_is_true(use_valgrind) || strstr(use_valgrind, &quot;cib&quot;)) {</a>
+<a name="ln262">            cib_writes_enabled = FALSE;</a>
+<a name="ln263">            crm_err(&quot;*** Disabling disk writes to avoid confusing Valgrind ***&quot;);</a>
+<a name="ln264">        }</a>
+<a name="ln265">    }</a>
+<a name="ln266"> </a>
+<a name="ln267">    status = find_xml_node(root, XML_CIB_TAG_STATUS, FALSE);</a>
+<a name="ln268">    if (discard_status &amp;&amp; status != NULL) {</a>
+<a name="ln269">        /* strip out the status section if there is one */</a>
+<a name="ln270">        free_xml(status);</a>
+<a name="ln271">        status = NULL;</a>
+<a name="ln272">    }</a>
+<a name="ln273">    if (status == NULL) {</a>
+<a name="ln274">        create_xml_node(root, XML_CIB_TAG_STATUS);</a>
+<a name="ln275">    }</a>
+<a name="ln276"> </a>
+<a name="ln277">    /* Do this before DTD validation happens */</a>
+<a name="ln278"> </a>
+<a name="ln279">    /* fill in some defaults */</a>
+<a name="ln280">    name = XML_ATTR_GENERATION_ADMIN;</a>
+<a name="ln281">    value = crm_element_value(root, name);</a>
+<a name="ln282">    if (value == NULL) {</a>
+<a name="ln283">        crm_warn(&quot;No value for %s was specified in the configuration.&quot;, name);</a>
+<a name="ln284">        crm_warn(&quot;The recommended course of action is to shutdown,&quot;</a>
+<a name="ln285">                 &quot; run crm_verify and fix any errors it reports.&quot;);</a>
+<a name="ln286">        crm_warn(&quot;We will default to zero and continue but may get&quot;</a>
+<a name="ln287">                 &quot; confused about which configuration to use if&quot;</a>
+<a name="ln288">                 &quot; multiple nodes are powered up at the same time.&quot;);</a>
+<a name="ln289">        crm_xml_add_int(root, name, 0);</a>
+<a name="ln290">    }</a>
+<a name="ln291"> </a>
+<a name="ln292">    name = XML_ATTR_GENERATION;</a>
+<a name="ln293">    value = crm_element_value(root, name);</a>
+<a name="ln294">    if (value == NULL) {</a>
+<a name="ln295">        crm_xml_add_int(root, name, 0);</a>
+<a name="ln296">    }</a>
+<a name="ln297"> </a>
+<a name="ln298">    name = XML_ATTR_NUMUPDATES;</a>
+<a name="ln299">    value = crm_element_value(root, name);</a>
+<a name="ln300">    if (value == NULL) {</a>
+<a name="ln301">        crm_xml_add_int(root, name, 0);</a>
+<a name="ln302">    }</a>
+<a name="ln303"> </a>
+<a name="ln304">    /* unset these and require the DC/CCM to update as needed */</a>
+<a name="ln305">    xml_remove_prop(root, XML_ATTR_DC_UUID);</a>
+<a name="ln306"> </a>
+<a name="ln307">    if (discard_status) {</a>
+<a name="ln308">        crm_log_xml_trace(root, &quot;[on-disk]&quot;);</a>
+<a name="ln309">    }</a>
+<a name="ln310"> </a>
+<a name="ln311">    validation = crm_element_value(root, XML_ATTR_VALIDATION);</a>
+<a name="ln312">    if (validate_xml(root, NULL, TRUE) == FALSE) {</a>
+<a name="ln313">        crm_err(&quot;CIB does not validate with %s&quot;, crm_str(validation));</a>
+<a name="ln314">        cib_status = -pcmk_err_schema_validation;</a>
+<a name="ln315"> </a>
+<a name="ln316">    } else if (validation == NULL) {</a>
+<a name="ln317">        int version = 0;</a>
+<a name="ln318"> </a>
+<a name="ln319">        update_validation(&amp;root, &amp;version, 0, FALSE, FALSE);</a>
+<a name="ln320">        if (version &gt; 0) {</a>
+<a name="ln321">            crm_notice(&quot;Enabling %s validation on&quot;</a>
+<a name="ln322">                       &quot; the existing (sane) configuration&quot;, get_schema_name(version));</a>
+<a name="ln323">        } else {</a>
+<a name="ln324">            crm_err(&quot;CIB does not validate with any known DTD or schema&quot;);</a>
+<a name="ln325">            cib_status = -pcmk_err_schema_validation;</a>
+<a name="ln326">        }</a>
+<a name="ln327">    }</a>
+<a name="ln328"> </a>
+<a name="ln329">    return root;</a>
+<a name="ln330">}</a>
+<a name="ln331"> </a>
+<a name="ln332">/*</a>
+<a name="ln333"> * The caller should never free the return value</a>
+<a name="ln334"> */</a>
+<a name="ln335">xmlNode *</a>
+<a name="ln336">get_the_CIB(void)</a>
+<a name="ln337">{</a>
+<a name="ln338">    return the_cib;</a>
+<a name="ln339">}</a>
+<a name="ln340"> </a>
+<a name="ln341">gboolean</a>
+<a name="ln342">uninitializeCib(void)</a>
+<a name="ln343">{</a>
+<a name="ln344">    xmlNode *tmp_cib = the_cib;</a>
+<a name="ln345"> </a>
+<a name="ln346">    if (tmp_cib == NULL) {</a>
+<a name="ln347">        crm_debug(&quot;The CIB has already been deallocated.&quot;);</a>
+<a name="ln348">        return FALSE;</a>
+<a name="ln349">    }</a>
+<a name="ln350"> </a>
+<a name="ln351">    initialized = FALSE;</a>
+<a name="ln352">    the_cib = NULL;</a>
+<a name="ln353"> </a>
+<a name="ln354">    crm_debug(&quot;Deallocating the CIB.&quot;);</a>
+<a name="ln355"> </a>
+<a name="ln356">    free_xml(tmp_cib);</a>
+<a name="ln357"> </a>
+<a name="ln358">    crm_debug(&quot;The CIB has been deallocated.&quot;);</a>
+<a name="ln359"> </a>
+<a name="ln360">    return TRUE;</a>
+<a name="ln361">}</a>
+<a name="ln362"> </a>
+<a name="ln363">/*</a>
+<a name="ln364"> * This method will not free the old CIB pointer or the new one.</a>
+<a name="ln365"> * We rely on the caller to have saved a pointer to the old CIB</a>
+<a name="ln366"> *   and to free the old/bad one depending on what is appropriate.</a>
+<a name="ln367"> */</a>
+<a name="ln368">gboolean</a>
+<a name="ln369">initializeCib(xmlNode * new_cib)</a>
+<a name="ln370">{</a>
+<a name="ln371">    if (new_cib == NULL) {</a>
+<a name="ln372">        return FALSE;</a>
+<a name="ln373">    }</a>
+<a name="ln374"> </a>
+<a name="ln375">    the_cib = new_cib;</a>
+<a name="ln376">    initialized = TRUE;</a>
+<a name="ln377">    return TRUE;</a>
+<a name="ln378">}</a>
+<a name="ln379"> </a>
+<a name="ln380">/*</a>
+<a name="ln381"> * This method will free the old CIB pointer on success and the new one</a>
+<a name="ln382"> * on failure.</a>
+<a name="ln383"> */</a>
+<a name="ln384">int</a>
+<a name="ln385">activateCibXml(xmlNode * new_cib, gboolean to_disk, const char *op)</a>
+<a name="ln386">{</a>
+<a name="ln387">    xmlNode *saved_cib = the_cib;</a>
+<a name="ln388"> </a>
+<a name="ln389">    CRM_ASSERT(new_cib != saved_cib);</a>
+<a name="ln390">    if (initializeCib(new_cib) == FALSE) {</a>
+<a name="ln391">        free_xml(new_cib);</a>
+<a name="ln392">        crm_err(&quot;Ignoring invalid or NULL CIB&quot;);</a>
+<a name="ln393"> </a>
+<a name="ln394">        if (saved_cib != NULL) {</a>
+<a name="ln395">            crm_warn(&quot;Reverting to last known CIB&quot;);</a>
+<a name="ln396">            if (initializeCib(saved_cib) == FALSE) {</a>
+<a name="ln397">                /* oh we are so dead  */</a>
+<a name="ln398">                crm_crit(&quot;Couldn't re-initialize the old CIB!&quot;);</a>
+<a name="ln399">                exit(1);</a>
+<a name="ln400">            }</a>
+<a name="ln401"> </a>
+<a name="ln402">        } else {</a>
+<a name="ln403">            crm_crit(&quot;Could not write out new CIB and no saved&quot; &quot; version to revert to&quot;);</a>
+<a name="ln404">        }</a>
+<a name="ln405">        return -ENODATA;</a>
+<a name="ln406">    }</a>
+<a name="ln407"> </a>
+<a name="ln408">    free_xml(saved_cib);</a>
+<a name="ln409">    if (cib_writes_enabled &amp;&amp; cib_status == pcmk_ok &amp;&amp; to_disk) {</a>
+<a name="ln410">        crm_debug(&quot;Triggering CIB write for %s op&quot;, op);</a>
+<a name="ln411">        mainloop_set_trigger(cib_writer);</a>
+<a name="ln412">    }</a>
+<a name="ln413"> </a>
+<a name="ln414">    return pcmk_ok;</a>
+<a name="ln415">}</a>
+<a name="ln416"> </a>
+<a name="ln417">static void</a>
+<a name="ln418">cib_diskwrite_complete(mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode)</a>
+<a name="ln419">{</a>
+<a name="ln420">    if (signo) {</a>
+<a name="ln421">        crm_notice(&quot;Disk write process terminated with signal %d (pid=%d, core=%d)&quot;, signo, pid,</a>
+<a name="ln422">                   core);</a>
+<a name="ln423"> </a>
+<a name="ln424">    } else  {</a>
+<a name="ln425">        do_crm_log(exitcode == 0 ? LOG_TRACE : LOG_ERR, &quot;Disk write process exited (pid=%d, rc=%d)&quot;,</a>
+<a name="ln426">                   pid, exitcode);</a>
+<a name="ln427">    }</a>
+<a name="ln428"> </a>
+<a name="ln429">    if (exitcode != 0 &amp;&amp; cib_writes_enabled) {</a>
+<a name="ln430">        crm_err(&quot;Disabling disk writes after write failure&quot;);</a>
+<a name="ln431">        cib_writes_enabled = FALSE;</a>
+<a name="ln432">    }</a>
+<a name="ln433"> </a>
+<a name="ln434">    mainloop_trigger_complete(cib_writer);</a>
+<a name="ln435">}</a>
+<a name="ln436"> </a>
+<a name="ln437">int</a>
+<a name="ln438">write_cib_contents(gpointer p)</a>
+<a name="ln439">{</a>
+<a name="ln440">    int exit_rc = pcmk_ok;</a>
+<a name="ln441">    xmlNode *cib_local = NULL;</a>
+<a name="ln442"> </a>
+<a name="ln443">    /* Make a copy of the CIB to write (possibly in a forked child) */</a>
+<a name="ln444">    if (p) {</a>
+<a name="ln445">        /* Synchronous write out */</a>
+<a name="ln446">        cib_local = copy_xml(p);</a>
+<a name="ln447"> </a>
+<a name="ln448">    } else {</a>
+<a name="ln449">        int pid = 0;</a>
+<a name="ln450">        int bb_state = qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_STATE_GET, 0);</a>
+<a name="ln451"> </a>
+<a name="ln452">        /* Turn it off before the fork() to avoid:</a>
+<a name="ln453">         * - 2 processes writing to the same shared mem</a>
+<a name="ln454">         * - the child needing to disable it</a>
+<a name="ln455">         *   (which would close it from underneath the parent)</a>
+<a name="ln456">         * This way, the shared mem files are already closed</a>
+<a name="ln457">         */</a>
+<a name="ln458">        qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln459"> </a>
+<a name="ln460">        pid = fork();</a>
+<a name="ln461">        if (pid &lt; 0) {</a>
+<a name="ln462">            crm_perror(LOG_ERR, &quot;Disabling disk writes after fork failure&quot;);</a>
+<a name="ln463">            cib_writes_enabled = FALSE;</a>
+<a name="ln464">            return FALSE;</a>
+<a name="ln465">        }</a>
+<a name="ln466"> </a>
+<a name="ln467">        if (pid) {</a>
+<a name="ln468">            /* Parent */</a>
+<a name="ln469">            mainloop_child_add(pid, 0, &quot;disk-writer&quot;, NULL, cib_diskwrite_complete);</a>
+<a name="ln470">            if (bb_state == QB_LOG_STATE_ENABLED) {</a>
+<a name="ln471">                /* Re-enable now that it it safe */</a>
+<a name="ln472">                qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_TRUE);</a>
+<a name="ln473">            }</a>
+<a name="ln474"> </a>
+<a name="ln475">            return -1;          /* -1 means 'still work to do' */</a>
+<a name="ln476">        }</a>
+<a name="ln477"> </a>
+<a name="ln478">        /* A-synchronous write out after a fork() */</a>
+<a name="ln479"> </a>
+<a name="ln480">        /* In theory we can scribble on &quot;the_cib&quot; here and not affect the parent</a>
+<a name="ln481">         * But lets be safe anyway</a>
+<a name="ln482">         */</a>
+<a name="ln483">        cib_local = copy_xml(the_cib);</a>
+<a name="ln484">    }</a>
+<a name="ln485"> </a>
+<a name="ln486">    /* Write the CIB */</a>
+<a name="ln487">    exit_rc = cib_file_write_with_digest(cib_local, cib_root, &quot;cib.xml&quot;);</a>
+<a name="ln488"> </a>
+<a name="ln489">    /* A nonzero exit code will cause further writes to be disabled */</a>
+<a name="ln490">    free_xml(cib_local);</a>
+<a name="ln491">    if (p == NULL) {</a>
+<a name="ln492">        /* Use _exit() because exit() could affect the parent adversely */</a>
+<a name="ln493">        _exit(exit_rc);</a>
+<a name="ln494">    }</a>
+<a name="ln495">    return exit_rc;</a>
+<a name="ln496">}</a>
+
+</code></pre>
+<div class="balloon" rel="65"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V593/" target="_blank">V593</a> Consider reviewing the expression of the 'A = B < C' kind. The expression is calculated as following: 'A = (B < C)'.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

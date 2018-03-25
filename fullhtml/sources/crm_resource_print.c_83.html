@@ -1,0 +1,442 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5"> </a>
+<a name="ln6">/*</a>
+<a name="ln7"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln8"> *</a>
+<a name="ln9"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln10"> * modify it under the terms of the GNU General Public</a>
+<a name="ln11"> * License as published by the Free Software Foundation; either</a>
+<a name="ln12"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln13"> *</a>
+<a name="ln14"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln15"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln17"> * General Public License for more details.</a>
+<a name="ln18"> *</a>
+<a name="ln19"> * You should have received a copy of the GNU General Public</a>
+<a name="ln20"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln21"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_resource.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">bool print_pending = TRUE;</a>
+<a name="ln27"> </a>
+<a name="ln28">#define cons_string(x) x?x:&quot;NA&quot;</a>
+<a name="ln29">void</a>
+<a name="ln30">cli_resource_print_cts_constraints(pe_working_set_t * data_set)</a>
+<a name="ln31">{</a>
+<a name="ln32">    xmlNode *xml_obj = NULL;</a>
+<a name="ln33">    xmlNode *lifetime = NULL;</a>
+<a name="ln34">    xmlNode *cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set-&gt;input);</a>
+<a name="ln35"> </a>
+<a name="ln36">    for (xml_obj = __xml_first_child(cib_constraints); xml_obj != NULL;</a>
+<a name="ln37">         xml_obj = __xml_next(xml_obj)) {</a>
+<a name="ln38">        const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln39"> </a>
+<a name="ln40">        if (id == NULL) {</a>
+<a name="ln41">            continue;</a>
+<a name="ln42">        }</a>
+<a name="ln43"> </a>
+<a name="ln44">        lifetime = first_named_child(xml_obj, &quot;lifetime&quot;);</a>
+<a name="ln45"> </a>
+<a name="ln46">        if (test_ruleset(lifetime, NULL, data_set-&gt;now) == FALSE) {</a>
+<a name="ln47">            continue;</a>
+<a name="ln48">        }</a>
+<a name="ln49"> </a>
+<a name="ln50">        if (safe_str_eq(XML_CONS_TAG_RSC_DEPEND, crm_element_name(xml_obj))) {</a>
+<a name="ln51">            printf(&quot;Constraint %s %s %s %s %s %s %s\n&quot;,</a>
+<a name="ln52">                   crm_element_name(xml_obj),</a>
+<a name="ln53">                   cons_string(crm_element_value(xml_obj, XML_ATTR_ID)),</a>
+<a name="ln54">                   cons_string(crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE)),</a>
+<a name="ln55">                   cons_string(crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET)),</a>
+<a name="ln56">                   cons_string(crm_element_value(xml_obj, XML_RULE_ATTR_SCORE)),</a>
+<a name="ln57">                   cons_string(crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE)),</a>
+<a name="ln58">                   cons_string(crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET_ROLE)));</a>
+<a name="ln59"> </a>
+<a name="ln60">        } else if (safe_str_eq(XML_CONS_TAG_RSC_LOCATION, crm_element_name(xml_obj))) {</a>
+<a name="ln61">            /* unpack_location(xml_obj, data_set); */</a>
+<a name="ln62">        }</a>
+<a name="ln63">    }</a>
+<a name="ln64">}</a>
+<a name="ln65"> </a>
+<a name="ln66">void</a>
+<a name="ln67">cli_resource_print_cts(resource_t * rsc)</a>
+<a name="ln68">{</a>
+<a name="ln69">    GListPtr lpc = NULL;</a>
+<a name="ln70">    const char *host = NULL;</a>
+<a name="ln71">    bool needs_quorum = TRUE;</a>
+<a name="ln72">    const char *rtype = crm_element_value(rsc-&gt;xml, XML_ATTR_TYPE);</a>
+<a name="ln73">    const char *rprov = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln74">    const char *rclass = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln75"> </a>
+<a name="ln76">    if (safe_str_eq(rclass, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln77">        xmlNode *op = NULL;</a>
+<a name="ln78"> </a>
+<a name="ln79">        needs_quorum = FALSE;</a>
+<a name="ln80"> </a>
+<a name="ln81">        for (op = __xml_first_child(rsc-&gt;ops_xml); op != NULL; op = __xml_next(op)) {</a>
+<a name="ln82">            if (crm_str_eq((const char *)op-&gt;name, &quot;op&quot;, TRUE)) {</a>
+<a name="ln83">                const char *name = crm_element_value(op, &quot;name&quot;);</a>
+<a name="ln84"> </a>
+<a name="ln85">                if (safe_str_neq(name, CRMD_ACTION_START)) {</a>
+<a name="ln86">                    const char *value = crm_element_value(op, &quot;requires&quot;);</a>
+<a name="ln87"> </a>
+<a name="ln88">                    if (safe_str_eq(value, &quot;nothing&quot;)) {</a>
+<a name="ln89">                        needs_quorum = FALSE;</a>
+<a name="ln90">                    }</a>
+<a name="ln91">                    break;</a>
+<a name="ln92">                }</a>
+<a name="ln93">            }</a>
+<a name="ln94">        }</a>
+<a name="ln95">    }</a>
+<a name="ln96"> </a>
+<a name="ln97">    if (rsc-&gt;running_on != NULL &amp;&amp; g_list_length(rsc-&gt;running_on) == 1) {</a>
+<a name="ln98">        node_t *tmp = rsc-&gt;running_on-&gt;data;</a>
+<a name="ln99"> </a>
+<a name="ln100">        host = tmp-&gt;details-&gt;uname;</a>
+<a name="ln101">    }</a>
+<a name="ln102"> </a>
+<a name="ln103">    printf(&quot;Resource: %s %s %s %s %s %s %s %s %d %lld 0x%.16llx\n&quot;,</a>
+<a name="ln104">           crm_element_name(rsc-&gt;xml), rsc-&gt;id,</a>
+<a name="ln105">           rsc-&gt;clone_name ? rsc-&gt;clone_name : rsc-&gt;id, rsc-&gt;parent ? rsc-&gt;parent-&gt;id : &quot;NA&quot;,</a>
+<a name="ln106">           rprov ? rprov : &quot;NA&quot;, rclass, rtype, host ? host : &quot;NA&quot;, needs_quorum, rsc-&gt;flags,</a>
+<a name="ln107">           rsc-&gt;flags);</a>
+<a name="ln108"> </a>
+<a name="ln109">    for (lpc = rsc-&gt;children; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln110">        resource_t *child = (resource_t *) lpc-&gt;data;</a>
+<a name="ln111"> </a>
+<a name="ln112">        cli_resource_print_cts(child);</a>
+<a name="ln113">    }</a>
+<a name="ln114">}</a>
+<a name="ln115"> </a>
+<a name="ln116"> </a>
+<a name="ln117">void</a>
+<a name="ln118">cli_resource_print_raw(resource_t * rsc)</a>
+<a name="ln119">{</a>
+<a name="ln120">    GListPtr lpc = NULL;</a>
+<a name="ln121">    GListPtr children = rsc-&gt;children;</a>
+<a name="ln122"> </a>
+<a name="ln123">    if (children == NULL) {</a>
+<a name="ln124">        printf(&quot;%s\n&quot;, rsc-&gt;id);</a>
+<a name="ln125">    }</a>
+<a name="ln126"> </a>
+<a name="ln127">    for (lpc = children; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln128">        resource_t *child = (resource_t *) lpc-&gt;data;</a>
+<a name="ln129"> </a>
+<a name="ln130">        cli_resource_print_raw(child);</a>
+<a name="ln131">    }</a>
+<a name="ln132">}</a>
+<a name="ln133"> </a>
+<a name="ln134">int</a>
+<a name="ln135">cli_resource_print_list(pe_working_set_t * data_set, bool raw)</a>
+<a name="ln136">{</a>
+<a name="ln137">    int found = 0;</a>
+<a name="ln138"> </a>
+<a name="ln139">    GListPtr lpc = NULL;</a>
+<a name="ln140">    int opts = pe_print_printf | pe_print_rsconly;</a>
+<a name="ln141"> </a>
+<a name="ln142">    if (print_pending) {</a>
+<a name="ln143">        opts |= pe_print_pending;</a>
+<a name="ln144">    }</a>
+<a name="ln145"> </a>
+<a name="ln146">    for (lpc = data_set-&gt;resources; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln147">        resource_t *rsc = (resource_t *) lpc-&gt;data;</a>
+<a name="ln148"> </a>
+<a name="ln149">        if (is_set(rsc-&gt;flags, pe_rsc_orphan)</a>
+<a name="ln150">            &amp;&amp; rsc-&gt;fns-&gt;active(rsc, TRUE) == FALSE) {</a>
+<a name="ln151">            continue;</a>
+<a name="ln152">        }</a>
+<a name="ln153">        rsc-&gt;fns-&gt;print(rsc, NULL, opts, stdout);</a>
+<a name="ln154">        found++;</a>
+<a name="ln155">    }</a>
+<a name="ln156"> </a>
+<a name="ln157">    if (found == 0) {</a>
+<a name="ln158">        printf(&quot;NO resources configured\n&quot;);</a>
+<a name="ln159">        return -ENXIO;</a>
+<a name="ln160">    }</a>
+<a name="ln161"> </a>
+<a name="ln162">    return 0;</a>
+<a name="ln163">}</a>
+<a name="ln164"> </a>
+<a name="ln165">int</a>
+<a name="ln166">cli_resource_print_operations(const char *rsc_id, const char *host_uname, bool active,</a>
+<a name="ln167">                         pe_working_set_t * data_set)</a>
+<a name="ln168">{</a>
+<a name="ln169">    resource_t *rsc = NULL;</a>
+<a name="ln170">    int opts = pe_print_printf | pe_print_rsconly | pe_print_suppres_nl;</a>
+<a name="ln171">    GListPtr ops = find_operations(rsc_id, host_uname, active, data_set);</a>
+<a name="ln172">    GListPtr lpc = NULL;</a>
+<a name="ln173"> </a>
+<a name="ln174">    if (print_pending) {</a>
+<a name="ln175">        opts |= pe_print_pending;</a>
+<a name="ln176">    }</a>
+<a name="ln177"> </a>
+<a name="ln178">    for (lpc = ops; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln179">        xmlNode *xml_op = (xmlNode *) lpc-&gt;data;</a>
+<a name="ln180"> </a>
+<a name="ln181">        const char *op_rsc = crm_element_value(xml_op, &quot;resource&quot;);</a>
+<a name="ln182">        const char *last = crm_element_value(xml_op, XML_RSC_OP_LAST_CHANGE);</a>
+<a name="ln183">        const char *status_s = crm_element_value(xml_op, XML_LRM_ATTR_OPSTATUS);</a>
+<a name="ln184">        const char *op_key = crm_element_value(xml_op, XML_LRM_ATTR_TASK_KEY);</a>
+<a name="ln185">        int status = crm_parse_int(status_s, &quot;0&quot;);</a>
+<a name="ln186"> </a>
+<a name="ln187">        rsc = pe_find_resource(data_set-&gt;resources, op_rsc);</a>
+<a name="ln188">        if(rsc) {</a>
+<a name="ln189">            rsc-&gt;fns-&gt;print(rsc, &quot;&quot;, opts, stdout);</a>
+<a name="ln190">        } else {</a>
+<a name="ln191">            fprintf(stdout, &quot;Unknown resource %s&quot;, op_rsc);</a>
+<a name="ln192">        }</a>
+<a name="ln193"> </a>
+<a name="ln194">        fprintf(stdout, &quot;: %s (node=%s, call=%s, rc=%s&quot;,</a>
+<a name="ln195">                op_key ? op_key : ID(xml_op),</a>
+<a name="ln196">                crm_element_value(xml_op, XML_ATTR_UNAME),</a>
+<a name="ln197">                crm_element_value(xml_op, XML_LRM_ATTR_CALLID),</a>
+<a name="ln198">                crm_element_value(xml_op, XML_LRM_ATTR_RC));</a>
+<a name="ln199">        if (last) {</a>
+<a name="ln200">            time_t run_at = crm_parse_int(last, &quot;0&quot;);</a>
+<a name="ln201"> </a>
+<a name="ln202">            fprintf(stdout, &quot;, last-rc-change=%s, exec=%sms&quot;,</a>
+<a name="ln203">                    crm_strip_trailing_newline(ctime(&amp;run_at)), crm_element_value(xml_op, XML_RSC_OP_T_EXEC));</a>
+<a name="ln204">        }</a>
+<a name="ln205">        fprintf(stdout, &quot;): %s\n&quot;, services_lrm_status_str(status));</a>
+<a name="ln206">    }</a>
+<a name="ln207">    return pcmk_ok;</a>
+<a name="ln208">}</a>
+<a name="ln209"> </a>
+<a name="ln210">void</a>
+<a name="ln211">cli_resource_print_location(resource_t * rsc, const char *prefix)</a>
+<a name="ln212">{</a>
+<a name="ln213">    GListPtr lpc = NULL;</a>
+<a name="ln214">    GListPtr list = rsc-&gt;rsc_location;</a>
+<a name="ln215">    int offset = 0;</a>
+<a name="ln216"> </a>
+<a name="ln217">    if (prefix) {</a>
+<a name="ln218">        offset = strlen(prefix) - 2;</a>
+<a name="ln219">    }</a>
+<a name="ln220"> </a>
+<a name="ln221">    for (lpc = list; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln222">        rsc_to_node_t *cons = (rsc_to_node_t *) lpc-&gt;data;</a>
+<a name="ln223"> </a>
+<a name="ln224">        GListPtr lpc2 = NULL;</a>
+<a name="ln225"> </a>
+<a name="ln226">        for (lpc2 = cons-&gt;node_list_rh; lpc2 != NULL; lpc2 = lpc2-&gt;next) {</a>
+<a name="ln227">            node_t *node = (node_t *) lpc2-&gt;data;</a>
+<a name="ln228">            char *score = score2char(node-&gt;weight);</a>
+<a name="ln229"> </a>
+<a name="ln230">            fprintf(stdout, &quot;%s: Node %-*s (score=%s, id=%s)\n&quot;,</a>
+<a name="ln231">                    prefix ? prefix : &quot;  &quot;, 71 - offset, node-&gt;details-&gt;uname, score, cons-&gt;id);</a>
+<a name="ln232">            free(score);</a>
+<a name="ln233">        }</a>
+<a name="ln234">    }</a>
+<a name="ln235">}</a>
+<a name="ln236"> </a>
+<a name="ln237">void</a>
+<a name="ln238">cli_resource_print_colocation(resource_t * rsc, bool dependents, bool recursive, int offset)</a>
+<a name="ln239">{</a>
+<a name="ln240">    char *prefix = NULL;</a>
+<a name="ln241">    GListPtr lpc = NULL;</a>
+<a name="ln242">    GListPtr list = rsc-&gt;rsc_cons;</a>
+<a name="ln243"> </a>
+<a name="ln244">    prefix = calloc(1, (offset * 4) + 1);</a>
+<a name="ln245">    memset(prefix, ' ', offset * 4);</a>
+<a name="ln246"> </a>
+<a name="ln247">    if (dependents) {</a>
+<a name="ln248">        list = rsc-&gt;rsc_cons_lhs;</a>
+<a name="ln249">    }</a>
+<a name="ln250"> </a>
+<a name="ln251">    if (is_set(rsc-&gt;flags, pe_rsc_allocating)) {</a>
+<a name="ln252">        /* Break colocation loops */</a>
+<a name="ln253">        printf(&quot;loop %s\n&quot;, rsc-&gt;id);</a>
+<a name="ln254">        free(prefix);</a>
+<a name="ln255">        return;</a>
+<a name="ln256">    }</a>
+<a name="ln257"> </a>
+<a name="ln258">    set_bit(rsc-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln259">    for (lpc = list; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln260">        rsc_colocation_t *cons = (rsc_colocation_t *) lpc-&gt;data;</a>
+<a name="ln261"> </a>
+<a name="ln262">        char *score = NULL;</a>
+<a name="ln263">        resource_t *peer = cons-&gt;rsc_rh;</a>
+<a name="ln264"> </a>
+<a name="ln265">        if (dependents) {</a>
+<a name="ln266">            peer = cons-&gt;rsc_lh;</a>
+<a name="ln267">        }</a>
+<a name="ln268"> </a>
+<a name="ln269">        if (is_set(peer-&gt;flags, pe_rsc_allocating)) {</a>
+<a name="ln270">            if (dependents == FALSE) {</a>
+<a name="ln271">                fprintf(stdout, &quot;%s%-*s (id=%s - loop)\n&quot;, prefix, 80 - (4 * offset), peer-&gt;id,</a>
+<a name="ln272">                        cons-&gt;id);</a>
+<a name="ln273">            }</a>
+<a name="ln274">            continue;</a>
+<a name="ln275">        }</a>
+<a name="ln276"> </a>
+<a name="ln277">        if (dependents &amp;&amp; recursive) {</a>
+<a name="ln278">            cli_resource_print_colocation(peer, dependents, recursive, offset + 1);</a>
+<a name="ln279">        }</a>
+<a name="ln280"> </a>
+<a name="ln281">        score = score2char(cons-&gt;score);</a>
+<a name="ln282">        if (cons-&gt;role_rh &gt; RSC_ROLE_STARTED) {</a>
+<a name="ln283">            fprintf(stdout, &quot;%s%-*s (score=%s, %s role=%s, id=%s)\n&quot;, prefix, 80 - (4 * offset),</a>
+<a name="ln284">                    peer-&gt;id, score, dependents ? &quot;needs&quot; : &quot;with&quot;, role2text(cons-&gt;role_rh),</a>
+<a name="ln285">                    cons-&gt;id);</a>
+<a name="ln286">        } else {</a>
+<a name="ln287">            fprintf(stdout, &quot;%s%-*s (score=%s, id=%s)\n&quot;, prefix, 80 - (4 * offset),</a>
+<a name="ln288">                    peer-&gt;id, score, cons-&gt;id);</a>
+<a name="ln289">        }</a>
+<a name="ln290">        cli_resource_print_location(peer, prefix);</a>
+<a name="ln291">        free(score);</a>
+<a name="ln292"> </a>
+<a name="ln293">        if (!dependents &amp;&amp; recursive) {</a>
+<a name="ln294">            cli_resource_print_colocation(peer, dependents, recursive, offset + 1);</a>
+<a name="ln295">        }</a>
+<a name="ln296">    }</a>
+<a name="ln297">    free(prefix);</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">int</a>
+<a name="ln301">cli_resource_print(const char *rsc, pe_working_set_t * data_set, bool expanded)</a>
+<a name="ln302">{</a>
+<a name="ln303">    char *rsc_xml = NULL;</a>
+<a name="ln304">    resource_t *the_rsc = find_rsc_or_clone(rsc, data_set);</a>
+<a name="ln305">    int opts = pe_print_printf;</a>
+<a name="ln306"> </a>
+<a name="ln307">    if (the_rsc == NULL) {</a>
+<a name="ln308">        return -ENXIO;</a>
+<a name="ln309">    }</a>
+<a name="ln310"> </a>
+<a name="ln311">    if (print_pending) {</a>
+<a name="ln312">        opts |= pe_print_pending;</a>
+<a name="ln313">    }</a>
+<a name="ln314">    the_rsc-&gt;fns-&gt;print(the_rsc, NULL, opts, stdout);</a>
+<a name="ln315"> </a>
+<a name="ln316">    if (expanded) {</a>
+<a name="ln317">        rsc_xml = dump_xml_formatted(the_rsc-&gt;xml);</a>
+<a name="ln318">    } else {</a>
+<a name="ln319">        if (the_rsc-&gt;orig_xml) {</a>
+<a name="ln320">            rsc_xml = dump_xml_formatted(the_rsc-&gt;orig_xml);</a>
+<a name="ln321">        } else {</a>
+<a name="ln322">            rsc_xml = dump_xml_formatted(the_rsc-&gt;xml);</a>
+<a name="ln323">        }</a>
+<a name="ln324">    }</a>
+<a name="ln325"> </a>
+<a name="ln326">    fprintf(stdout, &quot;%sxml:\n%s\n&quot;, expanded ? &quot;&quot; : &quot;raw &quot;, rsc_xml);</a>
+<a name="ln327"> </a>
+<a name="ln328">    free(rsc_xml);</a>
+<a name="ln329"> </a>
+<a name="ln330">    return 0;</a>
+<a name="ln331">}</a>
+<a name="ln332"> </a>
+<a name="ln333">int</a>
+<a name="ln334">cli_resource_print_attribute(const char *rsc, const char *attr, pe_working_set_t * data_set)</a>
+<a name="ln335">{</a>
+<a name="ln336">    int rc = -ENXIO;</a>
+<a name="ln337">    node_t *current = NULL;</a>
+<a name="ln338">    GHashTable *params = NULL;</a>
+<a name="ln339">    resource_t *the_rsc = find_rsc_or_clone(rsc, data_set);</a>
+<a name="ln340">    const char *value = NULL;</a>
+<a name="ln341"> </a>
+<a name="ln342">    if (the_rsc == NULL) {</a>
+<a name="ln343">        return -ENXIO;</a>
+<a name="ln344">    }</a>
+<a name="ln345"> </a>
+<a name="ln346">    if (g_list_length(the_rsc-&gt;running_on) == 1) {</a>
+<a name="ln347">        current = the_rsc-&gt;running_on-&gt;data;</a>
+<a name="ln348"> </a>
+<a name="ln349">    } else if (g_list_length(the_rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln350">        CMD_ERR(&quot;%s is active on more than one node,&quot;</a>
+<a name="ln351">                &quot; returning the default value for %s&quot;, the_rsc-&gt;id, crm_str(value));</a>
+<a name="ln352">    }</a>
+<a name="ln353"> </a>
+<a name="ln354">    params = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln355">                                   g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln356"> </a>
+<a name="ln357">    if (safe_str_eq(attr_set_type, XML_TAG_ATTR_SETS)) {</a>
+<a name="ln358">        get_rsc_attributes(params, the_rsc, current, data_set);</a>
+<a name="ln359"> </a>
+<a name="ln360">    } else if (safe_str_eq(attr_set_type, XML_TAG_META_SETS)) {</a>
+<a name="ln361">        /* No need to redirect to the parent */ </a>
+<a name="ln362">        get_meta_attributes(params, the_rsc, current, data_set);</a>
+<a name="ln363"> </a>
+<a name="ln364">    } else {</a>
+<a name="ln365">        unpack_instance_attributes(data_set-&gt;input, the_rsc-&gt;xml, XML_TAG_UTILIZATION, NULL,</a>
+<a name="ln366">                                   params, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln367">    }</a>
+<a name="ln368"> </a>
+<a name="ln369">    crm_debug(&quot;Looking up %s in %s&quot;, attr, the_rsc-&gt;id);</a>
+<a name="ln370">    value = g_hash_table_lookup(params, attr);</a>
+<a name="ln371">    if (value != NULL) {</a>
+<a name="ln372">        fprintf(stdout, &quot;%s\n&quot;, value);</a>
+<a name="ln373">        rc = 0;</a>
+<a name="ln374"> </a>
+<a name="ln375">    } else {</a>
+<a name="ln376">        CMD_ERR(&quot;Attribute '%s' not found for '%s'&quot;, attr, the_rsc-&gt;id);</a>
+<a name="ln377">    }</a>
+<a name="ln378"> </a>
+<a name="ln379">    g_hash_table_destroy(params);</a>
+<a name="ln380">    return rc;</a>
+<a name="ln381">}</a>
+<a name="ln382"> </a>
+<a name="ln383"> </a>
+<a name="ln384">int</a>
+<a name="ln385">cli_resource_print_property(const char *rsc, const char *attr, pe_working_set_t * data_set)</a>
+<a name="ln386">{</a>
+<a name="ln387">    const char *value = NULL;</a>
+<a name="ln388">    resource_t *the_rsc = pe_find_resource(data_set-&gt;resources, rsc);</a>
+<a name="ln389"> </a>
+<a name="ln390">    if (the_rsc == NULL) {</a>
+<a name="ln391">        return -ENXIO;</a>
+<a name="ln392">    }</a>
+<a name="ln393"> </a>
+<a name="ln394">    value = crm_element_value(the_rsc-&gt;xml, attr);</a>
+<a name="ln395"> </a>
+<a name="ln396">    if (value != NULL) {</a>
+<a name="ln397">        fprintf(stdout, &quot;%s\n&quot;, value);</a>
+<a name="ln398">        return 0;</a>
+<a name="ln399">    }</a>
+<a name="ln400">    return -ENXIO;</a>
+<a name="ln401">}</a>
+
+</code></pre>
+<div class="balloon" rel="245"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memset' function. Inspect the first argument. Check lines: 245, 244.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

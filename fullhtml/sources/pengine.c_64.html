@@ -1,0 +1,413 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;crm/crm.h&gt;</a>
+<a name="ln27">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;sys/types.h&gt;</a>
+<a name="ln30">#include &lt;sys/wait.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;unistd.h&gt;             /* for access */</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;sys/types.h&gt;          /* for calls to open */</a>
+<a name="ln35">#include &lt;sys/stat.h&gt;           /* for calls to open */</a>
+<a name="ln36">#include &lt;fcntl.h&gt;              /* for calls to open */</a>
+<a name="ln37">#include &lt;pwd.h&gt;                /* for getpwuid */</a>
+<a name="ln38">#include &lt;grp.h&gt;                /* for initgroups */</a>
+<a name="ln39"> </a>
+<a name="ln40">#include &lt;sys/time.h&gt;           /* for getrlimit */</a>
+<a name="ln41">#include &lt;sys/resource.h&gt;       /* for getrlimit */</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;errno.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln46">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln47">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln48">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln49">#include &lt;crmd_callbacks.h&gt;</a>
+<a name="ln50"> </a>
+<a name="ln51">#include &lt;crm/cib.h&gt;</a>
+<a name="ln52">#include &lt;crmd.h&gt;</a>
+<a name="ln53"> </a>
+<a name="ln54">struct crm_subsystem_s *pe_subsystem = NULL;</a>
+<a name="ln55">void do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data);</a>
+<a name="ln56"> </a>
+<a name="ln57">static void</a>
+<a name="ln58">save_cib_contents(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln59">{</a>
+<a name="ln60">    char *id = user_data;</a>
+<a name="ln61"> </a>
+<a name="ln62">    register_fsa_error_adv(C_FSA_INTERNAL, I_ERROR, NULL, NULL, __FUNCTION__);</a>
+<a name="ln63">    CRM_CHECK(id != NULL, return);</a>
+<a name="ln64"> </a>
+<a name="ln65">    if (rc == pcmk_ok) {</a>
+<a name="ln66">        int len = 15;</a>
+<a name="ln67">        char *filename = NULL;</a>
+<a name="ln68"> </a>
+<a name="ln69">        len += strlen(id);</a>
+<a name="ln70">        len += strlen(PE_STATE_DIR);</a>
+<a name="ln71"> </a>
+<a name="ln72">        filename = calloc(1, len);</a>
+<a name="ln73">        CRM_CHECK(filename != NULL, return);</a>
+<a name="ln74"> </a>
+<a name="ln75">        sprintf(filename, PE_STATE_DIR &quot;/pe-core-%s.bz2&quot;, id);</a>
+<a name="ln76">        if (write_xml_file(output, filename, TRUE) &lt; 0) {</a>
+<a name="ln77">            crm_err(&quot;Could not save Cluster Information Base to %s after Policy Engine crash&quot;,</a>
+<a name="ln78">                    filename);</a>
+<a name="ln79">        } else {</a>
+<a name="ln80">            crm_notice(&quot;Saved Cluster Information Base to %s after Policy Engine crash&quot;,</a>
+<a name="ln81">                       filename);</a>
+<a name="ln82">        }</a>
+<a name="ln83"> </a>
+<a name="ln84">        free(filename);</a>
+<a name="ln85">    }</a>
+<a name="ln86">}</a>
+<a name="ln87"> </a>
+<a name="ln88">static void</a>
+<a name="ln89">pe_ipc_destroy(gpointer user_data)</a>
+<a name="ln90">{</a>
+<a name="ln91">    if (is_set(fsa_input_register, pe_subsystem-&gt;flag_required)) {</a>
+<a name="ln92">        int rc = pcmk_ok;</a>
+<a name="ln93">        char *uuid_str = crm_generate_uuid();</a>
+<a name="ln94"> </a>
+<a name="ln95">        crm_crit(&quot;Connection to the Policy Engine failed &quot;</a>
+<a name="ln96">                 CRM_XS &quot; pid=%d uuid=%s&quot;, pe_subsystem-&gt;pid, uuid_str);</a>
+<a name="ln97"> </a>
+<a name="ln98">        /*</a>
+<a name="ln99">         *The PE died...</a>
+<a name="ln100">         *</a>
+<a name="ln101">         * Save the current CIB so that we have a chance of</a>
+<a name="ln102">         * figuring out what killed it.</a>
+<a name="ln103">         *</a>
+<a name="ln104">         * Delay raising the I_ERROR until the query below completes or</a>
+<a name="ln105">         * 5s is up, whichever comes first.</a>
+<a name="ln106">         *</a>
+<a name="ln107">         */</a>
+<a name="ln108">        rc = fsa_cib_conn-&gt;cmds-&gt;query(fsa_cib_conn, NULL, NULL, cib_scope_local);</a>
+<a name="ln109">        fsa_register_cib_callback(rc, FALSE, uuid_str, save_cib_contents);</a>
+<a name="ln110"> </a>
+<a name="ln111">    } else {</a>
+<a name="ln112">        if (is_heartbeat_cluster()) {</a>
+<a name="ln113">            stop_subsystem(pe_subsystem, FALSE);</a>
+<a name="ln114">        }</a>
+<a name="ln115">        crm_info(&quot;Connection to the Policy Engine released&quot;);</a>
+<a name="ln116">    }</a>
+<a name="ln117"> </a>
+<a name="ln118">    clear_bit(fsa_input_register, pe_subsystem-&gt;flag_connected);</a>
+<a name="ln119">    pe_subsystem-&gt;pid = -1;</a>
+<a name="ln120">    pe_subsystem-&gt;source = NULL;</a>
+<a name="ln121">    pe_subsystem-&gt;client = NULL;</a>
+<a name="ln122"> </a>
+<a name="ln123">    mainloop_set_trigger(fsa_source);</a>
+<a name="ln124">    return;</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">static int</a>
+<a name="ln128">pe_ipc_dispatch(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln129">{</a>
+<a name="ln130">    xmlNode *msg = string2xml(buffer);</a>
+<a name="ln131"> </a>
+<a name="ln132">    if (msg) {</a>
+<a name="ln133">        route_message(C_IPC_MESSAGE, msg);</a>
+<a name="ln134">    }</a>
+<a name="ln135"> </a>
+<a name="ln136">    free_xml(msg);</a>
+<a name="ln137">    return 0;</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">/*	 A_PE_START, A_PE_STOP, A_TE_RESTART	*/</a>
+<a name="ln141">void</a>
+<a name="ln142">do_pe_control(long long action,</a>
+<a name="ln143">              enum crmd_fsa_cause cause,</a>
+<a name="ln144">              enum crmd_fsa_state cur_state,</a>
+<a name="ln145">              enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln146">{</a>
+<a name="ln147">    struct crm_subsystem_s *this_subsys = pe_subsystem;</a>
+<a name="ln148"> </a>
+<a name="ln149">    long long stop_actions = A_PE_STOP;</a>
+<a name="ln150">    long long start_actions = A_PE_START;</a>
+<a name="ln151"> </a>
+<a name="ln152">    static struct ipc_client_callbacks pe_callbacks = {</a>
+<a name="ln153">        .dispatch = pe_ipc_dispatch,</a>
+<a name="ln154">        .destroy = pe_ipc_destroy</a>
+<a name="ln155">    };</a>
+<a name="ln156"> </a>
+<a name="ln157">    if (action &amp; stop_actions) {</a>
+<a name="ln158">        clear_bit(fsa_input_register, pe_subsystem-&gt;flag_required);</a>
+<a name="ln159"> </a>
+<a name="ln160">        mainloop_del_ipc_client(pe_subsystem-&gt;source);</a>
+<a name="ln161">        pe_subsystem-&gt;source = NULL;</a>
+<a name="ln162"> </a>
+<a name="ln163">        clear_bit(fsa_input_register, pe_subsystem-&gt;flag_connected);</a>
+<a name="ln164">    }</a>
+<a name="ln165"> </a>
+<a name="ln166">    if ((action &amp; start_actions) &amp;&amp; (is_set(fsa_input_register, R_PE_CONNECTED) == FALSE)) {</a>
+<a name="ln167">        if (cur_state != S_STOPPING) {</a>
+<a name="ln168">            set_bit(fsa_input_register, pe_subsystem-&gt;flag_required);</a>
+<a name="ln169"> </a>
+<a name="ln170">            pe_subsystem-&gt;source =</a>
+<a name="ln171">                mainloop_add_ipc_client(CRM_SYSTEM_PENGINE, G_PRIORITY_DEFAULT,</a>
+<a name="ln172">                                        5 * 1024 * 1024 /* 5MB */ , NULL, &amp;pe_callbacks);</a>
+<a name="ln173"> </a>
+<a name="ln174">            if (pe_subsystem-&gt;source == NULL) {</a>
+<a name="ln175">                crm_warn(&quot;Setup of client connection failed, not adding channel to mainloop&quot;);</a>
+<a name="ln176">                register_fsa_error(C_FSA_INTERNAL, I_FAIL, NULL);</a>
+<a name="ln177">                return;</a>
+<a name="ln178">            }</a>
+<a name="ln179"> </a>
+<a name="ln180">            /* if (is_openais_cluster()) { */</a>
+<a name="ln181">            /*     pe_subsystem-&gt;pid = pe_subsystem-&gt;ipc-&gt;farside_pid; */</a>
+<a name="ln182">            /* } */</a>
+<a name="ln183"> </a>
+<a name="ln184">            set_bit(fsa_input_register, pe_subsystem-&gt;flag_connected);</a>
+<a name="ln185"> </a>
+<a name="ln186">        } else {</a>
+<a name="ln187">            crm_info(&quot;Ignoring request to start %s while shutting down&quot;, this_subsys-&gt;name);</a>
+<a name="ln188">        }</a>
+<a name="ln189">    }</a>
+<a name="ln190">}</a>
+<a name="ln191"> </a>
+<a name="ln192">int fsa_pe_query = 0;</a>
+<a name="ln193">char *fsa_pe_ref = NULL;</a>
+<a name="ln194"> </a>
+<a name="ln195">/*	 A_PE_INVOKE	*/</a>
+<a name="ln196">void</a>
+<a name="ln197">do_pe_invoke(long long action,</a>
+<a name="ln198">             enum crmd_fsa_cause cause,</a>
+<a name="ln199">             enum crmd_fsa_state cur_state,</a>
+<a name="ln200">             enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln201">{</a>
+<a name="ln202">    if (AM_I_DC == FALSE) {</a>
+<a name="ln203">        crm_err(&quot;Not invoking Policy Engine because not DC: %s&quot;,</a>
+<a name="ln204">                fsa_action2string(action));</a>
+<a name="ln205">        return;</a>
+<a name="ln206">    }</a>
+<a name="ln207"> </a>
+<a name="ln208">    if (is_set(fsa_input_register, R_PE_CONNECTED) == FALSE) {</a>
+<a name="ln209">        if (is_set(fsa_input_register, R_SHUTDOWN)) {</a>
+<a name="ln210">            crm_err(&quot;Cannot shut down gracefully without the Policy Engine&quot;);</a>
+<a name="ln211">            register_fsa_input_before(C_FSA_INTERNAL, I_TERMINATE, NULL);</a>
+<a name="ln212"> </a>
+<a name="ln213">        } else {</a>
+<a name="ln214">            crm_info(&quot;Waiting for the Policy Engine to connect&quot;);</a>
+<a name="ln215">            crmd_fsa_stall(FALSE);</a>
+<a name="ln216">            register_fsa_action(A_PE_START);</a>
+<a name="ln217">        }</a>
+<a name="ln218">        return;</a>
+<a name="ln219">    }</a>
+<a name="ln220"> </a>
+<a name="ln221">    if (cur_state != S_POLICY_ENGINE) {</a>
+<a name="ln222">        crm_notice(&quot;Not invoking Policy Engine because in state %s&quot;,</a>
+<a name="ln223">                   fsa_state2string(cur_state));</a>
+<a name="ln224">        return;</a>
+<a name="ln225">    }</a>
+<a name="ln226">    if (is_set(fsa_input_register, R_HAVE_CIB) == FALSE) {</a>
+<a name="ln227">        crm_err(&quot;Attempted to invoke Policy Engine without consistent Cluster Information Base!&quot;);</a>
+<a name="ln228"> </a>
+<a name="ln229">        /* start the join from scratch */</a>
+<a name="ln230">        register_fsa_input_before(C_FSA_INTERNAL, I_ELECTION, NULL);</a>
+<a name="ln231">        return;</a>
+<a name="ln232">    }</a>
+<a name="ln233"> </a>
+<a name="ln234">    fsa_pe_query = fsa_cib_conn-&gt;cmds-&gt;query(fsa_cib_conn, NULL, NULL, cib_scope_local);</a>
+<a name="ln235"> </a>
+<a name="ln236">    crm_debug(&quot;Query %d: Requesting the current CIB: %s&quot;, fsa_pe_query,</a>
+<a name="ln237">              fsa_state2string(fsa_state));</a>
+<a name="ln238"> </a>
+<a name="ln239">    /* Make sure any queued calculations are discarded */</a>
+<a name="ln240">    free(fsa_pe_ref);</a>
+<a name="ln241">    fsa_pe_ref = NULL;</a>
+<a name="ln242"> </a>
+<a name="ln243">    fsa_register_cib_callback(fsa_pe_query, FALSE, NULL, do_pe_invoke_callback);</a>
+<a name="ln244">}</a>
+<a name="ln245"> </a>
+<a name="ln246">static void</a>
+<a name="ln247">force_local_option(xmlNode *xml, const char *attr_name, const char *attr_value)</a>
+<a name="ln248">{</a>
+<a name="ln249">    int max = 0;</a>
+<a name="ln250">    int lpc = 0;</a>
+<a name="ln251">    int xpath_max = 1024;</a>
+<a name="ln252">    char *xpath_string = NULL;</a>
+<a name="ln253">    xmlXPathObjectPtr xpathObj = NULL;</a>
+<a name="ln254"> </a>
+<a name="ln255">    xpath_string = calloc(1, xpath_max);</a>
+<a name="ln256">    lpc = snprintf(xpath_string, xpath_max, &quot;%.128s//%s//nvpair[@name='%.128s']&quot;,</a>
+<a name="ln257">                       get_object_path(XML_CIB_TAG_CRMCONFIG), XML_CIB_TAG_PROPSET, attr_name);</a>
+<a name="ln258">    CRM_LOG_ASSERT(lpc &gt; 0);</a>
+<a name="ln259"> </a>
+<a name="ln260">    xpathObj = xpath_search(xml, xpath_string);</a>
+<a name="ln261">    max = numXpathResults(xpathObj);</a>
+<a name="ln262">    free(xpath_string);</a>
+<a name="ln263"> </a>
+<a name="ln264">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln265">        xmlNode *match = getXpathResult(xpathObj, lpc);</a>
+<a name="ln266">        crm_trace(&quot;Forcing %s/%s = %s&quot;, ID(match), attr_name, attr_value);</a>
+<a name="ln267">        crm_xml_add(match, XML_NVPAIR_ATTR_VALUE, attr_value);</a>
+<a name="ln268">    }</a>
+<a name="ln269"> </a>
+<a name="ln270">    if(max == 0) {</a>
+<a name="ln271">        xmlNode *configuration = NULL;</a>
+<a name="ln272">        xmlNode *crm_config = NULL;</a>
+<a name="ln273">        xmlNode *cluster_property_set = NULL;</a>
+<a name="ln274"> </a>
+<a name="ln275">        crm_trace(&quot;Creating %s-%s for %s=%s&quot;,</a>
+<a name="ln276">                  CIB_OPTIONS_FIRST, attr_name, attr_name, attr_value);</a>
+<a name="ln277"> </a>
+<a name="ln278">        configuration = find_entity(xml, XML_CIB_TAG_CONFIGURATION, NULL);</a>
+<a name="ln279">        if (configuration == NULL) {</a>
+<a name="ln280">            configuration = create_xml_node(xml, XML_CIB_TAG_CONFIGURATION);</a>
+<a name="ln281">        }</a>
+<a name="ln282"> </a>
+<a name="ln283">        crm_config = find_entity(configuration, XML_CIB_TAG_CRMCONFIG, NULL);</a>
+<a name="ln284">        if (crm_config == NULL) {</a>
+<a name="ln285">            crm_config = create_xml_node(configuration, XML_CIB_TAG_CRMCONFIG);</a>
+<a name="ln286">        }</a>
+<a name="ln287"> </a>
+<a name="ln288">        cluster_property_set = find_entity(crm_config, XML_CIB_TAG_PROPSET, NULL);</a>
+<a name="ln289">        if (cluster_property_set == NULL) {</a>
+<a name="ln290">            cluster_property_set = create_xml_node(crm_config, XML_CIB_TAG_PROPSET);</a>
+<a name="ln291">            crm_xml_add(cluster_property_set, XML_ATTR_ID, CIB_OPTIONS_FIRST);</a>
+<a name="ln292">        }</a>
+<a name="ln293"> </a>
+<a name="ln294">        xml = create_xml_node(cluster_property_set, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln295"> </a>
+<a name="ln296">        crm_xml_set_id(xml, &quot;%s-%s&quot;, CIB_OPTIONS_FIRST, attr_name);</a>
+<a name="ln297">        crm_xml_add(xml, XML_NVPAIR_ATTR_NAME, attr_name);</a>
+<a name="ln298">        crm_xml_add(xml, XML_NVPAIR_ATTR_VALUE, attr_value);</a>
+<a name="ln299">    }</a>
+<a name="ln300">    freeXpathObject(xpathObj);</a>
+<a name="ln301">}</a>
+<a name="ln302"> </a>
+<a name="ln303">void</a>
+<a name="ln304">do_pe_invoke_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln305">{</a>
+<a name="ln306">    int sent;</a>
+<a name="ln307">    xmlNode *cmd = NULL;</a>
+<a name="ln308">    pid_t watchdog = pcmk_locate_sbd();</a>
+<a name="ln309"> </a>
+<a name="ln310">    if (rc != pcmk_ok) {</a>
+<a name="ln311">        crm_err(&quot;Could not retrieve the Cluster Information Base: %s &quot;</a>
+<a name="ln312">                CRM_XS &quot; call=%d&quot;, pcmk_strerror(rc), call_id);</a>
+<a name="ln313">        register_fsa_error_adv(C_FSA_INTERNAL, I_ERROR, NULL, NULL, __FUNCTION__);</a>
+<a name="ln314">        return;</a>
+<a name="ln315"> </a>
+<a name="ln316">    } else if (call_id != fsa_pe_query) {</a>
+<a name="ln317">        crm_trace(&quot;Skipping superseded CIB query: %d (current=%d)&quot;, call_id, fsa_pe_query);</a>
+<a name="ln318">        return;</a>
+<a name="ln319"> </a>
+<a name="ln320">    } else if (AM_I_DC == FALSE || is_set(fsa_input_register, R_PE_CONNECTED) == FALSE) {</a>
+<a name="ln321">        crm_debug(&quot;No need to invoke the PE anymore&quot;);</a>
+<a name="ln322">        return;</a>
+<a name="ln323"> </a>
+<a name="ln324">    } else if (fsa_state != S_POLICY_ENGINE) {</a>
+<a name="ln325">        crm_debug(&quot;Discarding PE request in state: %s&quot;, fsa_state2string(fsa_state));</a>
+<a name="ln326">        return;</a>
+<a name="ln327"> </a>
+<a name="ln328">    /* this callback counts as 1 */</a>
+<a name="ln329">    } else if (num_cib_op_callbacks() &gt; 1) {</a>
+<a name="ln330">        crm_debug(&quot;Re-asking for the CIB: %d other peer updates still pending&quot;,</a>
+<a name="ln331">                  (num_cib_op_callbacks() - 1));</a>
+<a name="ln332">        sleep(1);</a>
+<a name="ln333">        register_fsa_action(A_PE_INVOKE);</a>
+<a name="ln334">        return;</a>
+<a name="ln335"> </a>
+<a name="ln336">    } else if (fsa_state != S_POLICY_ENGINE) {</a>
+<a name="ln337">        crm_err(&quot;Invoking PE in state: %s&quot;, fsa_state2string(fsa_state));</a>
+<a name="ln338">        return;</a>
+<a name="ln339">    }</a>
+<a name="ln340"> </a>
+<a name="ln341">    CRM_LOG_ASSERT(output != NULL);</a>
+<a name="ln342"> </a>
+<a name="ln343">    /* refresh our remote-node cache when the pengine is invoked */</a>
+<a name="ln344">    crm_remote_peer_cache_refresh(output);</a>
+<a name="ln345"> </a>
+<a name="ln346">    crm_xml_add(output, XML_ATTR_DC_UUID, fsa_our_uuid);</a>
+<a name="ln347">    crm_xml_add_int(output, XML_ATTR_HAVE_QUORUM, fsa_has_quorum);</a>
+<a name="ln348"> </a>
+<a name="ln349">    force_local_option(output, XML_ATTR_HAVE_WATCHDOG, watchdog?&quot;true&quot;:&quot;false&quot;);</a>
+<a name="ln350"> </a>
+<a name="ln351">    if (ever_had_quorum &amp;&amp; crm_have_quorum == FALSE) {</a>
+<a name="ln352">        crm_xml_add_int(output, XML_ATTR_QUORUM_PANIC, 1);</a>
+<a name="ln353">    }</a>
+<a name="ln354"> </a>
+<a name="ln355">    cmd = create_request(CRM_OP_PECALC, output, NULL, CRM_SYSTEM_PENGINE, CRM_SYSTEM_DC, NULL);</a>
+<a name="ln356"> </a>
+<a name="ln357">    free(fsa_pe_ref);</a>
+<a name="ln358">    fsa_pe_ref = crm_element_value_copy(cmd, XML_ATTR_REFERENCE);</a>
+<a name="ln359"> </a>
+<a name="ln360">    sent = crm_ipc_send(mainloop_get_ipc_client(pe_subsystem-&gt;source), cmd, 0, 0, NULL);</a>
+<a name="ln361">    if (sent &lt;= 0) {</a>
+<a name="ln362">        crm_err(&quot;Could not contact the pengine: %d&quot;, sent);</a>
+<a name="ln363">        register_fsa_error_adv(C_FSA_INTERNAL, I_ERROR, NULL, NULL, __FUNCTION__);</a>
+<a name="ln364">    }</a>
+<a name="ln365"> </a>
+<a name="ln366">    crm_debug(&quot;Invoking the PE: query=%d, ref=%s, seq=%llu, quorate=%d&quot;,</a>
+<a name="ln367">              fsa_pe_query, fsa_pe_ref, crm_peer_seq, fsa_has_quorum);</a>
+<a name="ln368">    free_xml(cmd);</a>
+<a name="ln369">}</a>
+
+</code></pre>
+<div class="balloon" rel="73"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'filename' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="75"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 75, 72.</p></div>
+<div class="balloon" rel="258"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (lpc > 0) == (0).</p></div>
+<div class="balloon" rel="324"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V517/" target="_blank">V517</a> The use of 'if (A) {...} else if (A) {...}' pattern was detected. There is a probability of logical error presence. Check lines: 324, 336.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,722 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;string.h&gt;</a>
+<a name="ln28">#include &lt;time.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;crm/crm.h&gt;</a>
+<a name="ln31">#include &lt;crm/lrmd.h&gt;</a>
+<a name="ln32">#include &lt;crm/cib.h&gt;</a>
+<a name="ln33">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln34">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln35">#include &lt;crm/cluster/election.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln40">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln41">#include &lt;tengine.h&gt;</a>
+<a name="ln42">#include &lt;fsa_proto.h&gt;</a>
+<a name="ln43">#include &lt;fsa_matrix.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">char *fsa_our_dc = NULL;</a>
+<a name="ln46">cib_t *fsa_cib_conn = NULL;</a>
+<a name="ln47">char *fsa_our_dc_version = NULL;</a>
+<a name="ln48"> </a>
+<a name="ln49">char *fsa_our_uuid = NULL;</a>
+<a name="ln50">char *fsa_our_uname = NULL;</a>
+<a name="ln51"> </a>
+<a name="ln52">char *fsa_cluster_name = NULL;</a>
+<a name="ln53"> </a>
+<a name="ln54">#if SUPPORT_HEARTBEAT</a>
+<a name="ln55">ll_cluster_t *fsa_cluster_conn;</a>
+<a name="ln56">#endif</a>
+<a name="ln57"> </a>
+<a name="ln58">election_t *fsa_election = NULL;</a>
+<a name="ln59"> </a>
+<a name="ln60">fsa_timer_t *wait_timer = NULL;        /* How long to wait before retrying to connect to the cib/lrmd/ccm */</a>
+<a name="ln61">fsa_timer_t *recheck_timer = NULL;     /* Periodically re-run the PE to account for time based rules/preferences */</a>
+<a name="ln62">fsa_timer_t *election_trigger = NULL;  /* How long to wait at startup, or after an election, for the DC to make contact */</a>
+<a name="ln63">fsa_timer_t *transition_timer = NULL;  /* How long to delay the start of a new transition with the expectation something else might happen too */</a>
+<a name="ln64">fsa_timer_t *integration_timer = NULL;</a>
+<a name="ln65">fsa_timer_t *finalization_timer = NULL;</a>
+<a name="ln66">fsa_timer_t *shutdown_escalation_timer = NULL; /* How long to wait for the DC to stop all resources and give us the all-clear to shut down */</a>
+<a name="ln67"> </a>
+<a name="ln68">volatile gboolean do_fsa_stall = FALSE;</a>
+<a name="ln69">volatile long long fsa_input_register = 0;</a>
+<a name="ln70">volatile long long fsa_actions = A_NOTHING;</a>
+<a name="ln71">volatile enum crmd_fsa_state fsa_state = S_STARTING;</a>
+<a name="ln72"> </a>
+<a name="ln73">extern uint highest_born_on;</a>
+<a name="ln74">extern uint num_join_invites;</a>
+<a name="ln75">extern void initialize_join(gboolean before);</a>
+<a name="ln76"> </a>
+<a name="ln77">#define DOT_PREFIX &quot;actions:trace: &quot;</a>
+<a name="ln78">#define do_dot_log(fmt, args...)     crm_trace( fmt, ##args)</a>
+<a name="ln79"> </a>
+<a name="ln80">long long do_state_transition(long long actions,</a>
+<a name="ln81">                              enum crmd_fsa_state cur_state,</a>
+<a name="ln82">                              enum crmd_fsa_state next_state, fsa_data_t * msg_data);</a>
+<a name="ln83"> </a>
+<a name="ln84">void dump_rsc_info(void);</a>
+<a name="ln85">void dump_rsc_info_callback(const xmlNode * msg, int call_id, int rc,</a>
+<a name="ln86">                            xmlNode * output, void *user_data);</a>
+<a name="ln87"> </a>
+<a name="ln88">void ghash_print_node(gpointer key, gpointer value, gpointer user_data);</a>
+<a name="ln89"> </a>
+<a name="ln90">void s_crmd_fsa_actions(fsa_data_t * fsa_data);</a>
+<a name="ln91">void log_fsa_input(fsa_data_t * stored_msg);</a>
+<a name="ln92">void init_dotfile(void);</a>
+<a name="ln93"> </a>
+<a name="ln94">void</a>
+<a name="ln95">init_dotfile(void)</a>
+<a name="ln96">{</a>
+<a name="ln97">    do_dot_log(DOT_PREFIX &quot;digraph \&quot;g\&quot; {&quot;);</a>
+<a name="ln98">    do_dot_log(DOT_PREFIX &quot;	size = \&quot;30,30\&quot;&quot;);</a>
+<a name="ln99">    do_dot_log(DOT_PREFIX &quot;	graph [&quot;);</a>
+<a name="ln100">    do_dot_log(DOT_PREFIX &quot;		fontsize = \&quot;12\&quot;&quot;);</a>
+<a name="ln101">    do_dot_log(DOT_PREFIX &quot;		fontname = \&quot;Times-Roman\&quot;&quot;);</a>
+<a name="ln102">    do_dot_log(DOT_PREFIX &quot;		fontcolor = \&quot;black\&quot;&quot;);</a>
+<a name="ln103">    do_dot_log(DOT_PREFIX &quot;		bb = \&quot;0,0,398.922306,478.927856\&quot;&quot;);</a>
+<a name="ln104">    do_dot_log(DOT_PREFIX &quot;		color = \&quot;black\&quot;&quot;);</a>
+<a name="ln105">    do_dot_log(DOT_PREFIX &quot;	]&quot;);</a>
+<a name="ln106">    do_dot_log(DOT_PREFIX &quot;	node [&quot;);</a>
+<a name="ln107">    do_dot_log(DOT_PREFIX &quot;		fontsize = \&quot;12\&quot;&quot;);</a>
+<a name="ln108">    do_dot_log(DOT_PREFIX &quot;		fontname = \&quot;Times-Roman\&quot;&quot;);</a>
+<a name="ln109">    do_dot_log(DOT_PREFIX &quot;		fontcolor = \&quot;black\&quot;&quot;);</a>
+<a name="ln110">    do_dot_log(DOT_PREFIX &quot;		shape = \&quot;ellipse\&quot;&quot;);</a>
+<a name="ln111">    do_dot_log(DOT_PREFIX &quot;		color = \&quot;black\&quot;&quot;);</a>
+<a name="ln112">    do_dot_log(DOT_PREFIX &quot;	]&quot;);</a>
+<a name="ln113">    do_dot_log(DOT_PREFIX &quot;	edge [&quot;);</a>
+<a name="ln114">    do_dot_log(DOT_PREFIX &quot;		fontsize = \&quot;12\&quot;&quot;);</a>
+<a name="ln115">    do_dot_log(DOT_PREFIX &quot;		fontname = \&quot;Times-Roman\&quot;&quot;);</a>
+<a name="ln116">    do_dot_log(DOT_PREFIX &quot;		fontcolor = \&quot;black\&quot;&quot;);</a>
+<a name="ln117">    do_dot_log(DOT_PREFIX &quot;		color = \&quot;black\&quot;&quot;);</a>
+<a name="ln118">    do_dot_log(DOT_PREFIX &quot;	]&quot;);</a>
+<a name="ln119">    do_dot_log(DOT_PREFIX &quot;// special nodes&quot;);</a>
+<a name="ln120">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_PENDING\&quot; &quot;);</a>
+<a name="ln121">    do_dot_log(DOT_PREFIX &quot;	[&quot;);</a>
+<a name="ln122">    do_dot_log(DOT_PREFIX &quot;	 color = \&quot;blue\&quot;&quot;);</a>
+<a name="ln123">    do_dot_log(DOT_PREFIX &quot;	 fontcolor = \&quot;blue\&quot;&quot;);</a>
+<a name="ln124">    do_dot_log(DOT_PREFIX &quot;	 ]&quot;);</a>
+<a name="ln125">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_TERMINATE\&quot; &quot;);</a>
+<a name="ln126">    do_dot_log(DOT_PREFIX &quot;	[&quot;);</a>
+<a name="ln127">    do_dot_log(DOT_PREFIX &quot;	 color = \&quot;red\&quot;&quot;);</a>
+<a name="ln128">    do_dot_log(DOT_PREFIX &quot;	 fontcolor = \&quot;red\&quot;&quot;);</a>
+<a name="ln129">    do_dot_log(DOT_PREFIX &quot;	 ]&quot;);</a>
+<a name="ln130">    do_dot_log(DOT_PREFIX &quot;// DC only nodes&quot;);</a>
+<a name="ln131">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_INTEGRATION\&quot; [ fontcolor = \&quot;green\&quot; ]&quot;);</a>
+<a name="ln132">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_POLICY_ENGINE\&quot; [ fontcolor = \&quot;green\&quot; ]&quot;);</a>
+<a name="ln133">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_TRANSITION_ENGINE\&quot; [ fontcolor = \&quot;green\&quot; ]&quot;);</a>
+<a name="ln134">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_RELEASE_DC\&quot; [ fontcolor = \&quot;green\&quot; ]&quot;);</a>
+<a name="ln135">    do_dot_log(DOT_PREFIX &quot;	\&quot;S_IDLE\&quot; [ fontcolor = \&quot;green\&quot; ]&quot;);</a>
+<a name="ln136">}</a>
+<a name="ln137"> </a>
+<a name="ln138">static void</a>
+<a name="ln139">do_fsa_action(fsa_data_t * fsa_data, long long an_action,</a>
+<a name="ln140">              void (*function) (long long action,</a>
+<a name="ln141">                                enum crmd_fsa_cause cause,</a>
+<a name="ln142">                                enum crmd_fsa_state cur_state,</a>
+<a name="ln143">                                enum crmd_fsa_input cur_input, fsa_data_t * msg_data))</a>
+<a name="ln144">{</a>
+<a name="ln145">    fsa_actions &amp;= ~an_action;</a>
+<a name="ln146">    crm_trace(DOT_PREFIX &quot;\t// %s&quot;, fsa_action2string(an_action));</a>
+<a name="ln147">    function(an_action, fsa_data-&gt;fsa_cause, fsa_state, fsa_data-&gt;fsa_input, fsa_data);</a>
+<a name="ln148">}</a>
+<a name="ln149"> </a>
+<a name="ln150">static long long startup_actions =</a>
+<a name="ln151">    A_STARTUP | A_CIB_START | A_LRM_CONNECT | A_CCM_CONNECT | A_HA_CONNECT | A_READCONFIG |</a>
+<a name="ln152">    A_STARTED | A_CL_JOIN_QUERY;</a>
+<a name="ln153"> </a>
+<a name="ln154">enum crmd_fsa_state</a>
+<a name="ln155">s_crmd_fsa(enum crmd_fsa_cause cause)</a>
+<a name="ln156">{</a>
+<a name="ln157">    fsa_data_t *fsa_data = NULL;</a>
+<a name="ln158">    long long register_copy = fsa_input_register;</a>
+<a name="ln159">    long long new_actions = A_NOTHING;</a>
+<a name="ln160">    enum crmd_fsa_state last_state;</a>
+<a name="ln161"> </a>
+<a name="ln162">    crm_trace(&quot;FSA invoked with Cause: %s\tState: %s&quot;,</a>
+<a name="ln163">              fsa_cause2string(cause), fsa_state2string(fsa_state));</a>
+<a name="ln164"> </a>
+<a name="ln165">    fsa_dump_actions(fsa_actions, &quot;Initial&quot;);</a>
+<a name="ln166"> </a>
+<a name="ln167">    do_fsa_stall = FALSE;</a>
+<a name="ln168">    if (is_message() == FALSE &amp;&amp; fsa_actions != A_NOTHING) {</a>
+<a name="ln169">        /* fake the first message so we can get into the loop */</a>
+<a name="ln170">        fsa_data = calloc(1, sizeof(fsa_data_t));</a>
+<a name="ln171">        fsa_data-&gt;fsa_input = I_NULL;</a>
+<a name="ln172">        fsa_data-&gt;fsa_cause = C_FSA_INTERNAL;</a>
+<a name="ln173">        fsa_data-&gt;origin = __FUNCTION__;</a>
+<a name="ln174">        fsa_data-&gt;data_type = fsa_dt_none;</a>
+<a name="ln175">        fsa_message_queue = g_list_append(fsa_message_queue, fsa_data);</a>
+<a name="ln176">        fsa_data = NULL;</a>
+<a name="ln177">    }</a>
+<a name="ln178">    while (is_message() &amp;&amp; do_fsa_stall == FALSE) {</a>
+<a name="ln179">        crm_trace(&quot;Checking messages (%d remaining)&quot;, g_list_length(fsa_message_queue));</a>
+<a name="ln180"> </a>
+<a name="ln181">        fsa_data = get_message();</a>
+<a name="ln182">        if(fsa_data == NULL) {</a>
+<a name="ln183">            continue;</a>
+<a name="ln184">        }</a>
+<a name="ln185"> </a>
+<a name="ln186">        log_fsa_input(fsa_data);</a>
+<a name="ln187"> </a>
+<a name="ln188">        /* add any actions back to the queue */</a>
+<a name="ln189">        fsa_actions |= fsa_data-&gt;actions;</a>
+<a name="ln190">        fsa_dump_actions(fsa_data-&gt;actions, &quot;Restored actions&quot;);</a>
+<a name="ln191"> </a>
+<a name="ln192">        /* get the next batch of actions */</a>
+<a name="ln193">        new_actions = crmd_fsa_actions[fsa_data-&gt;fsa_input][fsa_state];</a>
+<a name="ln194">        fsa_actions |= new_actions;</a>
+<a name="ln195">        fsa_dump_actions(new_actions, &quot;New actions&quot;);</a>
+<a name="ln196"> </a>
+<a name="ln197">        if (fsa_data-&gt;fsa_input != I_NULL &amp;&amp; fsa_data-&gt;fsa_input != I_ROUTER) {</a>
+<a name="ln198">            crm_debug(&quot;Processing %s: [ state=%s cause=%s origin=%s ]&quot;,</a>
+<a name="ln199">                      fsa_input2string(fsa_data-&gt;fsa_input),</a>
+<a name="ln200">                      fsa_state2string(fsa_state),</a>
+<a name="ln201">                      fsa_cause2string(fsa_data-&gt;fsa_cause), fsa_data-&gt;origin);</a>
+<a name="ln202">        }</a>
+<a name="ln203"> </a>
+<a name="ln204">        /* logging : *before* the state is changed */</a>
+<a name="ln205">        if (is_set(fsa_actions, A_ERROR)) {</a>
+<a name="ln206">            do_fsa_action(fsa_data, A_ERROR, do_log);</a>
+<a name="ln207">        }</a>
+<a name="ln208">        if (is_set(fsa_actions, A_WARN)) {</a>
+<a name="ln209">            do_fsa_action(fsa_data, A_WARN, do_log);</a>
+<a name="ln210">        }</a>
+<a name="ln211">        if (is_set(fsa_actions, A_LOG)) {</a>
+<a name="ln212">            do_fsa_action(fsa_data, A_LOG, do_log);</a>
+<a name="ln213">        }</a>
+<a name="ln214"> </a>
+<a name="ln215">        /* update state variables */</a>
+<a name="ln216">        last_state = fsa_state;</a>
+<a name="ln217">        fsa_state = crmd_fsa_state[fsa_data-&gt;fsa_input][fsa_state];</a>
+<a name="ln218"> </a>
+<a name="ln219">        /*</a>
+<a name="ln220">         * Remove certain actions during shutdown</a>
+<a name="ln221">         */</a>
+<a name="ln222">        if (fsa_state == S_STOPPING || ((fsa_input_register &amp; R_SHUTDOWN) == R_SHUTDOWN)) {</a>
+<a name="ln223">            clear_bit(fsa_actions, startup_actions);</a>
+<a name="ln224">        }</a>
+<a name="ln225"> </a>
+<a name="ln226">        /*</a>
+<a name="ln227">         * Hook for change of state.</a>
+<a name="ln228">         * Allows actions to be added or removed when entering a state</a>
+<a name="ln229">         */</a>
+<a name="ln230">        if (last_state != fsa_state) {</a>
+<a name="ln231">            fsa_actions = do_state_transition(fsa_actions, last_state, fsa_state, fsa_data);</a>
+<a name="ln232">        } else {</a>
+<a name="ln233">            do_dot_log(DOT_PREFIX &quot;\t// FSA input: State=%s \tCause=%s&quot;</a>
+<a name="ln234">                       &quot; \tInput=%s \tOrigin=%s() \tid=%d&quot;,</a>
+<a name="ln235">                       fsa_state2string(fsa_state),</a>
+<a name="ln236">                       fsa_cause2string(fsa_data-&gt;fsa_cause),</a>
+<a name="ln237">                       fsa_input2string(fsa_data-&gt;fsa_input), fsa_data-&gt;origin, fsa_data-&gt;id);</a>
+<a name="ln238">        }</a>
+<a name="ln239"> </a>
+<a name="ln240">        /* start doing things... */</a>
+<a name="ln241">        s_crmd_fsa_actions(fsa_data);</a>
+<a name="ln242">        delete_fsa_input(fsa_data);</a>
+<a name="ln243">        fsa_data = NULL;</a>
+<a name="ln244">    }</a>
+<a name="ln245"> </a>
+<a name="ln246">    if (g_list_length(fsa_message_queue) &gt; 0 || fsa_actions != A_NOTHING || do_fsa_stall) {</a>
+<a name="ln247">        crm_debug(&quot;Exiting the FSA: queue=%d, fsa_actions=0x%llx, stalled=%s&quot;,</a>
+<a name="ln248">                  g_list_length(fsa_message_queue), fsa_actions, do_fsa_stall ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln249">    } else {</a>
+<a name="ln250">        crm_trace(&quot;Exiting the FSA&quot;);</a>
+<a name="ln251">    }</a>
+<a name="ln252"> </a>
+<a name="ln253">    /* cleanup inputs? */</a>
+<a name="ln254">    if (register_copy != fsa_input_register) {</a>
+<a name="ln255">        long long same = register_copy &amp; fsa_input_register;</a>
+<a name="ln256"> </a>
+<a name="ln257">        fsa_dump_inputs(LOG_DEBUG, &quot;Added&quot;, fsa_input_register ^ same);</a>
+<a name="ln258">        fsa_dump_inputs(LOG_DEBUG, &quot;Removed&quot;, register_copy ^ same);</a>
+<a name="ln259">    }</a>
+<a name="ln260"> </a>
+<a name="ln261">    fsa_dump_actions(fsa_actions, &quot;Remaining&quot;);</a>
+<a name="ln262">    fsa_dump_queue(LOG_DEBUG);</a>
+<a name="ln263"> </a>
+<a name="ln264">    return fsa_state;</a>
+<a name="ln265">}</a>
+<a name="ln266"> </a>
+<a name="ln267">void</a>
+<a name="ln268">s_crmd_fsa_actions(fsa_data_t * fsa_data)</a>
+<a name="ln269">{</a>
+<a name="ln270">    /*</a>
+<a name="ln271">     * Process actions in order of priority but do only one</a>
+<a name="ln272">     * action at a time to avoid complicating the ordering.</a>
+<a name="ln273">     */</a>
+<a name="ln274">    CRM_CHECK(fsa_data != NULL, return);</a>
+<a name="ln275">    while (fsa_actions != A_NOTHING &amp;&amp; do_fsa_stall == FALSE) {</a>
+<a name="ln276"> </a>
+<a name="ln277">        /* regular action processing in order of action priority</a>
+<a name="ln278">         *</a>
+<a name="ln279">         * Make sure all actions that connect to required systems</a>
+<a name="ln280">         * are performed first</a>
+<a name="ln281">         */</a>
+<a name="ln282">        if (fsa_actions &amp; A_ERROR) {</a>
+<a name="ln283">            do_fsa_action(fsa_data, A_ERROR, do_log);</a>
+<a name="ln284">        } else if (fsa_actions &amp; A_WARN) {</a>
+<a name="ln285">            do_fsa_action(fsa_data, A_WARN, do_log);</a>
+<a name="ln286">        } else if (fsa_actions &amp; A_LOG) {</a>
+<a name="ln287">            do_fsa_action(fsa_data, A_LOG, do_log);</a>
+<a name="ln288"> </a>
+<a name="ln289">            /* get out of here NOW! before anything worse happens */</a>
+<a name="ln290">        } else if (fsa_actions &amp; A_EXIT_1) {</a>
+<a name="ln291">            do_fsa_action(fsa_data, A_EXIT_1, do_exit);</a>
+<a name="ln292"> </a>
+<a name="ln293">            /* sub-system restart */</a>
+<a name="ln294">        } else if ((fsa_actions &amp; O_LRM_RECONNECT) == O_LRM_RECONNECT) {</a>
+<a name="ln295">            do_fsa_action(fsa_data, O_LRM_RECONNECT, do_lrm_control);</a>
+<a name="ln296">        } else if ((fsa_actions &amp; O_CIB_RESTART) == O_CIB_RESTART) {</a>
+<a name="ln297">            do_fsa_action(fsa_data, O_CIB_RESTART, do_cib_control);</a>
+<a name="ln298">        } else if ((fsa_actions &amp; O_PE_RESTART) == O_PE_RESTART) {</a>
+<a name="ln299">            do_fsa_action(fsa_data, O_PE_RESTART, do_pe_control);</a>
+<a name="ln300">        } else if ((fsa_actions &amp; O_TE_RESTART) == O_TE_RESTART) {</a>
+<a name="ln301">            do_fsa_action(fsa_data, O_TE_RESTART, do_te_control);</a>
+<a name="ln302"> </a>
+<a name="ln303">            /* essential start tasks */</a>
+<a name="ln304">        } else if (fsa_actions &amp; A_STARTUP) {</a>
+<a name="ln305">            do_fsa_action(fsa_data, A_STARTUP, do_startup);</a>
+<a name="ln306">        } else if (fsa_actions &amp; A_CIB_START) {</a>
+<a name="ln307">            do_fsa_action(fsa_data, A_CIB_START, do_cib_control);</a>
+<a name="ln308">        } else if (fsa_actions &amp; A_HA_CONNECT) {</a>
+<a name="ln309">            do_fsa_action(fsa_data, A_HA_CONNECT, do_ha_control);</a>
+<a name="ln310">        } else if (fsa_actions &amp; A_READCONFIG) {</a>
+<a name="ln311">            do_fsa_action(fsa_data, A_READCONFIG, do_read_config);</a>
+<a name="ln312"> </a>
+<a name="ln313">            /* sub-system start/connect */</a>
+<a name="ln314">        } else if (fsa_actions &amp; A_LRM_CONNECT) {</a>
+<a name="ln315">            do_fsa_action(fsa_data, A_LRM_CONNECT, do_lrm_control);</a>
+<a name="ln316">        } else if (fsa_actions &amp; A_CCM_CONNECT) {</a>
+<a name="ln317">#if SUPPORT_HEARTBEAT</a>
+<a name="ln318">            if (is_heartbeat_cluster()) {</a>
+<a name="ln319">                do_fsa_action(fsa_data, A_CCM_CONNECT, do_ccm_control);</a>
+<a name="ln320">            }</a>
+<a name="ln321">#endif</a>
+<a name="ln322">            fsa_actions &amp;= ~A_CCM_CONNECT;</a>
+<a name="ln323"> </a>
+<a name="ln324">        } else if (fsa_actions &amp; A_TE_START) {</a>
+<a name="ln325">            do_fsa_action(fsa_data, A_TE_START, do_te_control);</a>
+<a name="ln326">        } else if (fsa_actions &amp; A_PE_START) {</a>
+<a name="ln327">            do_fsa_action(fsa_data, A_PE_START, do_pe_control);</a>
+<a name="ln328"> </a>
+<a name="ln329">            /* Timers */</a>
+<a name="ln330">/* 		else if(fsa_actions &amp; O_DC_TIMER_RESTART) {</a>
+<a name="ln331">		do_fsa_action(fsa_data, O_DC_TIMER_RESTART,	     do_timer_control) */ ;</a>
+<a name="ln332">        } else if (fsa_actions &amp; A_DC_TIMER_STOP) {</a>
+<a name="ln333">            do_fsa_action(fsa_data, A_DC_TIMER_STOP, do_timer_control);</a>
+<a name="ln334">        } else if (fsa_actions &amp; A_INTEGRATE_TIMER_STOP) {</a>
+<a name="ln335">            do_fsa_action(fsa_data, A_INTEGRATE_TIMER_STOP, do_timer_control);</a>
+<a name="ln336">        } else if (fsa_actions &amp; A_INTEGRATE_TIMER_START) {</a>
+<a name="ln337">            do_fsa_action(fsa_data, A_INTEGRATE_TIMER_START, do_timer_control);</a>
+<a name="ln338">        } else if (fsa_actions &amp; A_FINALIZE_TIMER_STOP) {</a>
+<a name="ln339">            do_fsa_action(fsa_data, A_FINALIZE_TIMER_STOP, do_timer_control);</a>
+<a name="ln340">        } else if (fsa_actions &amp; A_FINALIZE_TIMER_START) {</a>
+<a name="ln341">            do_fsa_action(fsa_data, A_FINALIZE_TIMER_START, do_timer_control);</a>
+<a name="ln342"> </a>
+<a name="ln343">            /*</a>
+<a name="ln344">             * Highest priority actions</a>
+<a name="ln345">             */</a>
+<a name="ln346">        } else if (fsa_actions &amp; A_MSG_ROUTE) {</a>
+<a name="ln347">            do_fsa_action(fsa_data, A_MSG_ROUTE, do_msg_route);</a>
+<a name="ln348">        } else if (fsa_actions &amp; A_RECOVER) {</a>
+<a name="ln349">            do_fsa_action(fsa_data, A_RECOVER, do_recover);</a>
+<a name="ln350">        } else if (fsa_actions &amp; A_CL_JOIN_RESULT) {</a>
+<a name="ln351">            do_fsa_action(fsa_data, A_CL_JOIN_RESULT, do_cl_join_finalize_respond);</a>
+<a name="ln352">        } else if (fsa_actions &amp; A_CL_JOIN_REQUEST) {</a>
+<a name="ln353">            do_fsa_action(fsa_data, A_CL_JOIN_REQUEST, do_cl_join_offer_respond);</a>
+<a name="ln354">        } else if (fsa_actions &amp; A_SHUTDOWN_REQ) {</a>
+<a name="ln355">            do_fsa_action(fsa_data, A_SHUTDOWN_REQ, do_shutdown_req);</a>
+<a name="ln356">        } else if (fsa_actions &amp; A_ELECTION_VOTE) {</a>
+<a name="ln357">            do_fsa_action(fsa_data, A_ELECTION_VOTE, do_election_vote);</a>
+<a name="ln358">        } else if (fsa_actions &amp; A_ELECTION_COUNT) {</a>
+<a name="ln359">            do_fsa_action(fsa_data, A_ELECTION_COUNT, do_election_count_vote);</a>
+<a name="ln360">        } else if (fsa_actions &amp; A_LRM_EVENT) {</a>
+<a name="ln361">            do_fsa_action(fsa_data, A_LRM_EVENT, do_lrm_event);</a>
+<a name="ln362"> </a>
+<a name="ln363">            /*</a>
+<a name="ln364">             * High priority actions</a>
+<a name="ln365">             */</a>
+<a name="ln366">        } else if (fsa_actions &amp; A_STARTED) {</a>
+<a name="ln367">            do_fsa_action(fsa_data, A_STARTED, do_started);</a>
+<a name="ln368">        } else if (fsa_actions &amp; A_CL_JOIN_QUERY) {</a>
+<a name="ln369">            do_fsa_action(fsa_data, A_CL_JOIN_QUERY, do_cl_join_query);</a>
+<a name="ln370">        } else if (fsa_actions &amp; A_DC_TIMER_START) {</a>
+<a name="ln371">            do_fsa_action(fsa_data, A_DC_TIMER_START, do_timer_control);</a>
+<a name="ln372"> </a>
+<a name="ln373">            /*</a>
+<a name="ln374">             * Medium priority actions</a>
+<a name="ln375">             * - Membership</a>
+<a name="ln376">             */</a>
+<a name="ln377">        } else if (fsa_actions &amp; A_DC_TAKEOVER) {</a>
+<a name="ln378">            do_fsa_action(fsa_data, A_DC_TAKEOVER, do_dc_takeover);</a>
+<a name="ln379">        } else if (fsa_actions &amp; A_DC_RELEASE) {</a>
+<a name="ln380">            do_fsa_action(fsa_data, A_DC_RELEASE, do_dc_release);</a>
+<a name="ln381">        } else if (fsa_actions &amp; A_DC_JOIN_FINAL) {</a>
+<a name="ln382">            do_fsa_action(fsa_data, A_DC_JOIN_FINAL, do_dc_join_final);</a>
+<a name="ln383">        } else if (fsa_actions &amp; A_ELECTION_CHECK) {</a>
+<a name="ln384">            do_fsa_action(fsa_data, A_ELECTION_CHECK, do_election_check);</a>
+<a name="ln385">        } else if (fsa_actions &amp; A_ELECTION_START) {</a>
+<a name="ln386">            do_fsa_action(fsa_data, A_ELECTION_START, do_election_vote);</a>
+<a name="ln387">        } else if (fsa_actions &amp; A_DC_JOIN_OFFER_ALL) {</a>
+<a name="ln388">            do_fsa_action(fsa_data, A_DC_JOIN_OFFER_ALL, do_dc_join_offer_all);</a>
+<a name="ln389">        } else if (fsa_actions &amp; A_DC_JOIN_OFFER_ONE) {</a>
+<a name="ln390">            do_fsa_action(fsa_data, A_DC_JOIN_OFFER_ONE, do_dc_join_offer_one);</a>
+<a name="ln391">        } else if (fsa_actions &amp; A_DC_JOIN_PROCESS_REQ) {</a>
+<a name="ln392">            do_fsa_action(fsa_data, A_DC_JOIN_PROCESS_REQ, do_dc_join_filter_offer);</a>
+<a name="ln393">        } else if (fsa_actions &amp; A_DC_JOIN_PROCESS_ACK) {</a>
+<a name="ln394">            do_fsa_action(fsa_data, A_DC_JOIN_PROCESS_ACK, do_dc_join_ack);</a>
+<a name="ln395">        } else if (fsa_actions &amp; A_DC_JOIN_FINALIZE) {</a>
+<a name="ln396">            do_fsa_action(fsa_data, A_DC_JOIN_FINALIZE, do_dc_join_finalize);</a>
+<a name="ln397">        } else if (fsa_actions &amp; A_CL_JOIN_ANNOUNCE) {</a>
+<a name="ln398">            do_fsa_action(fsa_data, A_CL_JOIN_ANNOUNCE, do_cl_join_announce);</a>
+<a name="ln399"> </a>
+<a name="ln400">            /*</a>
+<a name="ln401">             * Low(er) priority actions</a>
+<a name="ln402">             * Make sure the CIB is always updated before invoking the</a>
+<a name="ln403">             * PE, and the PE before the TE</a>
+<a name="ln404">             */</a>
+<a name="ln405">        } else if (fsa_actions &amp; A_TE_HALT) {</a>
+<a name="ln406">            do_fsa_action(fsa_data, A_TE_HALT, do_te_invoke);</a>
+<a name="ln407">        } else if (fsa_actions &amp; A_TE_CANCEL) {</a>
+<a name="ln408">            do_fsa_action(fsa_data, A_TE_CANCEL, do_te_invoke);</a>
+<a name="ln409">        } else if (fsa_actions &amp; A_LRM_INVOKE) {</a>
+<a name="ln410">            do_fsa_action(fsa_data, A_LRM_INVOKE, do_lrm_invoke);</a>
+<a name="ln411">        } else if (fsa_actions &amp; A_PE_INVOKE) {</a>
+<a name="ln412">            do_fsa_action(fsa_data, A_PE_INVOKE, do_pe_invoke);</a>
+<a name="ln413">        } else if (fsa_actions &amp; A_TE_INVOKE) {</a>
+<a name="ln414">            do_fsa_action(fsa_data, A_TE_INVOKE, do_te_invoke);</a>
+<a name="ln415"> </a>
+<a name="ln416">            /* Shutdown actions */</a>
+<a name="ln417">        } else if (fsa_actions &amp; A_DC_RELEASED) {</a>
+<a name="ln418">            do_fsa_action(fsa_data, A_DC_RELEASED, do_dc_release);</a>
+<a name="ln419">        } else if (fsa_actions &amp; A_PE_STOP) {</a>
+<a name="ln420">            do_fsa_action(fsa_data, A_PE_STOP, do_pe_control);</a>
+<a name="ln421">        } else if (fsa_actions &amp; A_TE_STOP) {</a>
+<a name="ln422">            do_fsa_action(fsa_data, A_TE_STOP, do_te_control);</a>
+<a name="ln423">        } else if (fsa_actions &amp; A_SHUTDOWN) {</a>
+<a name="ln424">            do_fsa_action(fsa_data, A_SHUTDOWN, do_shutdown);</a>
+<a name="ln425">        } else if (fsa_actions &amp; A_LRM_DISCONNECT) {</a>
+<a name="ln426">            do_fsa_action(fsa_data, A_LRM_DISCONNECT, do_lrm_control);</a>
+<a name="ln427">        } else if (fsa_actions &amp; A_CCM_DISCONNECT) {</a>
+<a name="ln428">#if SUPPORT_HEARTBEAT</a>
+<a name="ln429">            if (is_heartbeat_cluster()) {</a>
+<a name="ln430">                do_fsa_action(fsa_data, A_CCM_DISCONNECT, do_ccm_control);</a>
+<a name="ln431">            }</a>
+<a name="ln432">#endif</a>
+<a name="ln433">            fsa_actions &amp;= ~A_CCM_DISCONNECT;</a>
+<a name="ln434"> </a>
+<a name="ln435">        } else if (fsa_actions &amp; A_HA_DISCONNECT) {</a>
+<a name="ln436">            do_fsa_action(fsa_data, A_HA_DISCONNECT, do_ha_control);</a>
+<a name="ln437">        } else if (fsa_actions &amp; A_CIB_STOP) {</a>
+<a name="ln438">            do_fsa_action(fsa_data, A_CIB_STOP, do_cib_control);</a>
+<a name="ln439">        } else if (fsa_actions &amp; A_STOP) {</a>
+<a name="ln440">            do_fsa_action(fsa_data, A_STOP, do_stop);</a>
+<a name="ln441"> </a>
+<a name="ln442">            /* exit gracefully */</a>
+<a name="ln443">        } else if (fsa_actions &amp; A_EXIT_0) {</a>
+<a name="ln444">            do_fsa_action(fsa_data, A_EXIT_0, do_exit);</a>
+<a name="ln445"> </a>
+<a name="ln446">            /* Error checking and reporting */</a>
+<a name="ln447">        } else {</a>
+<a name="ln448">            crm_err(&quot;Action %s not supported &quot;CRM_XS&quot; 0x%llx&quot;,</a>
+<a name="ln449">                    fsa_action2string(fsa_actions), fsa_actions);</a>
+<a name="ln450">            register_fsa_error_adv(C_FSA_INTERNAL, I_ERROR, fsa_data, NULL, __FUNCTION__);</a>
+<a name="ln451">        }</a>
+<a name="ln452">    }</a>
+<a name="ln453">}</a>
+<a name="ln454"> </a>
+<a name="ln455">void</a>
+<a name="ln456">log_fsa_input(fsa_data_t * stored_msg)</a>
+<a name="ln457">{</a>
+<a name="ln458">    CRM_ASSERT(stored_msg);</a>
+<a name="ln459">    crm_trace(&quot;Processing queued input %d&quot;, stored_msg-&gt;id);</a>
+<a name="ln460">    if (stored_msg-&gt;fsa_cause == C_CCM_CALLBACK) {</a>
+<a name="ln461">        crm_trace(&quot;FSA processing CCM callback from %s&quot;, stored_msg-&gt;origin);</a>
+<a name="ln462"> </a>
+<a name="ln463">    } else if (stored_msg-&gt;fsa_cause == C_LRM_OP_CALLBACK) {</a>
+<a name="ln464">        crm_trace(&quot;FSA processing LRM callback from %s&quot;, stored_msg-&gt;origin);</a>
+<a name="ln465"> </a>
+<a name="ln466">    } else if (stored_msg-&gt;data == NULL) {</a>
+<a name="ln467">        crm_trace(&quot;FSA processing input from %s&quot;, stored_msg-&gt;origin);</a>
+<a name="ln468"> </a>
+<a name="ln469">    } else {</a>
+<a name="ln470">        ha_msg_input_t *ha_input = fsa_typed_data_adv(stored_msg, fsa_dt_ha_msg, __FUNCTION__);</a>
+<a name="ln471"> </a>
+<a name="ln472">        crm_trace(&quot;FSA processing XML message from %s&quot;, stored_msg-&gt;origin);</a>
+<a name="ln473">        crm_log_xml_trace(ha_input-&gt;xml, &quot;FSA message data&quot;);</a>
+<a name="ln474">    }</a>
+<a name="ln475">}</a>
+<a name="ln476"> </a>
+<a name="ln477">long long</a>
+<a name="ln478">do_state_transition(long long actions,</a>
+<a name="ln479">                    enum crmd_fsa_state cur_state,</a>
+<a name="ln480">                    enum crmd_fsa_state next_state, fsa_data_t * msg_data)</a>
+<a name="ln481">{</a>
+<a name="ln482">    int level = LOG_INFO;</a>
+<a name="ln483">    long long tmp = actions;</a>
+<a name="ln484">    gboolean clear_recovery_bit = TRUE;</a>
+<a name="ln485"> </a>
+<a name="ln486">    enum crmd_fsa_cause cause = msg_data-&gt;fsa_cause;</a>
+<a name="ln487">    enum crmd_fsa_input current_input = msg_data-&gt;fsa_input;</a>
+<a name="ln488"> </a>
+<a name="ln489">    const char *state_from = fsa_state2string(cur_state);</a>
+<a name="ln490">    const char *state_to = fsa_state2string(next_state);</a>
+<a name="ln491">    const char *input = fsa_input2string(current_input);</a>
+<a name="ln492"> </a>
+<a name="ln493">    CRM_LOG_ASSERT(cur_state != next_state);</a>
+<a name="ln494"> </a>
+<a name="ln495">    do_dot_log(DOT_PREFIX &quot;\t%s -&gt; %s [ label=%s cause=%s origin=%s ]&quot;,</a>
+<a name="ln496">               state_from, state_to, input, fsa_cause2string(cause), msg_data-&gt;origin);</a>
+<a name="ln497"> </a>
+<a name="ln498">    if (cur_state == S_IDLE || next_state == S_IDLE) {</a>
+<a name="ln499">        level = LOG_NOTICE;</a>
+<a name="ln500">    } else if (cur_state == S_NOT_DC || next_state == S_NOT_DC) {</a>
+<a name="ln501">        level = LOG_NOTICE;</a>
+<a name="ln502">    } else if (cur_state == S_ELECTION) {</a>
+<a name="ln503">        level = LOG_NOTICE;</a>
+<a name="ln504">    } else if (cur_state == S_STARTING) {</a>
+<a name="ln505">        level = LOG_NOTICE;</a>
+<a name="ln506">    } else if (next_state == S_RECOVERY) {</a>
+<a name="ln507">        level = LOG_WARNING;</a>
+<a name="ln508">    }</a>
+<a name="ln509"> </a>
+<a name="ln510">    do_crm_log(level, &quot;State transition %s -&gt; %s &quot;</a>
+<a name="ln511">               CRM_XS &quot; input=%s cause=%s origin=%s&quot;,</a>
+<a name="ln512">               state_from, state_to, input, fsa_cause2string(cause),</a>
+<a name="ln513">               msg_data-&gt;origin);</a>
+<a name="ln514"> </a>
+<a name="ln515">    /* the last two clauses might cause trouble later */</a>
+<a name="ln516">    if (next_state != S_ELECTION &amp;&amp; cur_state != S_RELEASE_DC) {</a>
+<a name="ln517">        election_timeout_stop(fsa_election);</a>
+<a name="ln518">/* 	} else { */</a>
+<a name="ln519">/* 		crm_timer_start(election_timeout); */</a>
+<a name="ln520">    }</a>
+<a name="ln521">#if 0</a>
+<a name="ln522">    if ((fsa_input_register &amp; R_SHUTDOWN)) {</a>
+<a name="ln523">        set_bit(tmp, A_DC_TIMER_STOP);</a>
+<a name="ln524">    }</a>
+<a name="ln525">#endif</a>
+<a name="ln526">    if (next_state == S_INTEGRATION) {</a>
+<a name="ln527">        set_bit(tmp, A_INTEGRATE_TIMER_START);</a>
+<a name="ln528">    } else {</a>
+<a name="ln529">        set_bit(tmp, A_INTEGRATE_TIMER_STOP);</a>
+<a name="ln530">    }</a>
+<a name="ln531"> </a>
+<a name="ln532">    if (next_state == S_FINALIZE_JOIN) {</a>
+<a name="ln533">        set_bit(tmp, A_FINALIZE_TIMER_START);</a>
+<a name="ln534">    } else {</a>
+<a name="ln535">        set_bit(tmp, A_FINALIZE_TIMER_STOP);</a>
+<a name="ln536">    }</a>
+<a name="ln537"> </a>
+<a name="ln538">    if (next_state != S_PENDING) {</a>
+<a name="ln539">        set_bit(tmp, A_DC_TIMER_STOP);</a>
+<a name="ln540">    }</a>
+<a name="ln541">    if (next_state != S_ELECTION) {</a>
+<a name="ln542">        highest_born_on = 0;</a>
+<a name="ln543">    }</a>
+<a name="ln544">    if (next_state != S_IDLE) {</a>
+<a name="ln545">        crm_timer_stop(recheck_timer);</a>
+<a name="ln546">    }</a>
+<a name="ln547"> </a>
+<a name="ln548">    if (cur_state == S_FINALIZE_JOIN &amp;&amp; next_state == S_POLICY_ENGINE) {</a>
+<a name="ln549">        populate_cib_nodes(node_update_quick|node_update_all, __FUNCTION__);</a>
+<a name="ln550">    }</a>
+<a name="ln551"> </a>
+<a name="ln552">    switch (next_state) {</a>
+<a name="ln553">        case S_PENDING:</a>
+<a name="ln554">            fsa_cib_conn-&gt;cmds-&gt;set_slave(fsa_cib_conn, cib_scope_local);</a>
+<a name="ln555">            /* fall through */</a>
+<a name="ln556">        case S_ELECTION:</a>
+<a name="ln557">            crm_trace(&quot;Resetting our DC to NULL on transition to %s&quot;, fsa_state2string(next_state));</a>
+<a name="ln558">            update_dc(NULL);</a>
+<a name="ln559">            break;</a>
+<a name="ln560">        case S_NOT_DC:</a>
+<a name="ln561">            election_trigger-&gt;counter = 0;</a>
+<a name="ln562">            purge_stonith_cleanup();</a>
+<a name="ln563"> </a>
+<a name="ln564">            if (is_set(fsa_input_register, R_SHUTDOWN)) {</a>
+<a name="ln565">                crm_info(&quot;(Re)Issuing shutdown request now&quot; &quot; that we have a new DC&quot;);</a>
+<a name="ln566">                set_bit(tmp, A_SHUTDOWN_REQ);</a>
+<a name="ln567">            }</a>
+<a name="ln568">            CRM_LOG_ASSERT(fsa_our_dc != NULL);</a>
+<a name="ln569">            if (fsa_our_dc == NULL) {</a>
+<a name="ln570">                crm_err(&quot;Reached S_NOT_DC without a DC&quot; &quot; being recorded&quot;);</a>
+<a name="ln571">            }</a>
+<a name="ln572">            break;</a>
+<a name="ln573">        case S_RECOVERY:</a>
+<a name="ln574">            clear_recovery_bit = FALSE;</a>
+<a name="ln575">            break;</a>
+<a name="ln576"> </a>
+<a name="ln577">        case S_FINALIZE_JOIN:</a>
+<a name="ln578">            CRM_LOG_ASSERT(AM_I_DC);</a>
+<a name="ln579">            if (cause == C_TIMER_POPPED) {</a>
+<a name="ln580">                crm_warn(&quot;Progressed to state %s after %s&quot;,</a>
+<a name="ln581">                         fsa_state2string(next_state), fsa_cause2string(cause));</a>
+<a name="ln582">            }</a>
+<a name="ln583">            if (crmd_join_phase_count(crm_join_welcomed) &gt; 0) {</a>
+<a name="ln584">                crm_warn(&quot;%u cluster nodes failed to respond&quot;</a>
+<a name="ln585">                         &quot; to the join offer.&quot;, crmd_join_phase_count(crm_join_welcomed));</a>
+<a name="ln586">                crmd_join_phase_log(LOG_NOTICE);</a>
+<a name="ln587"> </a>
+<a name="ln588">            } else {</a>
+<a name="ln589">                crm_debug(&quot;All %d cluster nodes responded to the join offer.&quot;,</a>
+<a name="ln590">                          crmd_join_phase_count(crm_join_integrated));</a>
+<a name="ln591">            }</a>
+<a name="ln592">            break;</a>
+<a name="ln593"> </a>
+<a name="ln594">        case S_POLICY_ENGINE:</a>
+<a name="ln595">            election_trigger-&gt;counter = 0;</a>
+<a name="ln596">            CRM_LOG_ASSERT(AM_I_DC);</a>
+<a name="ln597">            if (cause == C_TIMER_POPPED) {</a>
+<a name="ln598">                crm_info(&quot;Progressed to state %s after %s&quot;,</a>
+<a name="ln599">                         fsa_state2string(next_state), fsa_cause2string(cause));</a>
+<a name="ln600">            }</a>
+<a name="ln601"> </a>
+<a name="ln602">            if (crmd_join_phase_count(crm_join_finalized) &gt; 0) {</a>
+<a name="ln603">                crm_err(&quot;%u cluster nodes failed to confirm their join.&quot;,</a>
+<a name="ln604">                        crmd_join_phase_count(crm_join_finalized));</a>
+<a name="ln605">                crmd_join_phase_log(LOG_NOTICE);</a>
+<a name="ln606"> </a>
+<a name="ln607">            } else if (crmd_join_phase_count(crm_join_confirmed)</a>
+<a name="ln608">                       == crm_active_peers()) {</a>
+<a name="ln609">                crm_debug(&quot;All %u cluster nodes are&quot;</a>
+<a name="ln610">                          &quot; eligible to run resources.&quot;, crm_active_peers());</a>
+<a name="ln611"> </a>
+<a name="ln612">            } else if (crmd_join_phase_count(crm_join_confirmed) &gt; crm_active_peers()) {</a>
+<a name="ln613">                crm_err(&quot;We have more confirmed nodes than our membership does: %d vs. %d&quot;,</a>
+<a name="ln614">                        crmd_join_phase_count(crm_join_confirmed), crm_active_peers());</a>
+<a name="ln615">                register_fsa_input(C_FSA_INTERNAL, I_ELECTION, NULL);</a>
+<a name="ln616"> </a>
+<a name="ln617">            } else if (saved_ccm_membership_id != crm_peer_seq) {</a>
+<a name="ln618">                crm_info(&quot;Membership changed: %llu -&gt; %llu - join restart&quot;,</a>
+<a name="ln619">                         saved_ccm_membership_id, crm_peer_seq);</a>
+<a name="ln620">                register_fsa_input_before(C_FSA_INTERNAL, I_NODE_JOIN, NULL);</a>
+<a name="ln621"> </a>
+<a name="ln622">            } else {</a>
+<a name="ln623">                crm_warn(&quot;Only %u of %u cluster &quot;</a>
+<a name="ln624">                         &quot;nodes are eligible to run resources - continue %d&quot;,</a>
+<a name="ln625">                         crmd_join_phase_count(crm_join_confirmed),</a>
+<a name="ln626">                         crm_active_peers(), crmd_join_phase_count(crm_join_welcomed));</a>
+<a name="ln627">            }</a>
+<a name="ln628">/* 			initialize_join(FALSE); */</a>
+<a name="ln629">            break;</a>
+<a name="ln630"> </a>
+<a name="ln631">        case S_STOPPING:</a>
+<a name="ln632">        case S_TERMINATE:</a>
+<a name="ln633">            /* possibly redundant */</a>
+<a name="ln634">            set_bit(fsa_input_register, R_SHUTDOWN);</a>
+<a name="ln635">            break;</a>
+<a name="ln636"> </a>
+<a name="ln637">        case S_IDLE:</a>
+<a name="ln638">            CRM_LOG_ASSERT(AM_I_DC);</a>
+<a name="ln639">            dump_rsc_info();</a>
+<a name="ln640">            if (is_set(fsa_input_register, R_SHUTDOWN)) {</a>
+<a name="ln641">                crm_info(&quot;(Re)Issuing shutdown request now&quot; &quot; that we are the DC&quot;);</a>
+<a name="ln642">                set_bit(tmp, A_SHUTDOWN_REQ);</a>
+<a name="ln643">            }</a>
+<a name="ln644">            if (recheck_timer-&gt;period_ms &gt; 0) {</a>
+<a name="ln645">                crm_debug(&quot;Starting %s&quot;, get_timer_desc(recheck_timer));</a>
+<a name="ln646">                crm_timer_start(recheck_timer);</a>
+<a name="ln647">            }</a>
+<a name="ln648">            break;</a>
+<a name="ln649"> </a>
+<a name="ln650">        default:</a>
+<a name="ln651">            break;</a>
+<a name="ln652">    }</a>
+<a name="ln653"> </a>
+<a name="ln654">    if (clear_recovery_bit &amp;&amp; next_state != S_PENDING) {</a>
+<a name="ln655">        tmp &amp;= ~A_RECOVER;</a>
+<a name="ln656">    } else if (clear_recovery_bit == FALSE) {</a>
+<a name="ln657">        tmp |= A_RECOVER;</a>
+<a name="ln658">    }</a>
+<a name="ln659"> </a>
+<a name="ln660">    if (tmp != actions) {</a>
+<a name="ln661">        /* fsa_dump_actions(actions ^ tmp, &quot;New actions&quot;); */</a>
+<a name="ln662">        actions = tmp;</a>
+<a name="ln663">    }</a>
+<a name="ln664"> </a>
+<a name="ln665">    return actions;</a>
+<a name="ln666">}</a>
+<a name="ln667"> </a>
+<a name="ln668">void</a>
+<a name="ln669">dump_rsc_info(void)</a>
+<a name="ln670">{</a>
+<a name="ln671">}</a>
+<a name="ln672"> </a>
+<a name="ln673">void</a>
+<a name="ln674">ghash_print_node(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln675">{</a>
+<a name="ln676">    const char *text = user_data;</a>
+<a name="ln677">    const char *uname = key;</a>
+<a name="ln678">    const char *value_s = value;</a>
+<a name="ln679"> </a>
+<a name="ln680">    crm_info(&quot;%s: %s %s&quot;, text, uname, value_s);</a>
+<a name="ln681">}</a>
+
+</code></pre>
+<div class="balloon" rel="171"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'fsa_data'. Check lines: 171, 170.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

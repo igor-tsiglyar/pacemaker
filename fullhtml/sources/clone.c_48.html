@@ -1,0 +1,1708 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln26">#include &lt;allocate.h&gt;</a>
+<a name="ln27">#include &lt;notif.h&gt;</a>
+<a name="ln28">#include &lt;utils.h&gt;</a>
+<a name="ln29">#include &lt;allocate.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#define VARIANT_CLONE 1</a>
+<a name="ln32">#include &lt;lib/pengine/variant.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">gint sort_clone_instance(gconstpointer a, gconstpointer b, gpointer data_set);</a>
+<a name="ln35">static void append_parent_colocation(resource_t * rsc, resource_t * child, gboolean all);</a>
+<a name="ln36"> </a>
+<a name="ln37">static gint</a>
+<a name="ln38">sort_rsc_id(gconstpointer a, gconstpointer b)</a>
+<a name="ln39">{</a>
+<a name="ln40">    const resource_t *resource1 = (const resource_t *)a;</a>
+<a name="ln41">    const resource_t *resource2 = (const resource_t *)b;</a>
+<a name="ln42"> </a>
+<a name="ln43">    CRM_ASSERT(resource1 != NULL);</a>
+<a name="ln44">    CRM_ASSERT(resource2 != NULL);</a>
+<a name="ln45"> </a>
+<a name="ln46">    return strcmp(resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln47">}</a>
+<a name="ln48"> </a>
+<a name="ln49">static node_t *</a>
+<a name="ln50">parent_node_instance(const resource_t * rsc, node_t * node)</a>
+<a name="ln51">{</a>
+<a name="ln52">    node_t *ret = NULL;</a>
+<a name="ln53"> </a>
+<a name="ln54">    if (node != NULL &amp;&amp; rsc-&gt;parent) {</a>
+<a name="ln55">        ret = pe_hash_table_lookup(rsc-&gt;parent-&gt;allowed_nodes, node-&gt;details-&gt;id);</a>
+<a name="ln56">    } else if(node != NULL) {</a>
+<a name="ln57">        ret = pe_hash_table_lookup(rsc-&gt;allowed_nodes, node-&gt;details-&gt;id);</a>
+<a name="ln58">    }</a>
+<a name="ln59">    return ret;</a>
+<a name="ln60">}</a>
+<a name="ln61"> </a>
+<a name="ln62">static gboolean</a>
+<a name="ln63">did_fail(const resource_t * rsc)</a>
+<a name="ln64">{</a>
+<a name="ln65">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln66"> </a>
+<a name="ln67">    if (is_set(rsc-&gt;flags, pe_rsc_failed)) {</a>
+<a name="ln68">        return TRUE;</a>
+<a name="ln69">    }</a>
+<a name="ln70"> </a>
+<a name="ln71">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln72">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln73"> </a>
+<a name="ln74">        if (did_fail(child_rsc)) {</a>
+<a name="ln75">            return TRUE;</a>
+<a name="ln76">        }</a>
+<a name="ln77">    }</a>
+<a name="ln78">    return FALSE;</a>
+<a name="ln79">}</a>
+<a name="ln80"> </a>
+<a name="ln81">gint</a>
+<a name="ln82">sort_clone_instance(gconstpointer a, gconstpointer b, gpointer data_set)</a>
+<a name="ln83">{</a>
+<a name="ln84">    int rc = 0;</a>
+<a name="ln85">    node_t *node1 = NULL;</a>
+<a name="ln86">    node_t *node2 = NULL;</a>
+<a name="ln87"> </a>
+<a name="ln88">    gboolean can1 = TRUE;</a>
+<a name="ln89">    gboolean can2 = TRUE;</a>
+<a name="ln90"> </a>
+<a name="ln91">    const resource_t *resource1 = (const resource_t *)a;</a>
+<a name="ln92">    const resource_t *resource2 = (const resource_t *)b;</a>
+<a name="ln93"> </a>
+<a name="ln94">    CRM_ASSERT(resource1 != NULL);</a>
+<a name="ln95">    CRM_ASSERT(resource2 != NULL);</a>
+<a name="ln96"> </a>
+<a name="ln97">    /* allocation order:</a>
+<a name="ln98">     *  - active instances</a>
+<a name="ln99">     *  - instances running on nodes with the least copies</a>
+<a name="ln100">     *  - active instances on nodes that can't support them or are to be fenced</a>
+<a name="ln101">     *  - failed instances</a>
+<a name="ln102">     *  - inactive instances</a>
+<a name="ln103">     */</a>
+<a name="ln104"> </a>
+<a name="ln105">    if (resource1-&gt;running_on &amp;&amp; resource2-&gt;running_on) {</a>
+<a name="ln106">        if (g_list_length(resource1-&gt;running_on) &lt; g_list_length(resource2-&gt;running_on)) {</a>
+<a name="ln107">            crm_trace(&quot;%s &lt; %s: running_on&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln108">            return -1;</a>
+<a name="ln109"> </a>
+<a name="ln110">        } else if (g_list_length(resource1-&gt;running_on) &gt; g_list_length(resource2-&gt;running_on)) {</a>
+<a name="ln111">            crm_trace(&quot;%s &gt; %s: running_on&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln112">            return 1;</a>
+<a name="ln113">        }</a>
+<a name="ln114">    }</a>
+<a name="ln115"> </a>
+<a name="ln116">    if (resource1-&gt;running_on) {</a>
+<a name="ln117">        node1 = resource1-&gt;running_on-&gt;data;</a>
+<a name="ln118">    }</a>
+<a name="ln119">    if (resource2-&gt;running_on) {</a>
+<a name="ln120">        node2 = resource2-&gt;running_on-&gt;data;</a>
+<a name="ln121">    }</a>
+<a name="ln122"> </a>
+<a name="ln123">    if (node1) {</a>
+<a name="ln124">        node_t *match = pe_hash_table_lookup(resource1-&gt;allowed_nodes, node1-&gt;details-&gt;id);</a>
+<a name="ln125"> </a>
+<a name="ln126">        if (match == NULL || match-&gt;weight &lt; 0) {</a>
+<a name="ln127">            crm_trace(&quot;%s: current location is unavailable&quot;, resource1-&gt;id);</a>
+<a name="ln128">            node1 = NULL;</a>
+<a name="ln129">            can1 = FALSE;</a>
+<a name="ln130">        }</a>
+<a name="ln131">    }</a>
+<a name="ln132"> </a>
+<a name="ln133">    if (node2) {</a>
+<a name="ln134">        node_t *match = pe_hash_table_lookup(resource2-&gt;allowed_nodes, node2-&gt;details-&gt;id);</a>
+<a name="ln135"> </a>
+<a name="ln136">        if (match == NULL || match-&gt;weight &lt; 0) {</a>
+<a name="ln137">            crm_trace(&quot;%s: current location is unavailable&quot;, resource2-&gt;id);</a>
+<a name="ln138">            node2 = NULL;</a>
+<a name="ln139">            can2 = FALSE;</a>
+<a name="ln140">        }</a>
+<a name="ln141">    }</a>
+<a name="ln142"> </a>
+<a name="ln143">    if (can1 != can2) {</a>
+<a name="ln144">        if (can1) {</a>
+<a name="ln145">            crm_trace(&quot;%s &lt; %s: availability of current location&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln146">            return -1;</a>
+<a name="ln147">        }</a>
+<a name="ln148">        crm_trace(&quot;%s &gt; %s: availability of current location&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln149">        return 1;</a>
+<a name="ln150">    }</a>
+<a name="ln151"> </a>
+<a name="ln152">    if (resource1-&gt;priority &lt; resource2-&gt;priority) {</a>
+<a name="ln153">        crm_trace(&quot;%s &lt; %s: priority&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln154">        return 1;</a>
+<a name="ln155"> </a>
+<a name="ln156">    } else if (resource1-&gt;priority &gt; resource2-&gt;priority) {</a>
+<a name="ln157">        crm_trace(&quot;%s &gt; %s: priority&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln158">        return -1;</a>
+<a name="ln159">    }</a>
+<a name="ln160"> </a>
+<a name="ln161">    if (node1 == NULL &amp;&amp; node2 == NULL) {</a>
+<a name="ln162">        crm_trace(&quot;%s == %s: not active&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln163">        return 0;</a>
+<a name="ln164">    }</a>
+<a name="ln165"> </a>
+<a name="ln166">    if (node1 != node2) {</a>
+<a name="ln167">        if (node1 == NULL) {</a>
+<a name="ln168">            crm_trace(&quot;%s &gt; %s: active&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln169">            return 1;</a>
+<a name="ln170">        } else if (node2 == NULL) {</a>
+<a name="ln171">            crm_trace(&quot;%s &lt; %s: active&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln172">            return -1;</a>
+<a name="ln173">        }</a>
+<a name="ln174">    }</a>
+<a name="ln175"> </a>
+<a name="ln176">    can1 = can_run_resources(node1);</a>
+<a name="ln177">    can2 = can_run_resources(node2);</a>
+<a name="ln178">    if (can1 != can2) {</a>
+<a name="ln179">        if (can1) {</a>
+<a name="ln180">            crm_trace(&quot;%s &lt; %s: can&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln181">            return -1;</a>
+<a name="ln182">        }</a>
+<a name="ln183">        crm_trace(&quot;%s &gt; %s: can&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln184">        return 1;</a>
+<a name="ln185">    }</a>
+<a name="ln186"> </a>
+<a name="ln187">    node1 = parent_node_instance(resource1, node1);</a>
+<a name="ln188">    node2 = parent_node_instance(resource2, node2);</a>
+<a name="ln189">    if (node1 != NULL &amp;&amp; node2 == NULL) {</a>
+<a name="ln190">        crm_trace(&quot;%s &lt; %s: not allowed&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln191">        return -1;</a>
+<a name="ln192">    } else if (node1 == NULL &amp;&amp; node2 != NULL) {</a>
+<a name="ln193">        crm_trace(&quot;%s &gt; %s: not allowed&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln194">        return 1;</a>
+<a name="ln195">    }</a>
+<a name="ln196"> </a>
+<a name="ln197">    if (node1 == NULL || node2 == NULL) {</a>
+<a name="ln198">        crm_trace(&quot;%s == %s: not allowed&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln199">        return 0;</a>
+<a name="ln200">    }</a>
+<a name="ln201"> </a>
+<a name="ln202">    if (node1-&gt;count &lt; node2-&gt;count) {</a>
+<a name="ln203">        crm_trace(&quot;%s &lt; %s: count&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln204">        return -1;</a>
+<a name="ln205"> </a>
+<a name="ln206">    } else if (node1-&gt;count &gt; node2-&gt;count) {</a>
+<a name="ln207">        crm_trace(&quot;%s &gt; %s: count&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln208">        return 1;</a>
+<a name="ln209">    }</a>
+<a name="ln210"> </a>
+<a name="ln211">    can1 = did_fail(resource1);</a>
+<a name="ln212">    can2 = did_fail(resource2);</a>
+<a name="ln213">    if (can1 != can2) {</a>
+<a name="ln214">        if (can1) {</a>
+<a name="ln215">            crm_trace(&quot;%s &gt; %s: failed&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln216">            return 1;</a>
+<a name="ln217">        }</a>
+<a name="ln218">        crm_trace(&quot;%s &lt; %s: failed&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln219">        return -1;</a>
+<a name="ln220">    }</a>
+<a name="ln221"> </a>
+<a name="ln222">    if (node1 &amp;&amp; node2) {</a>
+<a name="ln223">        int lpc = 0;</a>
+<a name="ln224">        int max = 0;</a>
+<a name="ln225">        node_t *n = NULL;</a>
+<a name="ln226">        GListPtr gIter = NULL;</a>
+<a name="ln227">        GListPtr list1 = NULL;</a>
+<a name="ln228">        GListPtr list2 = NULL;</a>
+<a name="ln229">        GHashTable *hash1 =</a>
+<a name="ln230">            g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, g_hash_destroy_str);</a>
+<a name="ln231">        GHashTable *hash2 =</a>
+<a name="ln232">            g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, g_hash_destroy_str);</a>
+<a name="ln233"> </a>
+<a name="ln234">        n = node_copy(resource1-&gt;running_on-&gt;data);</a>
+<a name="ln235">        g_hash_table_insert(hash1, (gpointer) n-&gt;details-&gt;id, n);</a>
+<a name="ln236"> </a>
+<a name="ln237">        n = node_copy(resource2-&gt;running_on-&gt;data);</a>
+<a name="ln238">        g_hash_table_insert(hash2, (gpointer) n-&gt;details-&gt;id, n);</a>
+<a name="ln239"> </a>
+<a name="ln240">        if(resource1-&gt;parent) {</a>
+<a name="ln241">            for (gIter = resource1-&gt;parent-&gt;rsc_cons; gIter; gIter = gIter-&gt;next) {</a>
+<a name="ln242">                rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln243"> </a>
+<a name="ln244">                crm_trace(&quot;Applying %s to %s&quot;, constraint-&gt;id, resource1-&gt;id);</a>
+<a name="ln245"> </a>
+<a name="ln246">                hash1 = native_merge_weights(constraint-&gt;rsc_rh, resource1-&gt;id, hash1,</a>
+<a name="ln247">                                             constraint-&gt;node_attribute,</a>
+<a name="ln248">                                             (float)constraint-&gt;score / INFINITY, 0);</a>
+<a name="ln249">            }</a>
+<a name="ln250"> </a>
+<a name="ln251">            for (gIter = resource1-&gt;parent-&gt;rsc_cons_lhs; gIter; gIter = gIter-&gt;next) {</a>
+<a name="ln252">                rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln253"> </a>
+<a name="ln254">                crm_trace(&quot;Applying %s to %s&quot;, constraint-&gt;id, resource1-&gt;id);</a>
+<a name="ln255"> </a>
+<a name="ln256">                hash1 = native_merge_weights(constraint-&gt;rsc_lh, resource1-&gt;id, hash1,</a>
+<a name="ln257">                                             constraint-&gt;node_attribute,</a>
+<a name="ln258">                                             (float)constraint-&gt;score / INFINITY, pe_weights_positive);</a>
+<a name="ln259">            }</a>
+<a name="ln260">        }</a>
+<a name="ln261"> </a>
+<a name="ln262">        if(resource2-&gt;parent) {</a>
+<a name="ln263">            for (gIter = resource2-&gt;parent-&gt;rsc_cons; gIter; gIter = gIter-&gt;next) {</a>
+<a name="ln264">                rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln265"> </a>
+<a name="ln266">                crm_trace(&quot;Applying %s to %s&quot;, constraint-&gt;id, resource2-&gt;id);</a>
+<a name="ln267"> </a>
+<a name="ln268">                hash2 = native_merge_weights(constraint-&gt;rsc_rh, resource2-&gt;id, hash2,</a>
+<a name="ln269">                                             constraint-&gt;node_attribute,</a>
+<a name="ln270">                                             (float)constraint-&gt;score / INFINITY, 0);</a>
+<a name="ln271">            }</a>
+<a name="ln272"> </a>
+<a name="ln273">            for (gIter = resource2-&gt;parent-&gt;rsc_cons_lhs; gIter; gIter = gIter-&gt;next) {</a>
+<a name="ln274">                rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln275"> </a>
+<a name="ln276">                crm_trace(&quot;Applying %s to %s&quot;, constraint-&gt;id, resource2-&gt;id);</a>
+<a name="ln277"> </a>
+<a name="ln278">                hash2 = native_merge_weights(constraint-&gt;rsc_lh, resource2-&gt;id, hash2,</a>
+<a name="ln279">                                             constraint-&gt;node_attribute,</a>
+<a name="ln280">                                             (float)constraint-&gt;score / INFINITY, pe_weights_positive);</a>
+<a name="ln281">            }</a>
+<a name="ln282">        }</a>
+<a name="ln283"> </a>
+<a name="ln284">        /* Current location score */</a>
+<a name="ln285">        node1 = g_list_nth_data(resource1-&gt;running_on, 0);</a>
+<a name="ln286">        node1 = g_hash_table_lookup(hash1, node1-&gt;details-&gt;id);</a>
+<a name="ln287"> </a>
+<a name="ln288">        node2 = g_list_nth_data(resource2-&gt;running_on, 0);</a>
+<a name="ln289">        node2 = g_hash_table_lookup(hash2, node2-&gt;details-&gt;id);</a>
+<a name="ln290"> </a>
+<a name="ln291">        if (node1-&gt;weight &lt; node2-&gt;weight) {</a>
+<a name="ln292">            if (node1-&gt;weight &lt; 0) {</a>
+<a name="ln293">                crm_trace(&quot;%s &gt; %s: current score: %d %d&quot;, resource1-&gt;id, resource2-&gt;id, node1-&gt;weight, node2-&gt;weight);</a>
+<a name="ln294">                rc = -1;</a>
+<a name="ln295">                goto out;</a>
+<a name="ln296"> </a>
+<a name="ln297">            } else {</a>
+<a name="ln298">                crm_trace(&quot;%s &lt; %s: current score: %d %d&quot;, resource1-&gt;id, resource2-&gt;id, node1-&gt;weight, node2-&gt;weight);</a>
+<a name="ln299">                rc = 1;</a>
+<a name="ln300">                goto out;</a>
+<a name="ln301">            }</a>
+<a name="ln302"> </a>
+<a name="ln303">        } else if (node1-&gt;weight &gt; node2-&gt;weight) {</a>
+<a name="ln304">            crm_trace(&quot;%s &gt; %s: current score: %d %d&quot;, resource1-&gt;id, resource2-&gt;id, node1-&gt;weight, node2-&gt;weight);</a>
+<a name="ln305">            rc = -1;</a>
+<a name="ln306">            goto out;</a>
+<a name="ln307">        }</a>
+<a name="ln308"> </a>
+<a name="ln309">        /* All location scores */</a>
+<a name="ln310">        list1 = g_hash_table_get_values(hash1);</a>
+<a name="ln311">        list2 = g_hash_table_get_values(hash2);</a>
+<a name="ln312"> </a>
+<a name="ln313">        list1 =</a>
+<a name="ln314">            g_list_sort_with_data(list1, sort_node_weight,</a>
+<a name="ln315">                                  g_list_nth_data(resource1-&gt;running_on, 0));</a>
+<a name="ln316">        list2 =</a>
+<a name="ln317">            g_list_sort_with_data(list2, sort_node_weight,</a>
+<a name="ln318">                                  g_list_nth_data(resource2-&gt;running_on, 0));</a>
+<a name="ln319">        max = g_list_length(list1);</a>
+<a name="ln320">        if (max &lt; g_list_length(list2)) {</a>
+<a name="ln321">            max = g_list_length(list2);</a>
+<a name="ln322">        }</a>
+<a name="ln323"> </a>
+<a name="ln324">        for (; lpc &lt; max; lpc++) {</a>
+<a name="ln325">            node1 = g_list_nth_data(list1, lpc);</a>
+<a name="ln326">            node2 = g_list_nth_data(list2, lpc);</a>
+<a name="ln327">            if (node1 == NULL) {</a>
+<a name="ln328">                crm_trace(&quot;%s &lt; %s: colocated score NULL&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln329">                rc = 1;</a>
+<a name="ln330">                break;</a>
+<a name="ln331"> </a>
+<a name="ln332">            } else if (node2 == NULL) {</a>
+<a name="ln333">                crm_trace(&quot;%s &gt; %s: colocated score NULL&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln334">                rc = -1;</a>
+<a name="ln335">                break;</a>
+<a name="ln336">            }</a>
+<a name="ln337"> </a>
+<a name="ln338">            if (node1-&gt;weight &lt; node2-&gt;weight) {</a>
+<a name="ln339">                crm_trace(&quot;%s &lt; %s: colocated score&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln340">                rc = 1;</a>
+<a name="ln341">                break;</a>
+<a name="ln342"> </a>
+<a name="ln343">            } else if (node1-&gt;weight &gt; node2-&gt;weight) {</a>
+<a name="ln344">                crm_trace(&quot;%s &gt; %s: colocated score&quot;, resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln345">                rc = -1;</a>
+<a name="ln346">                break;</a>
+<a name="ln347">            }</a>
+<a name="ln348">        }</a>
+<a name="ln349"> </a>
+<a name="ln350">        /* Order by reverse uname - same as sort_node_weight() does? */</a>
+<a name="ln351">  out:</a>
+<a name="ln352">        g_hash_table_destroy(hash1);    /* Free mem */</a>
+<a name="ln353">        g_hash_table_destroy(hash2);    /* Free mem */</a>
+<a name="ln354">        g_list_free(list1);</a>
+<a name="ln355">        g_list_free(list2);</a>
+<a name="ln356"> </a>
+<a name="ln357">        if (rc != 0) {</a>
+<a name="ln358">            return rc;</a>
+<a name="ln359">        }</a>
+<a name="ln360">    }</a>
+<a name="ln361"> </a>
+<a name="ln362">    rc = strcmp(resource1-&gt;id, resource2-&gt;id);</a>
+<a name="ln363">    crm_trace(&quot;%s %c %s: default&quot;, resource1-&gt;id, rc &lt; 0 ? '&lt;' : '&gt;', resource2-&gt;id);</a>
+<a name="ln364">    return rc;</a>
+<a name="ln365">}</a>
+<a name="ln366"> </a>
+<a name="ln367">static node_t *</a>
+<a name="ln368">can_run_instance(resource_t * rsc, node_t * node, int limit)</a>
+<a name="ln369">{</a>
+<a name="ln370">    node_t *local_node = NULL;</a>
+<a name="ln371"> </a>
+<a name="ln372">    if (node == NULL &amp;&amp; rsc-&gt;allowed_nodes) {</a>
+<a name="ln373">        GHashTableIter iter;</a>
+<a name="ln374">        g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln375">        while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;local_node)) {</a>
+<a name="ln376">            can_run_instance(rsc, local_node, limit);</a>
+<a name="ln377">        }</a>
+<a name="ln378">        return NULL;</a>
+<a name="ln379">    }</a>
+<a name="ln380"> </a>
+<a name="ln381">    if (can_run_resources(node) == FALSE) {</a>
+<a name="ln382">        goto bail;</a>
+<a name="ln383"> </a>
+<a name="ln384">    } else if (is_set(rsc-&gt;flags, pe_rsc_orphan)) {</a>
+<a name="ln385">        goto bail;</a>
+<a name="ln386">    }</a>
+<a name="ln387"> </a>
+<a name="ln388">    local_node = parent_node_instance(rsc, node);</a>
+<a name="ln389"> </a>
+<a name="ln390">    if (local_node == NULL) {</a>
+<a name="ln391">        crm_warn(&quot;%s cannot run on %s: node not allowed&quot;, rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln392">        goto bail;</a>
+<a name="ln393"> </a>
+<a name="ln394">    } else if (local_node-&gt;weight &lt; 0) {</a>
+<a name="ln395">        common_update_score(rsc, node-&gt;details-&gt;id, local_node-&gt;weight);</a>
+<a name="ln396">        pe_rsc_trace(rsc, &quot;%s cannot run on %s: Parent node weight doesn't allow it.&quot;,</a>
+<a name="ln397">                     rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln398"> </a>
+<a name="ln399">    } else if (local_node-&gt;count &lt; limit) {</a>
+<a name="ln400">        pe_rsc_trace(rsc, &quot;%s can run on %s: %d&quot;, rsc-&gt;id, node-&gt;details-&gt;uname, local_node-&gt;count);</a>
+<a name="ln401">        return local_node;</a>
+<a name="ln402"> </a>
+<a name="ln403">    } else {</a>
+<a name="ln404">        pe_rsc_trace(rsc, &quot;%s cannot run on %s: node full (%d &gt;= %d)&quot;,</a>
+<a name="ln405">                     rsc-&gt;id, node-&gt;details-&gt;uname, local_node-&gt;count, limit);</a>
+<a name="ln406">    }</a>
+<a name="ln407"> </a>
+<a name="ln408">  bail:</a>
+<a name="ln409">    if (node) {</a>
+<a name="ln410">        common_update_score(rsc, node-&gt;details-&gt;id, -INFINITY);</a>
+<a name="ln411">    }</a>
+<a name="ln412">    return NULL;</a>
+<a name="ln413">}</a>
+<a name="ln414"> </a>
+<a name="ln415">static node_t *</a>
+<a name="ln416">color_instance(resource_t * rsc, node_t * prefer, gboolean all_coloc, int limit, pe_working_set_t * data_set)</a>
+<a name="ln417">{</a>
+<a name="ln418">    node_t *chosen = NULL;</a>
+<a name="ln419">    GHashTable *backup = NULL;</a>
+<a name="ln420"> </a>
+<a name="ln421">    CRM_ASSERT(rsc);</a>
+<a name="ln422">    pe_rsc_trace(rsc, &quot;Processing %s %d %s&quot;, rsc-&gt;id, all_coloc, prefer?prefer-&gt;details-&gt;uname:&quot;none&quot;);</a>
+<a name="ln423"> </a>
+<a name="ln424">    if (is_not_set(rsc-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln425">        return rsc-&gt;fns-&gt;location(rsc, NULL, FALSE);</a>
+<a name="ln426"> </a>
+<a name="ln427">    } else if (is_set(rsc-&gt;flags, pe_rsc_allocating)) {</a>
+<a name="ln428">        pe_rsc_debug(rsc, &quot;Dependency loop detected involving %s&quot;, rsc-&gt;id);</a>
+<a name="ln429">        return NULL;</a>
+<a name="ln430">    }</a>
+<a name="ln431"> </a>
+<a name="ln432">    /* Only include positive colocation preferences of dependent resources</a>
+<a name="ln433">     * if not every node will get a copy of the clone</a>
+<a name="ln434">     */</a>
+<a name="ln435">    append_parent_colocation(rsc-&gt;parent, rsc, all_coloc);</a>
+<a name="ln436"> </a>
+<a name="ln437">    if (prefer) {</a>
+<a name="ln438">        node_t *local_prefer = g_hash_table_lookup(rsc-&gt;allowed_nodes, prefer-&gt;details-&gt;id);</a>
+<a name="ln439"> </a>
+<a name="ln440">        if (local_prefer == NULL || local_prefer-&gt;weight &lt; 0) {</a>
+<a name="ln441">            pe_rsc_trace(rsc, &quot;Not pre-allocating %s to %s - unavailable&quot;, rsc-&gt;id,</a>
+<a name="ln442">                         prefer-&gt;details-&gt;uname);</a>
+<a name="ln443">            return NULL;</a>
+<a name="ln444">        }</a>
+<a name="ln445">    }</a>
+<a name="ln446"> </a>
+<a name="ln447">    can_run_instance(rsc, NULL, limit);</a>
+<a name="ln448"> </a>
+<a name="ln449">    backup = node_hash_dup(rsc-&gt;allowed_nodes);</a>
+<a name="ln450">    chosen = rsc-&gt;cmds-&gt;allocate(rsc, prefer, data_set);</a>
+<a name="ln451">    if (chosen) {</a>
+<a name="ln452">        node_t *local_node = parent_node_instance(rsc, chosen);</a>
+<a name="ln453">        if (prefer &amp;&amp; chosen &amp;&amp; chosen-&gt;details != prefer-&gt;details) {</a>
+<a name="ln454">            crm_notice(&quot;Pre-allocation failed: got %s instead of %s&quot;,</a>
+<a name="ln455">                       chosen-&gt;details-&gt;uname, prefer-&gt;details-&gt;uname);</a>
+<a name="ln456">            g_hash_table_destroy(rsc-&gt;allowed_nodes);</a>
+<a name="ln457">            rsc-&gt;allowed_nodes = backup;</a>
+<a name="ln458">            native_deallocate(rsc);</a>
+<a name="ln459">            chosen = NULL;</a>
+<a name="ln460">            backup = NULL;</a>
+<a name="ln461"> </a>
+<a name="ln462">        } else if (local_node) {</a>
+<a name="ln463">            local_node-&gt;count++;</a>
+<a name="ln464"> </a>
+<a name="ln465">        } else if (is_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln466">            /* what to do? we can't enforce per-node limits in this case */</a>
+<a name="ln467">            crm_config_err(&quot;%s not found in %s (list=%d)&quot;,</a>
+<a name="ln468">                           chosen-&gt;details-&gt;id, rsc-&gt;parent-&gt;id,</a>
+<a name="ln469">                           g_hash_table_size(rsc-&gt;parent-&gt;allowed_nodes));</a>
+<a name="ln470">        }</a>
+<a name="ln471">    }</a>
+<a name="ln472"> </a>
+<a name="ln473">    if(backup) {</a>
+<a name="ln474">        g_hash_table_destroy(backup);</a>
+<a name="ln475">    }</a>
+<a name="ln476">    return chosen;</a>
+<a name="ln477">}</a>
+<a name="ln478"> </a>
+<a name="ln479">static void</a>
+<a name="ln480">append_parent_colocation(resource_t * rsc, resource_t * child, gboolean all)</a>
+<a name="ln481">{</a>
+<a name="ln482"> </a>
+<a name="ln483">    GListPtr gIter = NULL;</a>
+<a name="ln484"> </a>
+<a name="ln485">    gIter = rsc-&gt;rsc_cons;</a>
+<a name="ln486">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln487">        rsc_colocation_t *cons = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln488"> </a>
+<a name="ln489">        if (all || cons-&gt;score &lt; 0 || cons-&gt;score == INFINITY) {</a>
+<a name="ln490">            child-&gt;rsc_cons = g_list_prepend(child-&gt;rsc_cons, cons);</a>
+<a name="ln491">        }</a>
+<a name="ln492">    }</a>
+<a name="ln493"> </a>
+<a name="ln494">    gIter = rsc-&gt;rsc_cons_lhs;</a>
+<a name="ln495">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln496">        rsc_colocation_t *cons = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln497"> </a>
+<a name="ln498">        if (all || cons-&gt;score &lt; 0) {</a>
+<a name="ln499">            child-&gt;rsc_cons_lhs = g_list_prepend(child-&gt;rsc_cons_lhs, cons);</a>
+<a name="ln500">        }</a>
+<a name="ln501">    }</a>
+<a name="ln502">}</a>
+<a name="ln503"> </a>
+<a name="ln504"> </a>
+<a name="ln505">void</a>
+<a name="ln506">distribute_children(resource_t *rsc, GListPtr children, GListPtr nodes,</a>
+<a name="ln507">                    int max, int per_host_max, pe_working_set_t * data_set);</a>
+<a name="ln508"> </a>
+<a name="ln509">void</a>
+<a name="ln510">distribute_children(resource_t *rsc, GListPtr children, GListPtr nodes,</a>
+<a name="ln511">                    int max, int per_host_max, pe_working_set_t * data_set) </a>
+<a name="ln512">{</a>
+<a name="ln513">    int loop_max = 0;</a>
+<a name="ln514">    int allocated = 0;</a>
+<a name="ln515">    int available_nodes = 0;</a>
+<a name="ln516"> </a>
+<a name="ln517">    /* count now tracks the number of clones currently allocated */</a>
+<a name="ln518">    for(GListPtr nIter = nodes; nIter != NULL; nIter = nIter-&gt;next) {</a>
+<a name="ln519">        pe_node_t *node = nIter-&gt;data;</a>
+<a name="ln520"> </a>
+<a name="ln521">        node-&gt;count = 0;</a>
+<a name="ln522">        if (can_run_resources(node)) {</a>
+<a name="ln523">            available_nodes++;</a>
+<a name="ln524">        }</a>
+<a name="ln525">    }</a>
+<a name="ln526"> </a>
+<a name="ln527">    if(available_nodes) {</a>
+<a name="ln528">        loop_max = max / available_nodes;</a>
+<a name="ln529">    }</a>
+<a name="ln530">    if (loop_max &lt; 1) {</a>
+<a name="ln531">        loop_max = 1;</a>
+<a name="ln532">    }</a>
+<a name="ln533"> </a>
+<a name="ln534">    pe_rsc_debug(rsc, &quot;Allocating %d %s instances to a possible %d nodes (%d per host, %d optimal)&quot;,</a>
+<a name="ln535">                 max, rsc-&gt;id, available_nodes, per_host_max, loop_max);</a>
+<a name="ln536"> </a>
+<a name="ln537">    /* Pre-allocate as many instances as we can to their current location */</a>
+<a name="ln538">    for (GListPtr gIter = children; gIter != NULL &amp;&amp; allocated &lt; max; gIter = gIter-&gt;next) {</a>
+<a name="ln539">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln540"> </a>
+<a name="ln541">        if (child-&gt;running_on &amp;&amp; is_set(child-&gt;flags, pe_rsc_provisional)</a>
+<a name="ln542">            &amp;&amp; is_not_set(child-&gt;flags, pe_rsc_failed)) {</a>
+<a name="ln543">            node_t *child_node = child-&gt;running_on-&gt;data;</a>
+<a name="ln544">            node_t *local_node = parent_node_instance(child, child-&gt;running_on-&gt;data);</a>
+<a name="ln545"> </a>
+<a name="ln546">            pe_rsc_trace(rsc, &quot;Pre-allocating %s (%d remaining)&quot;, child-&gt;id, max - allocated);</a>
+<a name="ln547">            pe_rsc_trace(rsc, &quot;Foo %s to %s %d %d&quot;, child-&gt;id,</a>
+<a name="ln548">                         child_node-&gt;details-&gt;uname, max, available_nodes);</a>
+<a name="ln549"> </a>
+<a name="ln550">            if (can_run_resources(child_node) == FALSE || child_node-&gt;weight &lt; 0) {</a>
+<a name="ln551">                pe_rsc_trace(rsc, &quot;Not Pre-allocating %s&quot;, child_node-&gt;details-&gt;uname);</a>
+<a name="ln552"> </a>
+<a name="ln553">            } else if(local_node &amp;&amp; local_node-&gt;count &gt;= loop_max) {</a>
+<a name="ln554">                pe_rsc_trace(rsc, &quot;Deferring allocation of %s&quot;, child_node-&gt;details-&gt;uname);</a>
+<a name="ln555"> </a>
+<a name="ln556">            } else if (color_instance(child, child_node, max &lt; available_nodes, per_host_max, data_set)) {</a>
+<a name="ln557">                pe_rsc_trace(rsc, &quot;Pre-allocated %s to %s&quot;, child-&gt;id,</a>
+<a name="ln558">                             child_node-&gt;details-&gt;uname);</a>
+<a name="ln559">                allocated++;</a>
+<a name="ln560">            }</a>
+<a name="ln561">        }</a>
+<a name="ln562">    }</a>
+<a name="ln563"> </a>
+<a name="ln564">    pe_rsc_trace(rsc, &quot;Done pre-allocating (%d of %d)&quot;, allocated, max);</a>
+<a name="ln565"> </a>
+<a name="ln566">    for (GListPtr gIter = children; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln567">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln568"> </a>
+<a name="ln569">        if (g_list_length(child-&gt;running_on) &gt; 0) {</a>
+<a name="ln570">            node_t *child_node = child-&gt;running_on-&gt;data;</a>
+<a name="ln571">            node_t *local_node = parent_node_instance(child, child-&gt;running_on-&gt;data);</a>
+<a name="ln572"> </a>
+<a name="ln573">            if (local_node == NULL) {</a>
+<a name="ln574">                crm_err(&quot;%s is running on %s which isn't allowed&quot;,</a>
+<a name="ln575">                        child-&gt;id, child_node-&gt;details-&gt;uname);</a>
+<a name="ln576">            }</a>
+<a name="ln577">        }</a>
+<a name="ln578"> </a>
+<a name="ln579">        if (is_not_set(child-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln580">        } else if (allocated &gt;= max) {</a>
+<a name="ln581">            pe_rsc_debug(rsc, &quot;Child %s not allocated - limit reached %d %d&quot;, child-&gt;id, allocated, max);</a>
+<a name="ln582">            resource_location(child, NULL, -INFINITY, &quot;clone_color:limit_reached&quot;, data_set);</a>
+<a name="ln583">        } else {</a>
+<a name="ln584">            if (color_instance(child, NULL, max &lt; available_nodes, per_host_max, data_set)) {</a>
+<a name="ln585">                allocated++;</a>
+<a name="ln586">            }</a>
+<a name="ln587">        }</a>
+<a name="ln588">    }</a>
+<a name="ln589"> </a>
+<a name="ln590">    pe_rsc_debug(rsc, &quot;Allocated %d %s instances of a possible %d&quot;,</a>
+<a name="ln591">                 allocated, rsc-&gt;id, max);</a>
+<a name="ln592">}</a>
+<a name="ln593"> </a>
+<a name="ln594"> </a>
+<a name="ln595">node_t *</a>
+<a name="ln596">clone_color(resource_t * rsc, node_t * prefer, pe_working_set_t * data_set)</a>
+<a name="ln597">{</a>
+<a name="ln598">    GListPtr nodes = NULL;</a>
+<a name="ln599"> </a>
+<a name="ln600">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln601"> </a>
+<a name="ln602">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln603"> </a>
+<a name="ln604">    if (is_not_set(rsc-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln605">        return NULL;</a>
+<a name="ln606"> </a>
+<a name="ln607">    } else if (is_set(rsc-&gt;flags, pe_rsc_allocating)) {</a>
+<a name="ln608">        pe_rsc_debug(rsc, &quot;Dependency loop detected involving %s&quot;, rsc-&gt;id);</a>
+<a name="ln609">        return NULL;</a>
+<a name="ln610">    }</a>
+<a name="ln611"> </a>
+<a name="ln612">    set_bit(rsc-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln613">    pe_rsc_trace(rsc, &quot;Processing %s&quot;, rsc-&gt;id);</a>
+<a name="ln614"> </a>
+<a name="ln615">    /* this information is used by sort_clone_instance() when deciding in which </a>
+<a name="ln616">     * order to allocate clone instances</a>
+<a name="ln617">     */</a>
+<a name="ln618">    for (GListPtr gIter = rsc-&gt;rsc_cons; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln619">        rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln620"> </a>
+<a name="ln621">        pe_rsc_trace(rsc, &quot;%s: Coloring %s first&quot;, rsc-&gt;id, constraint-&gt;rsc_rh-&gt;id);</a>
+<a name="ln622">        constraint-&gt;rsc_rh-&gt;cmds-&gt;allocate(constraint-&gt;rsc_rh, prefer, data_set);</a>
+<a name="ln623">    }</a>
+<a name="ln624"> </a>
+<a name="ln625">    for (GListPtr gIter = rsc-&gt;rsc_cons_lhs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln626">        rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln627"> </a>
+<a name="ln628">        rsc-&gt;allowed_nodes =</a>
+<a name="ln629">            constraint-&gt;rsc_lh-&gt;cmds-&gt;merge_weights(constraint-&gt;rsc_lh, rsc-&gt;id, rsc-&gt;allowed_nodes,</a>
+<a name="ln630">                                                    constraint-&gt;node_attribute,</a>
+<a name="ln631">                                                    (float)constraint-&gt;score / INFINITY,</a>
+<a name="ln632">                                                    (pe_weights_rollback | pe_weights_positive));</a>
+<a name="ln633">    }</a>
+<a name="ln634"> </a>
+<a name="ln635">    dump_node_scores(show_scores ? 0 : scores_log_level, rsc, __FUNCTION__, rsc-&gt;allowed_nodes);</a>
+<a name="ln636"> </a>
+<a name="ln637">    nodes = g_hash_table_get_values(rsc-&gt;allowed_nodes);</a>
+<a name="ln638">    nodes = g_list_sort_with_data(nodes, sort_node_weight, NULL);</a>
+<a name="ln639">    rsc-&gt;children = g_list_sort_with_data(rsc-&gt;children, sort_clone_instance, data_set);</a>
+<a name="ln640">    distribute_children(rsc, rsc-&gt;children, nodes, clone_data-&gt;clone_max, clone_data-&gt;clone_node_max, data_set);</a>
+<a name="ln641">    g_list_free(nodes);</a>
+<a name="ln642"> </a>
+<a name="ln643">    clear_bit(rsc-&gt;flags, pe_rsc_provisional);</a>
+<a name="ln644">    clear_bit(rsc-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln645"> </a>
+<a name="ln646">    pe_rsc_trace(rsc, &quot;Done allocating %s&quot;, rsc-&gt;id);</a>
+<a name="ln647">    return NULL;</a>
+<a name="ln648">}</a>
+<a name="ln649"> </a>
+<a name="ln650">static void</a>
+<a name="ln651">clone_update_pseudo_status(resource_t * rsc, gboolean * stopping, gboolean * starting,</a>
+<a name="ln652">                           gboolean * active)</a>
+<a name="ln653">{</a>
+<a name="ln654">    GListPtr gIter = NULL;</a>
+<a name="ln655"> </a>
+<a name="ln656">    if (rsc-&gt;children) {</a>
+<a name="ln657"> </a>
+<a name="ln658">        gIter = rsc-&gt;children;</a>
+<a name="ln659">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln660">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln661"> </a>
+<a name="ln662">            clone_update_pseudo_status(child, stopping, starting, active);</a>
+<a name="ln663">        }</a>
+<a name="ln664"> </a>
+<a name="ln665">        return;</a>
+<a name="ln666">    }</a>
+<a name="ln667"> </a>
+<a name="ln668">    CRM_ASSERT(active != NULL);</a>
+<a name="ln669">    CRM_ASSERT(starting != NULL);</a>
+<a name="ln670">    CRM_ASSERT(stopping != NULL);</a>
+<a name="ln671"> </a>
+<a name="ln672">    if (rsc-&gt;running_on) {</a>
+<a name="ln673">        *active = TRUE;</a>
+<a name="ln674">    }</a>
+<a name="ln675"> </a>
+<a name="ln676">    gIter = rsc-&gt;actions;</a>
+<a name="ln677">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln678">        action_t *action = (action_t *) gIter-&gt;data;</a>
+<a name="ln679"> </a>
+<a name="ln680">        if (*starting &amp;&amp; *stopping) {</a>
+<a name="ln681">            return;</a>
+<a name="ln682"> </a>
+<a name="ln683">        } else if (is_set(action-&gt;flags, pe_action_optional)) {</a>
+<a name="ln684">            pe_rsc_trace(rsc, &quot;Skipping optional: %s&quot;, action-&gt;uuid);</a>
+<a name="ln685">            continue;</a>
+<a name="ln686"> </a>
+<a name="ln687">        } else if (is_set(action-&gt;flags, pe_action_pseudo) == FALSE</a>
+<a name="ln688">                   &amp;&amp; is_set(action-&gt;flags, pe_action_runnable) == FALSE) {</a>
+<a name="ln689">            pe_rsc_trace(rsc, &quot;Skipping unrunnable: %s&quot;, action-&gt;uuid);</a>
+<a name="ln690">            continue;</a>
+<a name="ln691"> </a>
+<a name="ln692">        } else if (safe_str_eq(RSC_STOP, action-&gt;task)) {</a>
+<a name="ln693">            pe_rsc_trace(rsc, &quot;Stopping due to: %s&quot;, action-&gt;uuid);</a>
+<a name="ln694">            *stopping = TRUE;</a>
+<a name="ln695"> </a>
+<a name="ln696">        } else if (safe_str_eq(RSC_START, action-&gt;task)) {</a>
+<a name="ln697">            if (is_set(action-&gt;flags, pe_action_runnable) == FALSE) {</a>
+<a name="ln698">                pe_rsc_trace(rsc, &quot;Skipping pseudo-op: %s run=%d, pseudo=%d&quot;,</a>
+<a name="ln699">                             action-&gt;uuid, is_set(action-&gt;flags, pe_action_runnable),</a>
+<a name="ln700">                             is_set(action-&gt;flags, pe_action_pseudo));</a>
+<a name="ln701">            } else {</a>
+<a name="ln702">                pe_rsc_trace(rsc, &quot;Starting due to: %s&quot;, action-&gt;uuid);</a>
+<a name="ln703">                pe_rsc_trace(rsc, &quot;%s run=%d, pseudo=%d&quot;,</a>
+<a name="ln704">                             action-&gt;uuid, is_set(action-&gt;flags, pe_action_runnable),</a>
+<a name="ln705">                             is_set(action-&gt;flags, pe_action_pseudo));</a>
+<a name="ln706">                *starting = TRUE;</a>
+<a name="ln707">            }</a>
+<a name="ln708">        }</a>
+<a name="ln709">    }</a>
+<a name="ln710">}</a>
+<a name="ln711"> </a>
+<a name="ln712">static action_t *</a>
+<a name="ln713">find_rsc_action(resource_t * rsc, const char *key, gboolean active_only, GListPtr * list)</a>
+<a name="ln714">{</a>
+<a name="ln715">    action_t *match = NULL;</a>
+<a name="ln716">    GListPtr possible = NULL;</a>
+<a name="ln717">    GListPtr active = NULL;</a>
+<a name="ln718"> </a>
+<a name="ln719">    possible = find_actions(rsc-&gt;actions, key, NULL);</a>
+<a name="ln720"> </a>
+<a name="ln721">    if (active_only) {</a>
+<a name="ln722">        GListPtr gIter = possible;</a>
+<a name="ln723"> </a>
+<a name="ln724">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln725">            action_t *op = (action_t *) gIter-&gt;data;</a>
+<a name="ln726"> </a>
+<a name="ln727">            if (is_set(op-&gt;flags, pe_action_optional) == FALSE) {</a>
+<a name="ln728">                active = g_list_prepend(active, op);</a>
+<a name="ln729">            }</a>
+<a name="ln730">        }</a>
+<a name="ln731"> </a>
+<a name="ln732">        if (active &amp;&amp; g_list_length(active) == 1) {</a>
+<a name="ln733">            match = g_list_nth_data(active, 0);</a>
+<a name="ln734">        }</a>
+<a name="ln735"> </a>
+<a name="ln736">        if (list) {</a>
+<a name="ln737">            *list = active;</a>
+<a name="ln738">            active = NULL;</a>
+<a name="ln739">        }</a>
+<a name="ln740"> </a>
+<a name="ln741">    } else if (possible &amp;&amp; g_list_length(possible) == 1) {</a>
+<a name="ln742">        match = g_list_nth_data(possible, 0);</a>
+<a name="ln743"> </a>
+<a name="ln744">    }</a>
+<a name="ln745">    if (list) {</a>
+<a name="ln746">        *list = possible;</a>
+<a name="ln747">        possible = NULL;</a>
+<a name="ln748">    }</a>
+<a name="ln749"> </a>
+<a name="ln750">    if (possible) {</a>
+<a name="ln751">        g_list_free(possible);</a>
+<a name="ln752">    }</a>
+<a name="ln753">    if (active) {</a>
+<a name="ln754">        g_list_free(active);</a>
+<a name="ln755">    }</a>
+<a name="ln756"> </a>
+<a name="ln757">    return match;</a>
+<a name="ln758">}</a>
+<a name="ln759"> </a>
+<a name="ln760">static void</a>
+<a name="ln761">child_ordering_constraints(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln762">{</a>
+<a name="ln763">    char *key = NULL;</a>
+<a name="ln764">    action_t *stop = NULL;</a>
+<a name="ln765">    action_t *start = NULL;</a>
+<a name="ln766">    action_t *last_stop = NULL;</a>
+<a name="ln767">    action_t *last_start = NULL;</a>
+<a name="ln768">    GListPtr gIter = NULL;</a>
+<a name="ln769">    gboolean active_only = TRUE;        /* change to false to get the old behavior */</a>
+<a name="ln770">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln771"> </a>
+<a name="ln772">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln773"> </a>
+<a name="ln774">    if (clone_data-&gt;ordered == FALSE) {</a>
+<a name="ln775">        return;</a>
+<a name="ln776">    }</a>
+<a name="ln777">    /* we have to maintain a consistent sorted child list when building order constraints */</a>
+<a name="ln778">    rsc-&gt;children = g_list_sort(rsc-&gt;children, sort_rsc_id);</a>
+<a name="ln779"> </a>
+<a name="ln780">    for (gIter = rsc-&gt;children; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln781">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln782"> </a>
+<a name="ln783">        key = stop_key(child);</a>
+<a name="ln784">        stop = find_rsc_action(child, key, active_only, NULL);</a>
+<a name="ln785">        free(key);</a>
+<a name="ln786"> </a>
+<a name="ln787">        key = start_key(child);</a>
+<a name="ln788">        start = find_rsc_action(child, key, active_only, NULL);</a>
+<a name="ln789">        free(key);</a>
+<a name="ln790"> </a>
+<a name="ln791">        if (stop) {</a>
+<a name="ln792">            if (last_stop) {</a>
+<a name="ln793">                /* child/child relative stop */</a>
+<a name="ln794">                order_actions(stop, last_stop, pe_order_optional);</a>
+<a name="ln795">            }</a>
+<a name="ln796">            last_stop = stop;</a>
+<a name="ln797">        }</a>
+<a name="ln798"> </a>
+<a name="ln799">        if (start) {</a>
+<a name="ln800">            if (last_start) {</a>
+<a name="ln801">                /* child/child relative start */</a>
+<a name="ln802">                order_actions(last_start, start, pe_order_optional);</a>
+<a name="ln803">            }</a>
+<a name="ln804">            last_start = start;</a>
+<a name="ln805">        }</a>
+<a name="ln806">    }</a>
+<a name="ln807">}</a>
+<a name="ln808"> </a>
+<a name="ln809">void</a>
+<a name="ln810">clone_create_actions(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln811">{</a>
+<a name="ln812">    gboolean child_active = FALSE;</a>
+<a name="ln813">    gboolean child_starting = FALSE;</a>
+<a name="ln814">    gboolean child_stopping = FALSE;</a>
+<a name="ln815">    gboolean allow_dependent_migrations = TRUE;</a>
+<a name="ln816"> </a>
+<a name="ln817">    action_t *stop = NULL;</a>
+<a name="ln818">    action_t *stopped = NULL;</a>
+<a name="ln819"> </a>
+<a name="ln820">    action_t *start = NULL;</a>
+<a name="ln821">    action_t *started = NULL;</a>
+<a name="ln822"> </a>
+<a name="ln823">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln824">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln825"> </a>
+<a name="ln826">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln827"> </a>
+<a name="ln828">    pe_rsc_trace(rsc, &quot;Creating actions for %s&quot;, rsc-&gt;id);</a>
+<a name="ln829"> </a>
+<a name="ln830">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln831">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln832">        gboolean starting = FALSE;</a>
+<a name="ln833">        gboolean stopping = FALSE;</a>
+<a name="ln834"> </a>
+<a name="ln835">        child_rsc-&gt;cmds-&gt;create_actions(child_rsc, data_set);</a>
+<a name="ln836">        clone_update_pseudo_status(child_rsc, &amp;stopping, &amp;starting, &amp;child_active);</a>
+<a name="ln837">        if (stopping &amp;&amp; starting) {</a>
+<a name="ln838">            allow_dependent_migrations = FALSE;</a>
+<a name="ln839">        }</a>
+<a name="ln840"> </a>
+<a name="ln841">        child_stopping |= stopping;</a>
+<a name="ln842">        child_starting |= starting;</a>
+<a name="ln843">    }</a>
+<a name="ln844"> </a>
+<a name="ln845">    /* start */</a>
+<a name="ln846">    start = start_action(rsc, NULL, !child_starting);</a>
+<a name="ln847">    started = custom_action(rsc, started_key(rsc),</a>
+<a name="ln848">                            RSC_STARTED, NULL, !child_starting, TRUE, data_set);</a>
+<a name="ln849"> </a>
+<a name="ln850">    update_action_flags(start, pe_action_pseudo | pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln851">    update_action_flags(started, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln852">    started-&gt;priority = INFINITY;</a>
+<a name="ln853"> </a>
+<a name="ln854">    if (child_active || child_starting) {</a>
+<a name="ln855">        update_action_flags(started, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln856">    }</a>
+<a name="ln857"> </a>
+<a name="ln858">    child_ordering_constraints(rsc, data_set);</a>
+<a name="ln859">    if (clone_data-&gt;start_notify == NULL) {</a>
+<a name="ln860">        clone_data-&gt;start_notify =</a>
+<a name="ln861">            create_notification_boundaries(rsc, RSC_START, start, started, data_set);</a>
+<a name="ln862">    }</a>
+<a name="ln863"> </a>
+<a name="ln864">    /* stop */</a>
+<a name="ln865">    stop = stop_action(rsc, NULL, !child_stopping);</a>
+<a name="ln866">    stopped = custom_action(rsc, stopped_key(rsc),</a>
+<a name="ln867">                            RSC_STOPPED, NULL, !child_stopping, TRUE, data_set);</a>
+<a name="ln868"> </a>
+<a name="ln869">    stopped-&gt;priority = INFINITY;</a>
+<a name="ln870">    update_action_flags(stop, pe_action_pseudo | pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln871">    if (allow_dependent_migrations) {</a>
+<a name="ln872">        update_action_flags(stop, pe_action_migrate_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln873">    }</a>
+<a name="ln874">    update_action_flags(stopped, pe_action_pseudo | pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln875">    if (clone_data-&gt;stop_notify == NULL) {</a>
+<a name="ln876">        clone_data-&gt;stop_notify =</a>
+<a name="ln877">            create_notification_boundaries(rsc, RSC_STOP, stop, stopped, data_set);</a>
+<a name="ln878"> </a>
+<a name="ln879">        if (clone_data-&gt;stop_notify &amp;&amp; clone_data-&gt;start_notify) {</a>
+<a name="ln880">            order_actions(clone_data-&gt;stop_notify-&gt;post_done, clone_data-&gt;start_notify-&gt;pre,</a>
+<a name="ln881">                          pe_order_optional);</a>
+<a name="ln882">        }</a>
+<a name="ln883">    }</a>
+<a name="ln884">}</a>
+<a name="ln885"> </a>
+<a name="ln886">void</a>
+<a name="ln887">clone_internal_constraints(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln888">{</a>
+<a name="ln889">    resource_t *last_rsc = NULL;</a>
+<a name="ln890">    GListPtr gIter;</a>
+<a name="ln891">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln892"> </a>
+<a name="ln893">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln894"> </a>
+<a name="ln895">    pe_rsc_trace(rsc, &quot;Internal constraints for %s&quot;, rsc-&gt;id);</a>
+<a name="ln896">    new_rsc_order(rsc, RSC_STOPPED, rsc, RSC_START, pe_order_optional, data_set);</a>
+<a name="ln897">    new_rsc_order(rsc, RSC_START, rsc, RSC_STARTED, pe_order_runnable_left, data_set);</a>
+<a name="ln898">    new_rsc_order(rsc, RSC_STOP, rsc, RSC_STOPPED, pe_order_runnable_left, data_set);</a>
+<a name="ln899"> </a>
+<a name="ln900">    if (rsc-&gt;variant == pe_master) {</a>
+<a name="ln901">        new_rsc_order(rsc, RSC_DEMOTED, rsc, RSC_STOP, pe_order_optional, data_set);</a>
+<a name="ln902">        new_rsc_order(rsc, RSC_STARTED, rsc, RSC_PROMOTE, pe_order_runnable_left, data_set);</a>
+<a name="ln903">    }</a>
+<a name="ln904"> </a>
+<a name="ln905">    if (clone_data-&gt;ordered) {</a>
+<a name="ln906">        /* we have to maintain a consistent sorted child list when building order constraints */</a>
+<a name="ln907">        rsc-&gt;children = g_list_sort(rsc-&gt;children, sort_rsc_id);</a>
+<a name="ln908">    }</a>
+<a name="ln909">    for (gIter = rsc-&gt;children; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln910">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln911"> </a>
+<a name="ln912">        child_rsc-&gt;cmds-&gt;internal_constraints(child_rsc, data_set);</a>
+<a name="ln913"> </a>
+<a name="ln914">        order_start_start(rsc, child_rsc, pe_order_runnable_left | pe_order_implies_first_printed);</a>
+<a name="ln915">        new_rsc_order(child_rsc, RSC_START, rsc, RSC_STARTED, pe_order_implies_then_printed,</a>
+<a name="ln916">                      data_set);</a>
+<a name="ln917">        if (clone_data-&gt;ordered &amp;&amp; last_rsc) {</a>
+<a name="ln918">            order_start_start(last_rsc, child_rsc, pe_order_optional);</a>
+<a name="ln919">        }</a>
+<a name="ln920"> </a>
+<a name="ln921">        order_stop_stop(rsc, child_rsc, pe_order_implies_first_printed);</a>
+<a name="ln922">        new_rsc_order(child_rsc, RSC_STOP, rsc, RSC_STOPPED, pe_order_implies_then_printed,</a>
+<a name="ln923">                      data_set);</a>
+<a name="ln924">        if (clone_data-&gt;ordered &amp;&amp; last_rsc) {</a>
+<a name="ln925">            order_stop_stop(child_rsc, last_rsc, pe_order_optional);</a>
+<a name="ln926">        }</a>
+<a name="ln927"> </a>
+<a name="ln928">        last_rsc = child_rsc;</a>
+<a name="ln929">    }</a>
+<a name="ln930">}</a>
+<a name="ln931"> </a>
+<a name="ln932">static bool</a>
+<a name="ln933">assign_node(resource_t * rsc, node_t * node, gboolean force)</a>
+<a name="ln934">{</a>
+<a name="ln935">    bool changed = FALSE;</a>
+<a name="ln936"> </a>
+<a name="ln937">    if (rsc-&gt;children) {</a>
+<a name="ln938"> </a>
+<a name="ln939">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln940"> </a>
+<a name="ln941">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln942">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln943"> </a>
+<a name="ln944">            changed |= native_assign_node(child_rsc, NULL, node, force);</a>
+<a name="ln945">        }</a>
+<a name="ln946"> </a>
+<a name="ln947">        return changed;</a>
+<a name="ln948">    }</a>
+<a name="ln949">    if (rsc-&gt;allocated_to != NULL) {</a>
+<a name="ln950">        changed = true;</a>
+<a name="ln951">    }</a>
+<a name="ln952"> </a>
+<a name="ln953">    native_assign_node(rsc, NULL, node, force);</a>
+<a name="ln954">    return changed;</a>
+<a name="ln955">}</a>
+<a name="ln956"> </a>
+<a name="ln957">static resource_t *</a>
+<a name="ln958">find_compatible_child_by_node(resource_t * local_child, node_t * local_node, resource_t * rsc,</a>
+<a name="ln959">                              enum rsc_role_e filter, gboolean current)</a>
+<a name="ln960">{</a>
+<a name="ln961">    node_t *node = NULL;</a>
+<a name="ln962">    GListPtr gIter = NULL;</a>
+<a name="ln963"> </a>
+<a name="ln964">    if (local_node == NULL) {</a>
+<a name="ln965">        crm_err(&quot;Can't colocate unrunnable child %s with %s&quot;, local_child-&gt;id, rsc-&gt;id);</a>
+<a name="ln966">        return NULL;</a>
+<a name="ln967">    }</a>
+<a name="ln968"> </a>
+<a name="ln969">    crm_trace(&quot;Looking for compatible child from %s for %s on %s&quot;,</a>
+<a name="ln970">              local_child-&gt;id, rsc-&gt;id, local_node-&gt;details-&gt;uname);</a>
+<a name="ln971"> </a>
+<a name="ln972">    gIter = rsc-&gt;children;</a>
+<a name="ln973">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln974">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln975">        enum rsc_role_e next_role = child_rsc-&gt;fns-&gt;state(child_rsc, current);</a>
+<a name="ln976"> </a>
+<a name="ln977">        if (is_set_recursive(child_rsc, pe_rsc_block, TRUE) == FALSE) {</a>
+<a name="ln978">            /* We only want instances that haven't failed */</a>
+<a name="ln979">            node = child_rsc-&gt;fns-&gt;location(child_rsc, NULL, current);</a>
+<a name="ln980">        }</a>
+<a name="ln981"> </a>
+<a name="ln982">        if (filter != RSC_ROLE_UNKNOWN &amp;&amp; next_role != filter) {</a>
+<a name="ln983">            crm_trace(&quot;Filtered %s&quot;, child_rsc-&gt;id);</a>
+<a name="ln984">            continue;</a>
+<a name="ln985">        }</a>
+<a name="ln986"> </a>
+<a name="ln987">        if (node &amp;&amp; local_node &amp;&amp; node-&gt;details == local_node-&gt;details) {</a>
+<a name="ln988">            crm_trace(&quot;Pairing %s with %s on %s&quot;,</a>
+<a name="ln989">                      local_child-&gt;id, child_rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln990">            return child_rsc;</a>
+<a name="ln991"> </a>
+<a name="ln992">        } else if (node) {</a>
+<a name="ln993">            crm_trace(&quot;%s - %s vs %s&quot;, child_rsc-&gt;id, node-&gt;details-&gt;uname,</a>
+<a name="ln994">                      local_node-&gt;details-&gt;uname);</a>
+<a name="ln995"> </a>
+<a name="ln996">        } else {</a>
+<a name="ln997">            crm_trace(&quot;%s - not allocated %d&quot;, child_rsc-&gt;id, current);</a>
+<a name="ln998">        }</a>
+<a name="ln999">    }</a>
+<a name="ln1000"> </a>
+<a name="ln1001">    crm_trace(&quot;Can't pair %s with %s&quot;, local_child-&gt;id, rsc-&gt;id);</a>
+<a name="ln1002">    return NULL;</a>
+<a name="ln1003">}</a>
+<a name="ln1004"> </a>
+<a name="ln1005">resource_t *</a>
+<a name="ln1006">find_compatible_child(resource_t * local_child, resource_t * rsc, enum rsc_role_e filter,</a>
+<a name="ln1007">                      gboolean current)</a>
+<a name="ln1008">{</a>
+<a name="ln1009">    resource_t *pair = NULL;</a>
+<a name="ln1010">    GListPtr gIter = NULL;</a>
+<a name="ln1011">    GListPtr scratch = NULL;</a>
+<a name="ln1012">    node_t *local_node = NULL;</a>
+<a name="ln1013"> </a>
+<a name="ln1014">    local_node = local_child-&gt;fns-&gt;location(local_child, NULL, current);</a>
+<a name="ln1015">    if (local_node) {</a>
+<a name="ln1016">        return find_compatible_child_by_node(local_child, local_node, rsc, filter, current);</a>
+<a name="ln1017">    }</a>
+<a name="ln1018"> </a>
+<a name="ln1019">    scratch = g_hash_table_get_values(local_child-&gt;allowed_nodes);</a>
+<a name="ln1020">    scratch = g_list_sort_with_data(scratch, sort_node_weight, NULL);</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    gIter = scratch;</a>
+<a name="ln1023">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1024">        node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln1025"> </a>
+<a name="ln1026">        pair = find_compatible_child_by_node(local_child, node, rsc, filter, current);</a>
+<a name="ln1027">        if (pair) {</a>
+<a name="ln1028">            goto done;</a>
+<a name="ln1029">        }</a>
+<a name="ln1030">    }</a>
+<a name="ln1031"> </a>
+<a name="ln1032">    pe_rsc_debug(rsc, &quot;Can't pair %s with %s&quot;, local_child-&gt;id, rsc-&gt;id);</a>
+<a name="ln1033">  done:</a>
+<a name="ln1034">    g_list_free(scratch);</a>
+<a name="ln1035">    return pair;</a>
+<a name="ln1036">}</a>
+<a name="ln1037"> </a>
+<a name="ln1038">void</a>
+<a name="ln1039">clone_rsc_colocation_lh(resource_t * rsc_lh, resource_t * rsc_rh, rsc_colocation_t * constraint)</a>
+<a name="ln1040">{</a>
+<a name="ln1041">    /* -- Never called --</a>
+<a name="ln1042">     *</a>
+<a name="ln1043">     * Instead we add the colocation constraints to the child and call from there</a>
+<a name="ln1044">     */</a>
+<a name="ln1045"> </a>
+<a name="ln1046">    GListPtr gIter = rsc_lh-&gt;children;</a>
+<a name="ln1047"> </a>
+<a name="ln1048">    CRM_CHECK(FALSE, crm_err(&quot;This functionality is not thought to be used. Please report a bug.&quot;));</a>
+<a name="ln1049">    CRM_CHECK(rsc_lh, return);</a>
+<a name="ln1050">    CRM_CHECK(rsc_rh, return);</a>
+<a name="ln1051"> </a>
+<a name="ln1052">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1053">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1054"> </a>
+<a name="ln1055">        child_rsc-&gt;cmds-&gt;rsc_colocation_lh(child_rsc, rsc_rh, constraint);</a>
+<a name="ln1056">    }</a>
+<a name="ln1057"> </a>
+<a name="ln1058">    return;</a>
+<a name="ln1059">}</a>
+<a name="ln1060"> </a>
+<a name="ln1061">void</a>
+<a name="ln1062">clone_rsc_colocation_rh(resource_t * rsc_lh, resource_t * rsc_rh, rsc_colocation_t * constraint)</a>
+<a name="ln1063">{</a>
+<a name="ln1064">    GListPtr gIter = NULL;</a>
+<a name="ln1065">    gboolean do_interleave = FALSE;</a>
+<a name="ln1066">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln1067">    clone_variant_data_t *clone_data_lh = NULL;</a>
+<a name="ln1068"> </a>
+<a name="ln1069">    CRM_CHECK(constraint != NULL, return);</a>
+<a name="ln1070">    CRM_CHECK(rsc_lh != NULL, pe_err(&quot;rsc_lh was NULL for %s&quot;, constraint-&gt;id); return);</a>
+<a name="ln1071">    CRM_CHECK(rsc_rh != NULL, pe_err(&quot;rsc_rh was NULL for %s&quot;, constraint-&gt;id); return);</a>
+<a name="ln1072">    CRM_CHECK(rsc_lh-&gt;variant == pe_native, return);</a>
+<a name="ln1073"> </a>
+<a name="ln1074">    get_clone_variant_data(clone_data, constraint-&gt;rsc_rh);</a>
+<a name="ln1075">    pe_rsc_trace(rsc_rh, &quot;Processing constraint %s: %s -&gt; %s %d&quot;,</a>
+<a name="ln1076">                 constraint-&gt;id, rsc_lh-&gt;id, rsc_rh-&gt;id, constraint-&gt;score);</a>
+<a name="ln1077"> </a>
+<a name="ln1078">    if (pe_rsc_is_clone(constraint-&gt;rsc_lh)) {</a>
+<a name="ln1079"> </a>
+<a name="ln1080">        get_clone_variant_data(clone_data_lh, constraint-&gt;rsc_lh);</a>
+<a name="ln1081">        if (clone_data_lh-&gt;interleave</a>
+<a name="ln1082">            &amp;&amp; clone_data-&gt;clone_node_max != clone_data_lh-&gt;clone_node_max) {</a>
+<a name="ln1083">            crm_config_err(&quot;Cannot interleave &quot; XML_CIB_TAG_INCARNATION &quot; %s and %s because&quot;</a>
+<a name="ln1084">                           &quot; they do not support the same number of&quot; &quot; resources per node&quot;,</a>
+<a name="ln1085">                           constraint-&gt;rsc_lh-&gt;id, constraint-&gt;rsc_rh-&gt;id);</a>
+<a name="ln1086"> </a>
+<a name="ln1087">            /* only the LHS side needs to be labeled as interleave */</a>
+<a name="ln1088">        } else if (clone_data_lh-&gt;interleave) {</a>
+<a name="ln1089">            do_interleave = TRUE;</a>
+<a name="ln1090">        }</a>
+<a name="ln1091">    }</a>
+<a name="ln1092"> </a>
+<a name="ln1093">    if (is_set(rsc_rh-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln1094">        pe_rsc_trace(rsc_rh, &quot;%s is still provisional&quot;, rsc_rh-&gt;id);</a>
+<a name="ln1095">        return;</a>
+<a name="ln1096"> </a>
+<a name="ln1097">    } else if (do_interleave) {</a>
+<a name="ln1098">        resource_t *rh_child = NULL;</a>
+<a name="ln1099"> </a>
+<a name="ln1100">        rh_child = find_compatible_child(rsc_lh, rsc_rh, RSC_ROLE_UNKNOWN, FALSE);</a>
+<a name="ln1101"> </a>
+<a name="ln1102">        if (rh_child) {</a>
+<a name="ln1103">            pe_rsc_debug(rsc_rh, &quot;Pairing %s with %s&quot;, rsc_lh-&gt;id, rh_child-&gt;id);</a>
+<a name="ln1104">            rsc_lh-&gt;cmds-&gt;rsc_colocation_lh(rsc_lh, rh_child, constraint);</a>
+<a name="ln1105"> </a>
+<a name="ln1106">        } else if (constraint-&gt;score &gt;= INFINITY) {</a>
+<a name="ln1107">            crm_notice(&quot;Cannot pair %s with instance of %s&quot;, rsc_lh-&gt;id, rsc_rh-&gt;id);</a>
+<a name="ln1108">            assign_node(rsc_lh, NULL, TRUE);</a>
+<a name="ln1109"> </a>
+<a name="ln1110">        } else {</a>
+<a name="ln1111">            pe_rsc_debug(rsc_rh, &quot;Cannot pair %s with instance of %s&quot;, rsc_lh-&gt;id, rsc_rh-&gt;id);</a>
+<a name="ln1112">        }</a>
+<a name="ln1113"> </a>
+<a name="ln1114">        return;</a>
+<a name="ln1115"> </a>
+<a name="ln1116">    } else if (constraint-&gt;score &gt;= INFINITY) {</a>
+<a name="ln1117">        GListPtr rhs = NULL;</a>
+<a name="ln1118"> </a>
+<a name="ln1119">        gIter = rsc_rh-&gt;children;</a>
+<a name="ln1120">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1121">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1122">            node_t *chosen = child_rsc-&gt;fns-&gt;location(child_rsc, NULL, FALSE);</a>
+<a name="ln1123"> </a>
+<a name="ln1124">            if (chosen != NULL &amp;&amp; is_set_recursive(child_rsc, pe_rsc_block, TRUE) == FALSE) {</a>
+<a name="ln1125">                pe_rsc_trace(rsc_rh, &quot;Allowing %s: %s %d&quot;, constraint-&gt;id, chosen-&gt;details-&gt;uname, chosen-&gt;weight);</a>
+<a name="ln1126">                rhs = g_list_prepend(rhs, chosen);</a>
+<a name="ln1127">            }</a>
+<a name="ln1128">        }</a>
+<a name="ln1129"> </a>
+<a name="ln1130">        node_list_exclude(rsc_lh-&gt;allowed_nodes, rhs, FALSE);</a>
+<a name="ln1131">        g_list_free(rhs);</a>
+<a name="ln1132">        return;</a>
+<a name="ln1133">    }</a>
+<a name="ln1134"> </a>
+<a name="ln1135">    gIter = rsc_rh-&gt;children;</a>
+<a name="ln1136">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1137">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1138"> </a>
+<a name="ln1139">        child_rsc-&gt;cmds-&gt;rsc_colocation_rh(rsc_lh, child_rsc, constraint);</a>
+<a name="ln1140">    }</a>
+<a name="ln1141">}</a>
+<a name="ln1142"> </a>
+<a name="ln1143">static enum action_tasks</a>
+<a name="ln1144">clone_child_action(action_t * action)</a>
+<a name="ln1145">{</a>
+<a name="ln1146">    enum action_tasks result = no_action;</a>
+<a name="ln1147">    resource_t *child = (resource_t *) action-&gt;rsc-&gt;children-&gt;data;</a>
+<a name="ln1148"> </a>
+<a name="ln1149">    if (safe_str_eq(action-&gt;task, &quot;notify&quot;)</a>
+<a name="ln1150">        || safe_str_eq(action-&gt;task, &quot;notified&quot;)) {</a>
+<a name="ln1151"> </a>
+<a name="ln1152">        /* Find the action we're notifying about instead */</a>
+<a name="ln1153"> </a>
+<a name="ln1154">        int stop = 0;</a>
+<a name="ln1155">        char *key = action-&gt;uuid;</a>
+<a name="ln1156">        int lpc = strlen(key);</a>
+<a name="ln1157"> </a>
+<a name="ln1158">        for (; lpc &gt; 0; lpc--) {</a>
+<a name="ln1159">            if (key[lpc] == '_' &amp;&amp; stop == 0) {</a>
+<a name="ln1160">                stop = lpc;</a>
+<a name="ln1161"> </a>
+<a name="ln1162">            } else if (key[lpc] == '_') {</a>
+<a name="ln1163">                char *task_mutable = NULL;</a>
+<a name="ln1164"> </a>
+<a name="ln1165">                lpc++;</a>
+<a name="ln1166">                task_mutable = strdup(key + lpc);</a>
+<a name="ln1167">                task_mutable[stop - lpc] = 0;</a>
+<a name="ln1168"> </a>
+<a name="ln1169">                crm_trace(&quot;Extracted action '%s' from '%s'&quot;, task_mutable, key);</a>
+<a name="ln1170">                result = get_complex_task(child, task_mutable, TRUE);</a>
+<a name="ln1171">                free(task_mutable);</a>
+<a name="ln1172">                break;</a>
+<a name="ln1173">            }</a>
+<a name="ln1174">        }</a>
+<a name="ln1175"> </a>
+<a name="ln1176">    } else {</a>
+<a name="ln1177">        result = get_complex_task(child, action-&gt;task, TRUE);</a>
+<a name="ln1178">    }</a>
+<a name="ln1179">    return result;</a>
+<a name="ln1180">}</a>
+<a name="ln1181"> </a>
+<a name="ln1182">enum pe_action_flags</a>
+<a name="ln1183">clone_action_flags(action_t * action, node_t * node)</a>
+<a name="ln1184">{</a>
+<a name="ln1185">    GListPtr gIter = NULL;</a>
+<a name="ln1186">    gboolean any_runnable = FALSE;</a>
+<a name="ln1187">    gboolean check_runnable = TRUE;</a>
+<a name="ln1188">    enum action_tasks task = clone_child_action(action);</a>
+<a name="ln1189">    enum pe_action_flags flags = (pe_action_optional | pe_action_runnable | pe_action_pseudo);</a>
+<a name="ln1190">    const char *task_s = task2text(task);</a>
+<a name="ln1191"> </a>
+<a name="ln1192">    gIter = action-&gt;rsc-&gt;children;</a>
+<a name="ln1193">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1194">        action_t *child_action = NULL;</a>
+<a name="ln1195">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1196"> </a>
+<a name="ln1197">        child_action =</a>
+<a name="ln1198">            find_first_action(child-&gt;actions, NULL, task_s, child-&gt;children ? NULL : node);</a>
+<a name="ln1199">        pe_rsc_trace(action-&gt;rsc, &quot;Checking for %s in %s on %s&quot;, task_s, child-&gt;id,</a>
+<a name="ln1200">                     node ? node-&gt;details-&gt;uname : &quot;none&quot;);</a>
+<a name="ln1201">        if (child_action) {</a>
+<a name="ln1202">            enum pe_action_flags child_flags = child-&gt;cmds-&gt;action_flags(child_action, node);</a>
+<a name="ln1203"> </a>
+<a name="ln1204">            if (is_set(flags, pe_action_optional)</a>
+<a name="ln1205">                &amp;&amp; is_set(child_flags, pe_action_optional) == FALSE) {</a>
+<a name="ln1206">                pe_rsc_trace(child, &quot;%s is mandatory because of %s&quot;, action-&gt;uuid,</a>
+<a name="ln1207">                             child_action-&gt;uuid);</a>
+<a name="ln1208">                flags = crm_clear_bit(__FUNCTION__, __LINE__, action-&gt;rsc-&gt;id, flags, pe_action_optional);</a>
+<a name="ln1209">                pe_clear_action_bit(action, pe_action_optional);</a>
+<a name="ln1210">            }</a>
+<a name="ln1211">            if (is_set(child_flags, pe_action_runnable)) {</a>
+<a name="ln1212">                any_runnable = TRUE;</a>
+<a name="ln1213">            }</a>
+<a name="ln1214"> </a>
+<a name="ln1215">        } else {</a>
+<a name="ln1216"> </a>
+<a name="ln1217">            GListPtr gIter2 = child-&gt;actions;</a>
+<a name="ln1218"> </a>
+<a name="ln1219">            for (; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln1220">                action_t *op = (action_t *) gIter2-&gt;data;</a>
+<a name="ln1221"> </a>
+<a name="ln1222">                pe_rsc_trace(child, &quot;%s on %s (%s)&quot;, op-&gt;uuid,</a>
+<a name="ln1223">                             op-&gt;node ? op-&gt;node-&gt;details-&gt;uname : &quot;none&quot;, op-&gt;task);</a>
+<a name="ln1224">            }</a>
+<a name="ln1225">        }</a>
+<a name="ln1226">    }</a>
+<a name="ln1227"> </a>
+<a name="ln1228">    if (check_runnable &amp;&amp; any_runnable == FALSE) {</a>
+<a name="ln1229">        pe_rsc_trace(action-&gt;rsc, &quot;%s is not runnable because no children are&quot;, action-&gt;uuid);</a>
+<a name="ln1230">        flags = crm_clear_bit(__FUNCTION__, __LINE__, action-&gt;rsc-&gt;id, flags, pe_action_runnable);</a>
+<a name="ln1231">        if (node == NULL) {</a>
+<a name="ln1232">            pe_clear_action_bit(action, pe_action_runnable);</a>
+<a name="ln1233">        }</a>
+<a name="ln1234">    }</a>
+<a name="ln1235"> </a>
+<a name="ln1236">    return flags;</a>
+<a name="ln1237">}</a>
+<a name="ln1238"> </a>
+<a name="ln1239">static enum pe_graph_flags</a>
+<a name="ln1240">clone_update_actions_interleave(action_t * first, action_t * then, node_t * node,</a>
+<a name="ln1241">                                enum pe_action_flags flags, enum pe_action_flags filter,</a>
+<a name="ln1242">                                enum pe_ordering type)</a>
+<a name="ln1243">{</a>
+<a name="ln1244">    gboolean current = FALSE;</a>
+<a name="ln1245">    resource_t *first_child = NULL;</a>
+<a name="ln1246">    GListPtr gIter = then-&gt;rsc-&gt;children;</a>
+<a name="ln1247">    enum pe_graph_flags changed = pe_graph_none;        /*pe_graph_disable */</a>
+<a name="ln1248"> </a>
+<a name="ln1249">    enum action_tasks task = clone_child_action(first);</a>
+<a name="ln1250">    const char *first_task = task2text(task);</a>
+<a name="ln1251"> </a>
+<a name="ln1252">    /* Fix this - lazy */</a>
+<a name="ln1253">    if (crm_ends_with(first-&gt;uuid, &quot;_stopped_0&quot;)</a>
+<a name="ln1254">        || crm_ends_with(first-&gt;uuid, &quot;_demoted_0&quot;)) {</a>
+<a name="ln1255">        current = TRUE;</a>
+<a name="ln1256">    }</a>
+<a name="ln1257"> </a>
+<a name="ln1258">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1259">        resource_t *then_child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1260"> </a>
+<a name="ln1261">        CRM_ASSERT(then_child != NULL);</a>
+<a name="ln1262">        first_child = find_compatible_child(then_child, first-&gt;rsc, RSC_ROLE_UNKNOWN, current);</a>
+<a name="ln1263">        if (first_child == NULL &amp;&amp; current) {</a>
+<a name="ln1264">            crm_trace(&quot;Ignore&quot;);</a>
+<a name="ln1265"> </a>
+<a name="ln1266">        } else if (first_child == NULL) {</a>
+<a name="ln1267">            crm_debug(&quot;No match found for %s (%d / %s / %s)&quot;, then_child-&gt;id, current, first-&gt;uuid,</a>
+<a name="ln1268">                      then-&gt;uuid);</a>
+<a name="ln1269"> </a>
+<a name="ln1270">            /* Me no like this hack - but what else can we do?</a>
+<a name="ln1271">             *</a>
+<a name="ln1272">             * If there is no-one active or about to be active</a>
+<a name="ln1273">             *   on the same node as then_child, then they must</a>
+<a name="ln1274">             *   not be allowed to start</a>
+<a name="ln1275">             */</a>
+<a name="ln1276">            if (type &amp; (pe_order_runnable_left | pe_order_implies_then) /* Mandatory */ ) {</a>
+<a name="ln1277">                pe_rsc_info(then-&gt;rsc, &quot;Inhibiting %s from being active&quot;, then_child-&gt;id);</a>
+<a name="ln1278">                if(assign_node(then_child, NULL, TRUE)) {</a>
+<a name="ln1279">                    changed |= pe_graph_updated_then;</a>
+<a name="ln1280">                }</a>
+<a name="ln1281">            }</a>
+<a name="ln1282"> </a>
+<a name="ln1283">        } else {</a>
+<a name="ln1284">            action_t *first_action = NULL;</a>
+<a name="ln1285">            action_t *then_action = NULL;</a>
+<a name="ln1286"> </a>
+<a name="ln1287">            pe_rsc_debug(then-&gt;rsc, &quot;Pairing %s with %s&quot;, first_child-&gt;id, then_child-&gt;id);</a>
+<a name="ln1288"> </a>
+<a name="ln1289">            first_action = find_first_action(first_child-&gt;actions, NULL, first_task, node);</a>
+<a name="ln1290">            then_action = find_first_action(then_child-&gt;actions, NULL, then-&gt;task, node);</a>
+<a name="ln1291"> </a>
+<a name="ln1292">            if (first_action == NULL) {</a>
+<a name="ln1293">                if (is_not_set(first_child-&gt;flags, pe_rsc_orphan)</a>
+<a name="ln1294">                    &amp;&amp; crm_str_eq(first_task, RSC_STOP, TRUE) == FALSE</a>
+<a name="ln1295">                    &amp;&amp; crm_str_eq(first_task, RSC_DEMOTE, TRUE) == FALSE) {</a>
+<a name="ln1296">                    crm_err(&quot;Internal error: No action found for %s in %s (first)&quot;,</a>
+<a name="ln1297">                            first_task, first_child-&gt;id);</a>
+<a name="ln1298"> </a>
+<a name="ln1299">                } else {</a>
+<a name="ln1300">                    crm_trace(&quot;No action found for %s in %s%s (first)&quot;,</a>
+<a name="ln1301">                              first_task, first_child-&gt;id,</a>
+<a name="ln1302">                              is_set(first_child-&gt;flags, pe_rsc_orphan) ? &quot; (ORPHAN)&quot; : &quot;&quot;);</a>
+<a name="ln1303">                }</a>
+<a name="ln1304">                continue;</a>
+<a name="ln1305">            }</a>
+<a name="ln1306"> </a>
+<a name="ln1307">            /* We're only interested if 'then' is neither stopping nor being demoted */ </a>
+<a name="ln1308">            if (then_action == NULL) {</a>
+<a name="ln1309">                if (is_not_set(then_child-&gt;flags, pe_rsc_orphan)</a>
+<a name="ln1310">                    &amp;&amp; crm_str_eq(then-&gt;task, RSC_STOP, TRUE) == FALSE</a>
+<a name="ln1311">                    &amp;&amp; crm_str_eq(then-&gt;task, RSC_DEMOTE, TRUE) == FALSE) {</a>
+<a name="ln1312">                    crm_err(&quot;Internal error: No action found for %s in %s (then)&quot;,</a>
+<a name="ln1313">                            then-&gt;task, then_child-&gt;id);</a>
+<a name="ln1314"> </a>
+<a name="ln1315">                } else {</a>
+<a name="ln1316">                    crm_trace(&quot;No action found for %s in %s%s (then)&quot;,</a>
+<a name="ln1317">                              then-&gt;task, then_child-&gt;id,</a>
+<a name="ln1318">                              is_set(then_child-&gt;flags, pe_rsc_orphan) ? &quot; (ORPHAN)&quot; : &quot;&quot;);</a>
+<a name="ln1319">                }</a>
+<a name="ln1320">                continue;</a>
+<a name="ln1321">            }</a>
+<a name="ln1322"> </a>
+<a name="ln1323">            if (order_actions(first_action, then_action, type)) {</a>
+<a name="ln1324">                crm_debug(&quot;Created constraint for %s -&gt; %s&quot;, first_action-&gt;uuid, then_action-&gt;uuid);</a>
+<a name="ln1325">                changed |= (pe_graph_updated_first | pe_graph_updated_then);</a>
+<a name="ln1326">            }</a>
+<a name="ln1327">            changed |=</a>
+<a name="ln1328">                then_child-&gt;cmds-&gt;update_actions(first_action, then_action, node,</a>
+<a name="ln1329">                                                 first_child-&gt;cmds-&gt;action_flags(first_action,</a>
+<a name="ln1330">                                                                                 node), filter,</a>
+<a name="ln1331">                                                 type);</a>
+<a name="ln1332">        }</a>
+<a name="ln1333">    }</a>
+<a name="ln1334">    return changed;</a>
+<a name="ln1335">}</a>
+<a name="ln1336"> </a>
+<a name="ln1337">enum pe_graph_flags</a>
+<a name="ln1338">clone_update_actions(action_t * first, action_t * then, node_t * node, enum pe_action_flags flags,</a>
+<a name="ln1339">                     enum pe_action_flags filter, enum pe_ordering type)</a>
+<a name="ln1340">{</a>
+<a name="ln1341">    const char *rsc = &quot;none&quot;;</a>
+<a name="ln1342">    gboolean interleave = FALSE;</a>
+<a name="ln1343">    enum pe_graph_flags changed = pe_graph_none;</a>
+<a name="ln1344"> </a>
+<a name="ln1345">    if (first-&gt;rsc != then-&gt;rsc</a>
+<a name="ln1346">        &amp;&amp; pe_rsc_is_clone(first-&gt;rsc)</a>
+<a name="ln1347">        &amp;&amp; pe_rsc_is_clone(then-&gt;rsc)) {</a>
+<a name="ln1348">        clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln1349"> </a>
+<a name="ln1350">        if (crm_ends_with(then-&gt;uuid, &quot;_stop_0&quot;)</a>
+<a name="ln1351">            || crm_ends_with(then-&gt;uuid, &quot;_demote_0&quot;)) {</a>
+<a name="ln1352">            get_clone_variant_data(clone_data, first-&gt;rsc);</a>
+<a name="ln1353">            rsc = first-&gt;rsc-&gt;id;</a>
+<a name="ln1354">        } else {</a>
+<a name="ln1355">            get_clone_variant_data(clone_data, then-&gt;rsc);</a>
+<a name="ln1356">            rsc = then-&gt;rsc-&gt;id;</a>
+<a name="ln1357">        }</a>
+<a name="ln1358">        interleave = clone_data-&gt;interleave;</a>
+<a name="ln1359">    }</a>
+<a name="ln1360"> </a>
+<a name="ln1361">    crm_trace(&quot;Interleave %s -&gt; %s: %s (based on %s)&quot;,</a>
+<a name="ln1362">              first-&gt;uuid, then-&gt;uuid, interleave ? &quot;yes&quot; : &quot;no&quot;, rsc);</a>
+<a name="ln1363"> </a>
+<a name="ln1364">    if (interleave) {</a>
+<a name="ln1365">        changed = clone_update_actions_interleave(first, then, node, flags, filter, type);</a>
+<a name="ln1366"> </a>
+<a name="ln1367">    } else if (then-&gt;rsc) {</a>
+<a name="ln1368">        GListPtr gIter = then-&gt;rsc-&gt;children;</a>
+<a name="ln1369"> </a>
+<a name="ln1370">        changed |= native_update_actions(first, then, node, flags, filter, type);</a>
+<a name="ln1371"> </a>
+<a name="ln1372">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1373">            enum pe_graph_flags child_changed = pe_graph_none;</a>
+<a name="ln1374">            GListPtr lpc = NULL;</a>
+<a name="ln1375">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1376">            action_t *child_action = find_first_action(child-&gt;actions, NULL, then-&gt;task, node);</a>
+<a name="ln1377"> </a>
+<a name="ln1378">            if (child_action) {</a>
+<a name="ln1379">                enum pe_action_flags child_flags = child-&gt;cmds-&gt;action_flags(child_action, node);</a>
+<a name="ln1380"> </a>
+<a name="ln1381">                if (is_set(child_flags, pe_action_runnable)) {</a>
+<a name="ln1382">                                     </a>
+<a name="ln1383">                    child_changed |=</a>
+<a name="ln1384">                        child-&gt;cmds-&gt;update_actions(first, child_action, node, flags, filter, type);</a>
+<a name="ln1385">                }</a>
+<a name="ln1386">                changed |= child_changed;</a>
+<a name="ln1387">                if (child_changed &amp; pe_graph_updated_then) {</a>
+<a name="ln1388">                   for (lpc = child_action-&gt;actions_after; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln1389">                        action_wrapper_t *other = (action_wrapper_t *) lpc-&gt;data;</a>
+<a name="ln1390">                        update_action(other-&gt;action);</a>
+<a name="ln1391">                    }</a>
+<a name="ln1392">                }</a>
+<a name="ln1393">            }</a>
+<a name="ln1394">        }</a>
+<a name="ln1395">    }</a>
+<a name="ln1396"> </a>
+<a name="ln1397">    return changed;</a>
+<a name="ln1398">}</a>
+<a name="ln1399"> </a>
+<a name="ln1400">void</a>
+<a name="ln1401">clone_rsc_location(resource_t * rsc, rsc_to_node_t * constraint)</a>
+<a name="ln1402">{</a>
+<a name="ln1403">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln1404"> </a>
+<a name="ln1405">    pe_rsc_trace(rsc, &quot;Processing location constraint %s for %s&quot;, constraint-&gt;id, rsc-&gt;id);</a>
+<a name="ln1406"> </a>
+<a name="ln1407">    native_rsc_location(rsc, constraint);</a>
+<a name="ln1408"> </a>
+<a name="ln1409">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1410">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1411"> </a>
+<a name="ln1412">        child_rsc-&gt;cmds-&gt;rsc_location(child_rsc, constraint);</a>
+<a name="ln1413">    }</a>
+<a name="ln1414">}</a>
+<a name="ln1415"> </a>
+<a name="ln1416">void</a>
+<a name="ln1417">clone_expand(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln1418">{</a>
+<a name="ln1419">    GListPtr gIter = NULL;</a>
+<a name="ln1420">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln1421"> </a>
+<a name="ln1422">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln1423"> </a>
+<a name="ln1424">    gIter = rsc-&gt;actions;</a>
+<a name="ln1425">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1426">        action_t *op = (action_t *) gIter-&gt;data;</a>
+<a name="ln1427"> </a>
+<a name="ln1428">        rsc-&gt;cmds-&gt;action_flags(op, NULL);</a>
+<a name="ln1429">    }</a>
+<a name="ln1430"> </a>
+<a name="ln1431">    if (clone_data-&gt;start_notify) {</a>
+<a name="ln1432">        collect_notification_data(rsc, TRUE, TRUE, clone_data-&gt;start_notify);</a>
+<a name="ln1433">        expand_notification_data(clone_data-&gt;start_notify, data_set);</a>
+<a name="ln1434">        create_notifications(rsc, clone_data-&gt;start_notify, data_set);</a>
+<a name="ln1435">    }</a>
+<a name="ln1436"> </a>
+<a name="ln1437">    if (clone_data-&gt;stop_notify) {</a>
+<a name="ln1438">        collect_notification_data(rsc, TRUE, TRUE, clone_data-&gt;stop_notify);</a>
+<a name="ln1439">        expand_notification_data(clone_data-&gt;stop_notify, data_set);</a>
+<a name="ln1440">        create_notifications(rsc, clone_data-&gt;stop_notify, data_set);</a>
+<a name="ln1441">    }</a>
+<a name="ln1442"> </a>
+<a name="ln1443">    if (clone_data-&gt;promote_notify) {</a>
+<a name="ln1444">        collect_notification_data(rsc, TRUE, TRUE, clone_data-&gt;promote_notify);</a>
+<a name="ln1445">        expand_notification_data(clone_data-&gt;promote_notify, data_set);</a>
+<a name="ln1446">        create_notifications(rsc, clone_data-&gt;promote_notify, data_set);</a>
+<a name="ln1447">    }</a>
+<a name="ln1448"> </a>
+<a name="ln1449">    if (clone_data-&gt;demote_notify) {</a>
+<a name="ln1450">        collect_notification_data(rsc, TRUE, TRUE, clone_data-&gt;demote_notify);</a>
+<a name="ln1451">        expand_notification_data(clone_data-&gt;demote_notify, data_set);</a>
+<a name="ln1452">        create_notifications(rsc, clone_data-&gt;demote_notify, data_set);</a>
+<a name="ln1453">    }</a>
+<a name="ln1454"> </a>
+<a name="ln1455">    /* Now that the notifcations have been created we can expand the children */</a>
+<a name="ln1456"> </a>
+<a name="ln1457">    gIter = rsc-&gt;children;</a>
+<a name="ln1458">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1459">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1460"> </a>
+<a name="ln1461">        child_rsc-&gt;cmds-&gt;expand(child_rsc, data_set);</a>
+<a name="ln1462">    }</a>
+<a name="ln1463"> </a>
+<a name="ln1464">    native_expand(rsc, data_set);</a>
+<a name="ln1465"> </a>
+<a name="ln1466">    /* The notifications are in the graph now, we can destroy the notify_data */</a>
+<a name="ln1467">    free_notification_data(clone_data-&gt;demote_notify);</a>
+<a name="ln1468">    clone_data-&gt;demote_notify = NULL;</a>
+<a name="ln1469">    free_notification_data(clone_data-&gt;stop_notify);</a>
+<a name="ln1470">    clone_data-&gt;stop_notify = NULL;</a>
+<a name="ln1471">    free_notification_data(clone_data-&gt;start_notify);</a>
+<a name="ln1472">    clone_data-&gt;start_notify = NULL;</a>
+<a name="ln1473">    free_notification_data(clone_data-&gt;promote_notify);</a>
+<a name="ln1474">    clone_data-&gt;promote_notify = NULL;</a>
+<a name="ln1475">}</a>
+<a name="ln1476"> </a>
+<a name="ln1477">node_t *</a>
+<a name="ln1478">rsc_known_on(resource_t * rsc, GListPtr * list)</a>
+<a name="ln1479">{</a>
+<a name="ln1480">    GListPtr gIter = NULL;</a>
+<a name="ln1481">    node_t *one = NULL;</a>
+<a name="ln1482">    GListPtr result = NULL;</a>
+<a name="ln1483"> </a>
+<a name="ln1484">    if (rsc-&gt;children) {</a>
+<a name="ln1485"> </a>
+<a name="ln1486">        gIter = rsc-&gt;children;</a>
+<a name="ln1487">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1488">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1489"> </a>
+<a name="ln1490">            rsc_known_on(child, &amp;result);</a>
+<a name="ln1491">        }</a>
+<a name="ln1492"> </a>
+<a name="ln1493">    } else if (rsc-&gt;known_on) {</a>
+<a name="ln1494">        result = g_hash_table_get_values(rsc-&gt;known_on);</a>
+<a name="ln1495">    }</a>
+<a name="ln1496"> </a>
+<a name="ln1497">    if (result &amp;&amp; g_list_length(result) == 1) {</a>
+<a name="ln1498">        one = g_list_nth_data(result, 0);</a>
+<a name="ln1499">    }</a>
+<a name="ln1500"> </a>
+<a name="ln1501">    if (list) {</a>
+<a name="ln1502">        GListPtr gIter = NULL;</a>
+<a name="ln1503"> </a>
+<a name="ln1504">        gIter = result;</a>
+<a name="ln1505">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1506">            node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln1507"> </a>
+<a name="ln1508">            if (*list == NULL || pe_find_node_id(*list, node-&gt;details-&gt;id) == NULL) {</a>
+<a name="ln1509">                *list = g_list_prepend(*list, node);</a>
+<a name="ln1510">            }</a>
+<a name="ln1511">        }</a>
+<a name="ln1512">    }</a>
+<a name="ln1513"> </a>
+<a name="ln1514">    g_list_free(result);</a>
+<a name="ln1515">    return one;</a>
+<a name="ln1516">}</a>
+<a name="ln1517"> </a>
+<a name="ln1518">static resource_t *</a>
+<a name="ln1519">find_instance_on(resource_t * rsc, node_t * node)</a>
+<a name="ln1520">{</a>
+<a name="ln1521">    GListPtr gIter = NULL;</a>
+<a name="ln1522"> </a>
+<a name="ln1523">    gIter = rsc-&gt;children;</a>
+<a name="ln1524">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1525">        GListPtr gIter2 = NULL;</a>
+<a name="ln1526">        GListPtr known_list = NULL;</a>
+<a name="ln1527">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1528"> </a>
+<a name="ln1529">        rsc_known_on(child, &amp;known_list);</a>
+<a name="ln1530"> </a>
+<a name="ln1531">        gIter2 = known_list;</a>
+<a name="ln1532">        for (; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln1533">            node_t *known = (node_t *) gIter2-&gt;data;</a>
+<a name="ln1534"> </a>
+<a name="ln1535">            if (node-&gt;details == known-&gt;details) {</a>
+<a name="ln1536">                g_list_free(known_list);</a>
+<a name="ln1537">                return child;</a>
+<a name="ln1538">            }</a>
+<a name="ln1539">        }</a>
+<a name="ln1540">        g_list_free(known_list);</a>
+<a name="ln1541">    }</a>
+<a name="ln1542"> </a>
+<a name="ln1543">    return NULL;</a>
+<a name="ln1544">}</a>
+<a name="ln1545"> </a>
+<a name="ln1546">gboolean</a>
+<a name="ln1547">clone_create_probe(resource_t * rsc, node_t * node, action_t * complete,</a>
+<a name="ln1548">                   gboolean force, pe_working_set_t * data_set)</a>
+<a name="ln1549">{</a>
+<a name="ln1550">    GListPtr gIter = NULL;</a>
+<a name="ln1551">    gboolean any_created = FALSE;</a>
+<a name="ln1552">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln1553"> </a>
+<a name="ln1554">    CRM_ASSERT(rsc);</a>
+<a name="ln1555">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln1556"> </a>
+<a name="ln1557">    rsc-&gt;children = g_list_sort(rsc-&gt;children, sort_rsc_id);</a>
+<a name="ln1558">    if (rsc-&gt;children == NULL) {</a>
+<a name="ln1559">        pe_warn(&quot;Clone %s has no children&quot;, rsc-&gt;id);</a>
+<a name="ln1560">        return FALSE;</a>
+<a name="ln1561">    }</a>
+<a name="ln1562"> </a>
+<a name="ln1563">    if (rsc-&gt;exclusive_discover) {</a>
+<a name="ln1564">        node_t *allowed = g_hash_table_lookup(rsc-&gt;allowed_nodes, node-&gt;details-&gt;id);</a>
+<a name="ln1565">        if (allowed &amp;&amp; allowed-&gt;rsc_discover_mode != discover_exclusive) {</a>
+<a name="ln1566">            /* exclusive discover is enabled and this node is not marked</a>
+<a name="ln1567">             * as a node this resource should be discovered on</a>
+<a name="ln1568">             *</a>
+<a name="ln1569">             * remove the node from allowed_nodes so that the</a>
+<a name="ln1570">             * notification contains only nodes that we might ever run</a>
+<a name="ln1571">             * on</a>
+<a name="ln1572">             */</a>
+<a name="ln1573">            g_hash_table_remove(rsc-&gt;allowed_nodes, node-&gt;details-&gt;id);</a>
+<a name="ln1574"> </a>
+<a name="ln1575">            /* Bit of a shortcut - might as well take it */</a>
+<a name="ln1576">            return FALSE;</a>
+<a name="ln1577">        }</a>
+<a name="ln1578">    }</a>
+<a name="ln1579"> </a>
+<a name="ln1580">    if (is_not_set(rsc-&gt;flags, pe_rsc_unique)</a>
+<a name="ln1581">        &amp;&amp; clone_data-&gt;clone_node_max == 1) {</a>
+<a name="ln1582">        /* only look for one copy */</a>
+<a name="ln1583">        resource_t *child = NULL;</a>
+<a name="ln1584"> </a>
+<a name="ln1585">        /* Try whoever we probed last time */</a>
+<a name="ln1586">        child = find_instance_on(rsc, node);</a>
+<a name="ln1587">        if (child) {</a>
+<a name="ln1588">            return child-&gt;cmds-&gt;create_probe(child, node, complete, force, data_set);</a>
+<a name="ln1589">        }</a>
+<a name="ln1590"> </a>
+<a name="ln1591">        /* Try whoever we plan on starting there */</a>
+<a name="ln1592">        gIter = rsc-&gt;children;</a>
+<a name="ln1593">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1594">            node_t *local_node = NULL;</a>
+<a name="ln1595">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1596"> </a>
+<a name="ln1597">            CRM_ASSERT(child_rsc);</a>
+<a name="ln1598">            local_node = child_rsc-&gt;fns-&gt;location(child_rsc, NULL, FALSE);</a>
+<a name="ln1599">            if (local_node == NULL) {</a>
+<a name="ln1600">                continue;</a>
+<a name="ln1601">            }</a>
+<a name="ln1602"> </a>
+<a name="ln1603">            if (local_node-&gt;details == node-&gt;details) {</a>
+<a name="ln1604">                return child_rsc-&gt;cmds-&gt;create_probe(child_rsc, node, complete, force, data_set);</a>
+<a name="ln1605">            }</a>
+<a name="ln1606">        }</a>
+<a name="ln1607"> </a>
+<a name="ln1608">        /* Fall back to the first clone instance */</a>
+<a name="ln1609">        CRM_ASSERT(rsc-&gt;children);</a>
+<a name="ln1610">        child = rsc-&gt;children-&gt;data;</a>
+<a name="ln1611">        return child-&gt;cmds-&gt;create_probe(child, node, complete, force, data_set);</a>
+<a name="ln1612">    }</a>
+<a name="ln1613"> </a>
+<a name="ln1614">    gIter = rsc-&gt;children;</a>
+<a name="ln1615">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1616">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1617"> </a>
+<a name="ln1618">        if (child_rsc-&gt;cmds-&gt;create_probe(child_rsc, node, complete, force, data_set)) {</a>
+<a name="ln1619">            any_created = TRUE;</a>
+<a name="ln1620">        }</a>
+<a name="ln1621"> </a>
+<a name="ln1622">        if (any_created &amp;&amp; is_not_set(rsc-&gt;flags, pe_rsc_unique)</a>
+<a name="ln1623">            &amp;&amp; clone_data-&gt;clone_node_max == 1) {</a>
+<a name="ln1624">            /* only look for one copy (clone :0) */</a>
+<a name="ln1625">            break;</a>
+<a name="ln1626">        }</a>
+<a name="ln1627">    }</a>
+<a name="ln1628"> </a>
+<a name="ln1629">    return any_created;</a>
+<a name="ln1630">}</a>
+<a name="ln1631"> </a>
+<a name="ln1632">void</a>
+<a name="ln1633">clone_append_meta(resource_t * rsc, xmlNode * xml)</a>
+<a name="ln1634">{</a>
+<a name="ln1635">    char *name = NULL;</a>
+<a name="ln1636">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln1637"> </a>
+<a name="ln1638">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln1639"> </a>
+<a name="ln1640">    name = crm_meta_name(XML_RSC_ATTR_UNIQUE);</a>
+<a name="ln1641">    crm_xml_add(xml, name, is_set(rsc-&gt;flags, pe_rsc_unique) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln1642">    free(name);</a>
+<a name="ln1643"> </a>
+<a name="ln1644">    name = crm_meta_name(XML_RSC_ATTR_NOTIFY);</a>
+<a name="ln1645">    crm_xml_add(xml, name, is_set(rsc-&gt;flags, pe_rsc_notify) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln1646">    free(name);</a>
+<a name="ln1647"> </a>
+<a name="ln1648">    name = crm_meta_name(XML_RSC_ATTR_INCARNATION_MAX);</a>
+<a name="ln1649">    crm_xml_add_int(xml, name, clone_data-&gt;clone_max);</a>
+<a name="ln1650">    free(name);</a>
+<a name="ln1651"> </a>
+<a name="ln1652">    name = crm_meta_name(XML_RSC_ATTR_INCARNATION_NODEMAX);</a>
+<a name="ln1653">    crm_xml_add_int(xml, name, clone_data-&gt;clone_node_max);</a>
+<a name="ln1654">    free(name);</a>
+<a name="ln1655">}</a>
+<a name="ln1656"> </a>
+<a name="ln1657">GHashTable *</a>
+<a name="ln1658">clone_merge_weights(resource_t * rsc, const char *rhs, GHashTable * nodes, const char *attr,</a>
+<a name="ln1659">                    float factor, enum pe_weights flags)</a>
+<a name="ln1660">{</a>
+<a name="ln1661">    return rsc_merge_weights(rsc, rhs, nodes, attr, factor, flags);</a>
+<a name="ln1662">}</a>
+
+</code></pre>
+<div class="balloon" rel="222"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: node1.</p></div>
+<div class="balloon" rel="222"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: node2.</p></div>
+<div class="balloon" rel="422"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'rsc' is always true.</p></div>
+<div class="balloon" rel="453"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: chosen.</p></div>
+<div class="balloon" rel="987"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: local_node.</p></div>
+<div class="balloon" rel="1167"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'task_mutable'. Check lines: 1167, 1166.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

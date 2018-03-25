@@ -1,0 +1,471 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln25">#include &lt;allocate.h&gt;</a>
+<a name="ln26">#include &lt;utils.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">void</a>
+<a name="ln29">pe_free_ordering(GListPtr constraints)</a>
+<a name="ln30">{</a>
+<a name="ln31">    GListPtr iterator = constraints;</a>
+<a name="ln32"> </a>
+<a name="ln33">    while (iterator != NULL) {</a>
+<a name="ln34">        order_constraint_t *order = iterator-&gt;data;</a>
+<a name="ln35"> </a>
+<a name="ln36">        iterator = iterator-&gt;next;</a>
+<a name="ln37"> </a>
+<a name="ln38">        free(order-&gt;lh_action_task);</a>
+<a name="ln39">        free(order-&gt;rh_action_task);</a>
+<a name="ln40">        free(order);</a>
+<a name="ln41">    }</a>
+<a name="ln42">    if (constraints != NULL) {</a>
+<a name="ln43">        g_list_free(constraints);</a>
+<a name="ln44">    }</a>
+<a name="ln45">}</a>
+<a name="ln46"> </a>
+<a name="ln47">void</a>
+<a name="ln48">pe_free_rsc_to_node(GListPtr constraints)</a>
+<a name="ln49">{</a>
+<a name="ln50">    GListPtr iterator = constraints;</a>
+<a name="ln51"> </a>
+<a name="ln52">    while (iterator != NULL) {</a>
+<a name="ln53">        rsc_to_node_t *cons = iterator-&gt;data;</a>
+<a name="ln54"> </a>
+<a name="ln55">        iterator = iterator-&gt;next;</a>
+<a name="ln56"> </a>
+<a name="ln57">        g_list_free_full(cons-&gt;node_list_rh, free);</a>
+<a name="ln58">        free(cons-&gt;id);</a>
+<a name="ln59">        free(cons);</a>
+<a name="ln60">    }</a>
+<a name="ln61">    if (constraints != NULL) {</a>
+<a name="ln62">        g_list_free(constraints);</a>
+<a name="ln63">    }</a>
+<a name="ln64">}</a>
+<a name="ln65"> </a>
+<a name="ln66">rsc_to_node_t *</a>
+<a name="ln67">rsc2node_new(const char *id, resource_t * rsc,</a>
+<a name="ln68">             int node_weight, const char *discover_mode,</a>
+<a name="ln69">             node_t * foo_node, pe_working_set_t * data_set)</a>
+<a name="ln70">{</a>
+<a name="ln71">    rsc_to_node_t *new_con = NULL;</a>
+<a name="ln72"> </a>
+<a name="ln73">    if (rsc == NULL || id == NULL) {</a>
+<a name="ln74">        pe_err(&quot;Invalid constraint %s for rsc=%p&quot;, crm_str(id), rsc);</a>
+<a name="ln75">        return NULL;</a>
+<a name="ln76"> </a>
+<a name="ln77">    } else if (foo_node == NULL) {</a>
+<a name="ln78">        CRM_CHECK(node_weight == 0, return NULL);</a>
+<a name="ln79">    }</a>
+<a name="ln80"> </a>
+<a name="ln81">    new_con = calloc(1, sizeof(rsc_to_node_t));</a>
+<a name="ln82">    if (new_con != NULL) {</a>
+<a name="ln83">        new_con-&gt;id = strdup(id);</a>
+<a name="ln84">        new_con-&gt;rsc_lh = rsc;</a>
+<a name="ln85">        new_con-&gt;node_list_rh = NULL;</a>
+<a name="ln86">        new_con-&gt;role_filter = RSC_ROLE_UNKNOWN;</a>
+<a name="ln87"> </a>
+<a name="ln88"> </a>
+<a name="ln89">        if (discover_mode == NULL || safe_str_eq(discover_mode, &quot;always&quot;)) {</a>
+<a name="ln90">            new_con-&gt;discover_mode = discover_always;</a>
+<a name="ln91">        } else if (safe_str_eq(discover_mode, &quot;never&quot;)) {</a>
+<a name="ln92">            new_con-&gt;discover_mode = discover_never;</a>
+<a name="ln93">        } else if (safe_str_eq(discover_mode, &quot;exclusive&quot;)) {</a>
+<a name="ln94">            new_con-&gt;discover_mode = discover_exclusive;</a>
+<a name="ln95">            rsc-&gt;exclusive_discover = TRUE;</a>
+<a name="ln96">        } else {</a>
+<a name="ln97">            pe_err(&quot;Invalid %s value %s in location constraint&quot;, XML_LOCATION_ATTR_DISCOVERY, discover_mode);</a>
+<a name="ln98">        }</a>
+<a name="ln99"> </a>
+<a name="ln100">        if (foo_node != NULL) {</a>
+<a name="ln101">            node_t *copy = node_copy(foo_node);</a>
+<a name="ln102"> </a>
+<a name="ln103">            copy-&gt;weight = merge_weights(node_weight, foo_node-&gt;weight);</a>
+<a name="ln104">            new_con-&gt;node_list_rh = g_list_prepend(NULL, copy);</a>
+<a name="ln105">        }</a>
+<a name="ln106"> </a>
+<a name="ln107">        data_set-&gt;placement_constraints = g_list_prepend(data_set-&gt;placement_constraints, new_con);</a>
+<a name="ln108">        rsc-&gt;rsc_location = g_list_prepend(rsc-&gt;rsc_location, new_con);</a>
+<a name="ln109">    }</a>
+<a name="ln110"> </a>
+<a name="ln111">    return new_con;</a>
+<a name="ln112">}</a>
+<a name="ln113"> </a>
+<a name="ln114">gboolean</a>
+<a name="ln115">can_run_resources(const node_t * node)</a>
+<a name="ln116">{</a>
+<a name="ln117">    if (node == NULL) {</a>
+<a name="ln118">        return FALSE;</a>
+<a name="ln119">    }</a>
+<a name="ln120">#if 0</a>
+<a name="ln121">    if (node-&gt;weight &lt; 0) {</a>
+<a name="ln122">        return FALSE;</a>
+<a name="ln123">    }</a>
+<a name="ln124">#endif</a>
+<a name="ln125"> </a>
+<a name="ln126">    if (node-&gt;details-&gt;online == FALSE</a>
+<a name="ln127">        || node-&gt;details-&gt;shutdown || node-&gt;details-&gt;unclean</a>
+<a name="ln128">        || node-&gt;details-&gt;standby || node-&gt;details-&gt;maintenance) {</a>
+<a name="ln129">        crm_trace(&quot;%s: online=%d, unclean=%d, standby=%d, maintenance=%d&quot;,</a>
+<a name="ln130">                  node-&gt;details-&gt;uname, node-&gt;details-&gt;online,</a>
+<a name="ln131">                  node-&gt;details-&gt;unclean, node-&gt;details-&gt;standby, node-&gt;details-&gt;maintenance);</a>
+<a name="ln132">        return FALSE;</a>
+<a name="ln133">    }</a>
+<a name="ln134">    return TRUE;</a>
+<a name="ln135">}</a>
+<a name="ln136"> </a>
+<a name="ln137">/* return -1 if 'a' is more preferred</a>
+<a name="ln138"> * return  1 if 'b' is more preferred</a>
+<a name="ln139"> */</a>
+<a name="ln140"> </a>
+<a name="ln141">gint</a>
+<a name="ln142">sort_node_weight(gconstpointer a, gconstpointer b, gpointer data)</a>
+<a name="ln143">{</a>
+<a name="ln144">    const node_t *node1 = (const node_t *)a;</a>
+<a name="ln145">    const node_t *node2 = (const node_t *)b;</a>
+<a name="ln146">    const node_t *active = (node_t *) data;</a>
+<a name="ln147"> </a>
+<a name="ln148">    int node1_weight = 0;</a>
+<a name="ln149">    int node2_weight = 0;</a>
+<a name="ln150"> </a>
+<a name="ln151">    int result = 0;</a>
+<a name="ln152"> </a>
+<a name="ln153">    if (a == NULL) {</a>
+<a name="ln154">        return 1;</a>
+<a name="ln155">    }</a>
+<a name="ln156">    if (b == NULL) {</a>
+<a name="ln157">        return -1;</a>
+<a name="ln158">    }</a>
+<a name="ln159"> </a>
+<a name="ln160">    node1_weight = node1-&gt;weight;</a>
+<a name="ln161">    node2_weight = node2-&gt;weight;</a>
+<a name="ln162"> </a>
+<a name="ln163">    if (can_run_resources(node1) == FALSE) {</a>
+<a name="ln164">        node1_weight = -INFINITY;</a>
+<a name="ln165">    }</a>
+<a name="ln166">    if (can_run_resources(node2) == FALSE) {</a>
+<a name="ln167">        node2_weight = -INFINITY;</a>
+<a name="ln168">    }</a>
+<a name="ln169"> </a>
+<a name="ln170">    if (node1_weight &gt; node2_weight) {</a>
+<a name="ln171">        crm_trace(&quot;%s (%d) &gt; %s (%d) : weight&quot;,</a>
+<a name="ln172">                  node1-&gt;details-&gt;uname, node1_weight, node2-&gt;details-&gt;uname, node2_weight);</a>
+<a name="ln173">        return -1;</a>
+<a name="ln174">    }</a>
+<a name="ln175"> </a>
+<a name="ln176">    if (node1_weight &lt; node2_weight) {</a>
+<a name="ln177">        crm_trace(&quot;%s (%d) &lt; %s (%d) : weight&quot;,</a>
+<a name="ln178">                  node1-&gt;details-&gt;uname, node1_weight, node2-&gt;details-&gt;uname, node2_weight);</a>
+<a name="ln179">        return 1;</a>
+<a name="ln180">    }</a>
+<a name="ln181"> </a>
+<a name="ln182">    crm_trace(&quot;%s (%d) == %s (%d) : weight&quot;,</a>
+<a name="ln183">              node1-&gt;details-&gt;uname, node1_weight, node2-&gt;details-&gt;uname, node2_weight);</a>
+<a name="ln184"> </a>
+<a name="ln185">    if (safe_str_eq(pe_dataset-&gt;placement_strategy, &quot;minimal&quot;)) {</a>
+<a name="ln186">        goto equal;</a>
+<a name="ln187">    }</a>
+<a name="ln188"> </a>
+<a name="ln189">    if (safe_str_eq(pe_dataset-&gt;placement_strategy, &quot;balanced&quot;)) {</a>
+<a name="ln190">        result = compare_capacity(node1, node2);</a>
+<a name="ln191">        if (result != 0) {</a>
+<a name="ln192">            return result;</a>
+<a name="ln193">        }</a>
+<a name="ln194">    }</a>
+<a name="ln195"> </a>
+<a name="ln196">    /* now try to balance resources across the cluster */</a>
+<a name="ln197">    if (node1-&gt;details-&gt;num_resources &lt; node2-&gt;details-&gt;num_resources) {</a>
+<a name="ln198">        crm_trace(&quot;%s (%d) &lt; %s (%d) : resources&quot;,</a>
+<a name="ln199">                  node1-&gt;details-&gt;uname, node1-&gt;details-&gt;num_resources,</a>
+<a name="ln200">                  node2-&gt;details-&gt;uname, node2-&gt;details-&gt;num_resources);</a>
+<a name="ln201">        return -1;</a>
+<a name="ln202"> </a>
+<a name="ln203">    } else if (node1-&gt;details-&gt;num_resources &gt; node2-&gt;details-&gt;num_resources) {</a>
+<a name="ln204">        crm_trace(&quot;%s (%d) &gt; %s (%d) : resources&quot;,</a>
+<a name="ln205">                  node1-&gt;details-&gt;uname, node1-&gt;details-&gt;num_resources,</a>
+<a name="ln206">                  node2-&gt;details-&gt;uname, node2-&gt;details-&gt;num_resources);</a>
+<a name="ln207">        return 1;</a>
+<a name="ln208">    }</a>
+<a name="ln209"> </a>
+<a name="ln210">    if (active &amp;&amp; active-&gt;details == node1-&gt;details) {</a>
+<a name="ln211">        crm_trace(&quot;%s (%d) &gt; %s (%d) : active&quot;,</a>
+<a name="ln212">                  node1-&gt;details-&gt;uname, node1-&gt;details-&gt;num_resources,</a>
+<a name="ln213">                  node2-&gt;details-&gt;uname, node2-&gt;details-&gt;num_resources);</a>
+<a name="ln214">        return -1;</a>
+<a name="ln215">    } else if (active &amp;&amp; active-&gt;details == node2-&gt;details) {</a>
+<a name="ln216">        crm_trace(&quot;%s (%d) &gt; %s (%d) : active&quot;,</a>
+<a name="ln217">                  node1-&gt;details-&gt;uname, node1-&gt;details-&gt;num_resources,</a>
+<a name="ln218">                  node2-&gt;details-&gt;uname, node2-&gt;details-&gt;num_resources);</a>
+<a name="ln219">        return 1;</a>
+<a name="ln220">    }</a>
+<a name="ln221">  equal:</a>
+<a name="ln222">    crm_trace(&quot;%s = %s&quot;, node1-&gt;details-&gt;uname, node2-&gt;details-&gt;uname);</a>
+<a name="ln223">    return strcmp(node1-&gt;details-&gt;uname, node2-&gt;details-&gt;uname);</a>
+<a name="ln224">}</a>
+<a name="ln225"> </a>
+<a name="ln226">void</a>
+<a name="ln227">native_deallocate(resource_t * rsc)</a>
+<a name="ln228">{</a>
+<a name="ln229">    if (rsc-&gt;allocated_to) {</a>
+<a name="ln230">        node_t *old = rsc-&gt;allocated_to;</a>
+<a name="ln231"> </a>
+<a name="ln232">        crm_info(&quot;Deallocating %s from %s&quot;, rsc-&gt;id, old-&gt;details-&gt;uname);</a>
+<a name="ln233">        set_bit(rsc-&gt;flags, pe_rsc_provisional);</a>
+<a name="ln234">        rsc-&gt;allocated_to = NULL;</a>
+<a name="ln235"> </a>
+<a name="ln236">        old-&gt;details-&gt;allocated_rsc = g_list_remove(old-&gt;details-&gt;allocated_rsc, rsc);</a>
+<a name="ln237">        old-&gt;details-&gt;num_resources--;</a>
+<a name="ln238">        /* old-&gt;count--; */</a>
+<a name="ln239">        calculate_utilization(old-&gt;details-&gt;utilization, rsc-&gt;utilization, TRUE);</a>
+<a name="ln240">        free(old);</a>
+<a name="ln241">    }</a>
+<a name="ln242">}</a>
+<a name="ln243"> </a>
+<a name="ln244">gboolean</a>
+<a name="ln245">native_assign_node(resource_t * rsc, GListPtr nodes, node_t * chosen, gboolean force)</a>
+<a name="ln246">{</a>
+<a name="ln247">    CRM_ASSERT(rsc-&gt;variant == pe_native);</a>
+<a name="ln248"> </a>
+<a name="ln249">    if (force == FALSE &amp;&amp; chosen != NULL) {</a>
+<a name="ln250">        bool unset = FALSE;</a>
+<a name="ln251"> </a>
+<a name="ln252">        if(chosen-&gt;weight &lt; 0) {</a>
+<a name="ln253">            unset = TRUE;</a>
+<a name="ln254"> </a>
+<a name="ln255">            // Allow the graph to assume that the remote resource will come up</a>
+<a name="ln256">        } else if(can_run_resources(chosen) == FALSE &amp;&amp; !is_container_remote_node(chosen)) {</a>
+<a name="ln257">            unset = TRUE;</a>
+<a name="ln258">        }</a>
+<a name="ln259"> </a>
+<a name="ln260">        if(unset) {</a>
+<a name="ln261">            crm_debug(&quot;All nodes for resource %s are unavailable&quot;</a>
+<a name="ln262">                      &quot;, unclean or shutting down (%s: %d, %d)&quot;,</a>
+<a name="ln263">                      rsc-&gt;id, chosen-&gt;details-&gt;uname, can_run_resources(chosen), chosen-&gt;weight);</a>
+<a name="ln264">            rsc-&gt;next_role = RSC_ROLE_STOPPED;</a>
+<a name="ln265">            chosen = NULL;</a>
+<a name="ln266">        }</a>
+<a name="ln267">    }</a>
+<a name="ln268"> </a>
+<a name="ln269">    /* todo: update the old node for each resource to reflect its</a>
+<a name="ln270">     * new resource count</a>
+<a name="ln271">     */</a>
+<a name="ln272"> </a>
+<a name="ln273">    native_deallocate(rsc);</a>
+<a name="ln274">    clear_bit(rsc-&gt;flags, pe_rsc_provisional);</a>
+<a name="ln275"> </a>
+<a name="ln276">    if (chosen == NULL) {</a>
+<a name="ln277">        GListPtr gIter = NULL;</a>
+<a name="ln278">        char *rc_inactive = crm_itoa(PCMK_OCF_NOT_RUNNING);</a>
+<a name="ln279"> </a>
+<a name="ln280">        crm_debug(&quot;Could not allocate a node for %s&quot;, rsc-&gt;id);</a>
+<a name="ln281">        rsc-&gt;next_role = RSC_ROLE_STOPPED;</a>
+<a name="ln282"> </a>
+<a name="ln283">        for (gIter = rsc-&gt;actions; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln284">            action_t *op = (action_t *) gIter-&gt;data;</a>
+<a name="ln285">            const char *interval = g_hash_table_lookup(op-&gt;meta, XML_LRM_ATTR_INTERVAL);</a>
+<a name="ln286"> </a>
+<a name="ln287">            crm_debug(&quot;Processing %s&quot;, op-&gt;uuid);</a>
+<a name="ln288">            if(safe_str_eq(RSC_STOP, op-&gt;task)) {</a>
+<a name="ln289">                update_action_flags(op, pe_action_optional | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln290"> </a>
+<a name="ln291">            } else if(safe_str_eq(RSC_START, op-&gt;task)) {</a>
+<a name="ln292">                update_action_flags(op, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln293">                /* set_bit(rsc-&gt;flags, pe_rsc_block); */</a>
+<a name="ln294"> </a>
+<a name="ln295">            } else if(interval &amp;&amp; safe_str_neq(interval, &quot;0&quot;)) {</a>
+<a name="ln296">                if(safe_str_eq(rc_inactive, g_hash_table_lookup(op-&gt;meta, XML_ATTR_TE_TARGET_RC))) {</a>
+<a name="ln297">                    /* This is a recurring monitor for the stopped state, leave it alone */</a>
+<a name="ln298"> </a>
+<a name="ln299">                } else {</a>
+<a name="ln300">                    /* Normal monitor operation, cancel it */</a>
+<a name="ln301">                    update_action_flags(op, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln302">                }</a>
+<a name="ln303">            }</a>
+<a name="ln304">        }</a>
+<a name="ln305"> </a>
+<a name="ln306">        free(rc_inactive);</a>
+<a name="ln307">        return FALSE;</a>
+<a name="ln308">    }</a>
+<a name="ln309"> </a>
+<a name="ln310">    crm_debug(&quot;Assigning %s to %s&quot;, chosen-&gt;details-&gt;uname, rsc-&gt;id);</a>
+<a name="ln311">    rsc-&gt;allocated_to = node_copy(chosen);</a>
+<a name="ln312"> </a>
+<a name="ln313">    chosen-&gt;details-&gt;allocated_rsc = g_list_prepend(chosen-&gt;details-&gt;allocated_rsc, rsc);</a>
+<a name="ln314">    chosen-&gt;details-&gt;num_resources++;</a>
+<a name="ln315">    chosen-&gt;count++;</a>
+<a name="ln316">    calculate_utilization(chosen-&gt;details-&gt;utilization, rsc-&gt;utilization, FALSE);</a>
+<a name="ln317">    dump_rsc_utilization(show_utilization ? 0 : utilization_log_level, __FUNCTION__, rsc, chosen);</a>
+<a name="ln318"> </a>
+<a name="ln319">    return TRUE;</a>
+<a name="ln320">}</a>
+<a name="ln321"> </a>
+<a name="ln322">void</a>
+<a name="ln323">log_action(unsigned int log_level, const char *pre_text, action_t * action, gboolean details)</a>
+<a name="ln324">{</a>
+<a name="ln325">    const char *node_uname = NULL;</a>
+<a name="ln326">    const char *node_uuid = NULL;</a>
+<a name="ln327"> </a>
+<a name="ln328">    if (action == NULL) {</a>
+<a name="ln329">        crm_trace(&quot;%s%s: &lt;NULL&gt;&quot;, pre_text == NULL ? &quot;&quot; : pre_text, pre_text == NULL ? &quot;&quot; : &quot;: &quot;);</a>
+<a name="ln330">        return;</a>
+<a name="ln331">    }</a>
+<a name="ln332"> </a>
+<a name="ln333">    if (is_set(action-&gt;flags, pe_action_pseudo)) {</a>
+<a name="ln334">        node_uname = NULL;</a>
+<a name="ln335">        node_uuid = NULL;</a>
+<a name="ln336"> </a>
+<a name="ln337">    } else if (action-&gt;node != NULL) {</a>
+<a name="ln338">        node_uname = action-&gt;node-&gt;details-&gt;uname;</a>
+<a name="ln339">        node_uuid = action-&gt;node-&gt;details-&gt;id;</a>
+<a name="ln340">    } else {</a>
+<a name="ln341">        node_uname = &quot;&lt;none&gt;&quot;;</a>
+<a name="ln342">        node_uuid = NULL;</a>
+<a name="ln343">    }</a>
+<a name="ln344"> </a>
+<a name="ln345">    switch (text2task(action-&gt;task)) {</a>
+<a name="ln346">        case stonith_node:</a>
+<a name="ln347">        case shutdown_crm:</a>
+<a name="ln348">            crm_trace(&quot;%s%s%sAction %d: %s%s%s%s%s%s&quot;,</a>
+<a name="ln349">                      pre_text == NULL ? &quot;&quot; : pre_text,</a>
+<a name="ln350">                      pre_text == NULL ? &quot;&quot; : &quot;: &quot;,</a>
+<a name="ln351">                      is_set(action-&gt;flags,</a>
+<a name="ln352">                             pe_action_pseudo) ? &quot;Pseudo &quot; : is_set(action-&gt;flags,</a>
+<a name="ln353">                                                                    pe_action_optional) ?</a>
+<a name="ln354">                      &quot;Optional &quot; : is_set(action-&gt;flags,</a>
+<a name="ln355">                                           pe_action_runnable) ? is_set(action-&gt;flags,</a>
+<a name="ln356">                                                                        pe_action_processed)</a>
+<a name="ln357">                      ? &quot;&quot; : &quot;(Provisional) &quot; : &quot;!!Non-Startable!! &quot;, action-&gt;id,</a>
+<a name="ln358">                      action-&gt;uuid, node_uname ? &quot;\ton &quot; : &quot;&quot;,</a>
+<a name="ln359">                      node_uname ? node_uname : &quot;&quot;, node_uuid ? &quot;\t\t(&quot; : &quot;&quot;,</a>
+<a name="ln360">                      node_uuid ? node_uuid : &quot;&quot;, node_uuid ? &quot;)&quot; : &quot;&quot;);</a>
+<a name="ln361">            break;</a>
+<a name="ln362">        default:</a>
+<a name="ln363">            crm_trace(&quot;%s%s%sAction %d: %s %s%s%s%s%s%s&quot;,</a>
+<a name="ln364">                      pre_text == NULL ? &quot;&quot; : pre_text,</a>
+<a name="ln365">                      pre_text == NULL ? &quot;&quot; : &quot;: &quot;,</a>
+<a name="ln366">                      is_set(action-&gt;flags,</a>
+<a name="ln367">                             pe_action_optional) ? &quot;Optional &quot; : is_set(action-&gt;flags,</a>
+<a name="ln368">                                                                        pe_action_pseudo)</a>
+<a name="ln369">                      ? &quot;Pseudo &quot; : is_set(action-&gt;flags,</a>
+<a name="ln370">                                           pe_action_runnable) ? is_set(action-&gt;flags,</a>
+<a name="ln371">                                                                        pe_action_processed)</a>
+<a name="ln372">                      ? &quot;&quot; : &quot;(Provisional) &quot; : &quot;!!Non-Startable!! &quot;, action-&gt;id,</a>
+<a name="ln373">                      action-&gt;uuid, action-&gt;rsc ? action-&gt;rsc-&gt;id : &quot;&lt;none&gt;&quot;,</a>
+<a name="ln374">                      node_uname ? &quot;\ton &quot; : &quot;&quot;, node_uname ? node_uname : &quot;&quot;,</a>
+<a name="ln375">                      node_uuid ? &quot;\t\t(&quot; : &quot;&quot;, node_uuid ? node_uuid : &quot;&quot;, node_uuid ? &quot;)&quot; : &quot;&quot;);</a>
+<a name="ln376"> </a>
+<a name="ln377">            break;</a>
+<a name="ln378">    }</a>
+<a name="ln379"> </a>
+<a name="ln380">    if (details) {</a>
+<a name="ln381">        GListPtr gIter = NULL;</a>
+<a name="ln382"> </a>
+<a name="ln383">        crm_trace(&quot;\t\t====== Preceding Actions&quot;);</a>
+<a name="ln384"> </a>
+<a name="ln385">        gIter = action-&gt;actions_before;</a>
+<a name="ln386">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln387">            action_wrapper_t *other = (action_wrapper_t *) gIter-&gt;data;</a>
+<a name="ln388"> </a>
+<a name="ln389">            log_action(log_level + 1, &quot;\t\t&quot;, other-&gt;action, FALSE);</a>
+<a name="ln390">        }</a>
+<a name="ln391"> </a>
+<a name="ln392">        crm_trace(&quot;\t\t====== Subsequent Actions&quot;);</a>
+<a name="ln393"> </a>
+<a name="ln394">        gIter = action-&gt;actions_after;</a>
+<a name="ln395">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln396">            action_wrapper_t *other = (action_wrapper_t *) gIter-&gt;data;</a>
+<a name="ln397"> </a>
+<a name="ln398">            log_action(log_level + 1, &quot;\t\t&quot;, other-&gt;action, FALSE);</a>
+<a name="ln399">        }</a>
+<a name="ln400"> </a>
+<a name="ln401">        crm_trace(&quot;\t\t====== End&quot;);</a>
+<a name="ln402"> </a>
+<a name="ln403">    } else {</a>
+<a name="ln404">        crm_trace(&quot;\t\t(seen=%d, before=%d, after=%d)&quot;,</a>
+<a name="ln405">                  action-&gt;seen_count,</a>
+<a name="ln406">                  g_list_length(action-&gt;actions_before), g_list_length(action-&gt;actions_after));</a>
+<a name="ln407">    }</a>
+<a name="ln408">}</a>
+<a name="ln409"> </a>
+<a name="ln410">gboolean</a>
+<a name="ln411">can_run_any(GHashTable * nodes)</a>
+<a name="ln412">{</a>
+<a name="ln413">    GHashTableIter iter;</a>
+<a name="ln414">    node_t *node = NULL;</a>
+<a name="ln415"> </a>
+<a name="ln416">    if (nodes == NULL) {</a>
+<a name="ln417">        return FALSE;</a>
+<a name="ln418">    }</a>
+<a name="ln419"> </a>
+<a name="ln420">    g_hash_table_iter_init(&amp;iter, nodes);</a>
+<a name="ln421">    while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln422">        if (can_run_resources(node) &amp;&amp; node-&gt;weight &gt;= 0) {</a>
+<a name="ln423">            return TRUE;</a>
+<a name="ln424">        }</a>
+<a name="ln425">    }</a>
+<a name="ln426"> </a>
+<a name="ln427">    return FALSE;</a>
+<a name="ln428">}</a>
+
+</code></pre>
+<div class="balloon" rel="78"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (node_weight == 0) == (0).</p></div>
+<div class="balloon" rel="348"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V646/" target="_blank">V646</a> Consider inspecting the application's logic. It's possible that 'else' keyword is missing.</p></div>
+<div class="balloon" rel="363"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V646/" target="_blank">V646</a> Consider inspecting the application's logic. It's possible that 'else' keyword is missing.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

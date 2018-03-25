@@ -1,0 +1,425 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;sys/types.h&gt;</a>
+<a name="ln28">#include &lt;unistd.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;stdlib.h&gt;</a>
+<a name="ln31">#include &lt;errno.h&gt;</a>
+<a name="ln32">#include &lt;fcntl.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;time.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln41">#include &lt;cibio.h&gt;</a>
+<a name="ln42">#include &lt;callbacks.h&gt;</a>
+<a name="ln43">#include &lt;notify.h&gt;</a>
+<a name="ln44"> </a>
+<a name="ln45">int pending_updates = 0;</a>
+<a name="ln46"> </a>
+<a name="ln47">struct cib_notification_s {</a>
+<a name="ln48">    xmlNode *msg;</a>
+<a name="ln49">    struct iovec *iov;</a>
+<a name="ln50">    int32_t iov_size;</a>
+<a name="ln51">};</a>
+<a name="ln52"> </a>
+<a name="ln53">void attach_cib_generation(xmlNode * msg, const char *field, xmlNode * a_cib);</a>
+<a name="ln54"> </a>
+<a name="ln55">void do_cib_notify(int options, const char *op, xmlNode * update,</a>
+<a name="ln56">                   int result, xmlNode * result_data, const char *msg_type);</a>
+<a name="ln57"> </a>
+<a name="ln58">static void</a>
+<a name="ln59">need_pre_notify(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln60">{</a>
+<a name="ln61">    crm_client_t *client = value;</a>
+<a name="ln62"> </a>
+<a name="ln63">    if (is_set(client-&gt;options, cib_notify_pre)) {</a>
+<a name="ln64">        gboolean *needed = user_data;</a>
+<a name="ln65"> </a>
+<a name="ln66">        *needed = TRUE;</a>
+<a name="ln67">    }</a>
+<a name="ln68">}</a>
+<a name="ln69"> </a>
+<a name="ln70">static void</a>
+<a name="ln71">need_post_notify(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln72">{</a>
+<a name="ln73">    crm_client_t *client = value;</a>
+<a name="ln74"> </a>
+<a name="ln75">    if (is_set(client-&gt;options, cib_notify_post)) {</a>
+<a name="ln76">        gboolean *needed = user_data;</a>
+<a name="ln77"> </a>
+<a name="ln78">        *needed = TRUE;</a>
+<a name="ln79">    }</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">static gboolean</a>
+<a name="ln83">cib_notify_send_one(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln84">{</a>
+<a name="ln85">    const char *type = NULL;</a>
+<a name="ln86">    gboolean do_send = FALSE;</a>
+<a name="ln87"> </a>
+<a name="ln88">    crm_client_t *client = value;</a>
+<a name="ln89">    struct cib_notification_s *update = user_data;</a>
+<a name="ln90"> </a>
+<a name="ln91">    CRM_CHECK(client != NULL, return TRUE);</a>
+<a name="ln92">    CRM_CHECK(update != NULL, return TRUE);</a>
+<a name="ln93"> </a>
+<a name="ln94">    if (client-&gt;ipcs == NULL &amp;&amp; client-&gt;remote == NULL) {</a>
+<a name="ln95">        crm_warn(&quot;Skipping client with NULL channel&quot;);</a>
+<a name="ln96">        return FALSE;</a>
+<a name="ln97">    }</a>
+<a name="ln98"> </a>
+<a name="ln99">    type = crm_element_value(update-&gt;msg, F_SUBTYPE);</a>
+<a name="ln100"> </a>
+<a name="ln101">    CRM_LOG_ASSERT(type != NULL);</a>
+<a name="ln102">    if (is_set(client-&gt;options, cib_notify_diff) &amp;&amp; safe_str_eq(type, T_CIB_DIFF_NOTIFY)) {</a>
+<a name="ln103">        do_send = TRUE;</a>
+<a name="ln104"> </a>
+<a name="ln105">    } else if (is_set(client-&gt;options, cib_notify_replace)</a>
+<a name="ln106">               &amp;&amp; safe_str_eq(type, T_CIB_REPLACE_NOTIFY)) {</a>
+<a name="ln107">        do_send = TRUE;</a>
+<a name="ln108"> </a>
+<a name="ln109">    } else if (is_set(client-&gt;options, cib_notify_confirm)</a>
+<a name="ln110">               &amp;&amp; safe_str_eq(type, T_CIB_UPDATE_CONFIRM)) {</a>
+<a name="ln111">        do_send = TRUE;</a>
+<a name="ln112"> </a>
+<a name="ln113">    } else if (is_set(client-&gt;options, cib_notify_pre) &amp;&amp; safe_str_eq(type, T_CIB_PRE_NOTIFY)) {</a>
+<a name="ln114">        do_send = TRUE;</a>
+<a name="ln115"> </a>
+<a name="ln116">    } else if (is_set(client-&gt;options, cib_notify_post) &amp;&amp; safe_str_eq(type, T_CIB_POST_NOTIFY)) {</a>
+<a name="ln117">        do_send = TRUE;</a>
+<a name="ln118">    }</a>
+<a name="ln119"> </a>
+<a name="ln120">    if (do_send) {</a>
+<a name="ln121">        switch (client-&gt;kind) {</a>
+<a name="ln122">            case CRM_CLIENT_IPC:</a>
+<a name="ln123">                if (crm_ipcs_sendv(client, update-&gt;iov, crm_ipc_server_event) &lt; 0) {</a>
+<a name="ln124">                    crm_warn(&quot;Notification of client %s/%s failed&quot;, client-&gt;name, client-&gt;id);</a>
+<a name="ln125">                }</a>
+<a name="ln126">                break;</a>
+<a name="ln127">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln128">            case CRM_CLIENT_TLS:</a>
+<a name="ln129">#endif</a>
+<a name="ln130">            case CRM_CLIENT_TCP:</a>
+<a name="ln131">                crm_debug(&quot;Sent %s notification to client %s/%s&quot;, type, client-&gt;name, client-&gt;id);</a>
+<a name="ln132">                crm_remote_send(client-&gt;remote, update-&gt;msg);</a>
+<a name="ln133">                break;</a>
+<a name="ln134">            default:</a>
+<a name="ln135">                crm_err(&quot;Unknown transport %d for %s&quot;, client-&gt;kind, client-&gt;name);</a>
+<a name="ln136">        }</a>
+<a name="ln137">    }</a>
+<a name="ln138">    return FALSE;</a>
+<a name="ln139">}</a>
+<a name="ln140"> </a>
+<a name="ln141">static void</a>
+<a name="ln142">cib_notify_send(xmlNode * xml)</a>
+<a name="ln143">{</a>
+<a name="ln144">    struct iovec *iov;</a>
+<a name="ln145">    struct cib_notification_s update;</a>
+<a name="ln146"> </a>
+<a name="ln147">    ssize_t rc = crm_ipc_prepare(0, xml, &amp;iov, 0);</a>
+<a name="ln148"> </a>
+<a name="ln149">    crm_trace(&quot;Notifying clients&quot;);</a>
+<a name="ln150"> </a>
+<a name="ln151">    if (rc &gt; 0) {</a>
+<a name="ln152">        update.msg = xml;</a>
+<a name="ln153">        update.iov = iov;</a>
+<a name="ln154">        update.iov_size = rc;</a>
+<a name="ln155">        g_hash_table_foreach_remove(client_connections, cib_notify_send_one, &amp;update);</a>
+<a name="ln156"> </a>
+<a name="ln157">    } else {</a>
+<a name="ln158">        crm_notice(&quot;Notification failed: %s (%d)&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln159">    }</a>
+<a name="ln160"> </a>
+<a name="ln161">    if (iov) {</a>
+<a name="ln162">        free(iov[0].iov_base);</a>
+<a name="ln163">        free(iov[1].iov_base);</a>
+<a name="ln164">        free(iov);</a>
+<a name="ln165">    }</a>
+<a name="ln166"> </a>
+<a name="ln167">    crm_trace(&quot;Notify complete&quot;);</a>
+<a name="ln168">}</a>
+<a name="ln169"> </a>
+<a name="ln170">void</a>
+<a name="ln171">cib_pre_notify(int options, const char *op, xmlNode * existing, xmlNode * update)</a>
+<a name="ln172">{</a>
+<a name="ln173">    xmlNode *update_msg = NULL;</a>
+<a name="ln174">    const char *type = NULL;</a>
+<a name="ln175">    const char *id = NULL;</a>
+<a name="ln176">    gboolean needed = FALSE;</a>
+<a name="ln177"> </a>
+<a name="ln178">    g_hash_table_foreach(client_connections, need_pre_notify, &amp;needed);</a>
+<a name="ln179">    if (needed == FALSE) {</a>
+<a name="ln180">        return;</a>
+<a name="ln181">    }</a>
+<a name="ln182"> </a>
+<a name="ln183">    /* TODO: consider pre-notification for removal */</a>
+<a name="ln184">    update_msg = create_xml_node(NULL, &quot;pre-notify&quot;);</a>
+<a name="ln185"> </a>
+<a name="ln186">    if (update != NULL) {</a>
+<a name="ln187">        id = crm_element_value(update, XML_ATTR_ID);</a>
+<a name="ln188">    }</a>
+<a name="ln189"> </a>
+<a name="ln190">    crm_xml_add(update_msg, F_TYPE, T_CIB_NOTIFY);</a>
+<a name="ln191">    crm_xml_add(update_msg, F_SUBTYPE, T_CIB_PRE_NOTIFY);</a>
+<a name="ln192">    crm_xml_add(update_msg, F_CIB_OPERATION, op);</a>
+<a name="ln193"> </a>
+<a name="ln194">    if (id != NULL) {</a>
+<a name="ln195">        crm_xml_add(update_msg, F_CIB_OBJID, id);</a>
+<a name="ln196">    }</a>
+<a name="ln197"> </a>
+<a name="ln198">    if (update != NULL) {</a>
+<a name="ln199">        crm_xml_add(update_msg, F_CIB_OBJTYPE, crm_element_name(update));</a>
+<a name="ln200">    } else if (existing != NULL) {</a>
+<a name="ln201">        crm_xml_add(update_msg, F_CIB_OBJTYPE, crm_element_name(existing));</a>
+<a name="ln202">    }</a>
+<a name="ln203"> </a>
+<a name="ln204">    type = crm_element_value(update_msg, F_CIB_OBJTYPE);</a>
+<a name="ln205">    attach_cib_generation(update_msg, &quot;cib_generation&quot;, the_cib);</a>
+<a name="ln206"> </a>
+<a name="ln207">    if (existing != NULL) {</a>
+<a name="ln208">        add_message_xml(update_msg, F_CIB_EXISTING, existing);</a>
+<a name="ln209">    }</a>
+<a name="ln210">    if (update != NULL) {</a>
+<a name="ln211">        add_message_xml(update_msg, F_CIB_UPDATE, update);</a>
+<a name="ln212">    }</a>
+<a name="ln213"> </a>
+<a name="ln214">    cib_notify_send(update_msg);</a>
+<a name="ln215"> </a>
+<a name="ln216">    if (update == NULL) {</a>
+<a name="ln217">        crm_trace(&quot;Performing operation %s (on section=%s)&quot;, op, type);</a>
+<a name="ln218"> </a>
+<a name="ln219">    } else {</a>
+<a name="ln220">        crm_trace(&quot;Performing %s on &lt;%s%s%s&gt;&quot;, op, type, id ? &quot; id=&quot; : &quot;&quot;, id ? id : &quot;&quot;);</a>
+<a name="ln221">    }</a>
+<a name="ln222"> </a>
+<a name="ln223">    free_xml(update_msg);</a>
+<a name="ln224">}</a>
+<a name="ln225"> </a>
+<a name="ln226">void</a>
+<a name="ln227">cib_post_notify(int options, const char *op, xmlNode * update, int result, xmlNode * new_obj)</a>
+<a name="ln228">{</a>
+<a name="ln229">    gboolean needed = FALSE;</a>
+<a name="ln230"> </a>
+<a name="ln231">    g_hash_table_foreach(client_connections, need_post_notify, &amp;needed);</a>
+<a name="ln232">    if (needed == FALSE) {</a>
+<a name="ln233">        return;</a>
+<a name="ln234">    }</a>
+<a name="ln235"> </a>
+<a name="ln236">    do_cib_notify(options, op, update, result, new_obj, T_CIB_UPDATE_CONFIRM);</a>
+<a name="ln237">}</a>
+<a name="ln238"> </a>
+<a name="ln239">void</a>
+<a name="ln240">cib_diff_notify(int options, const char *client, const char *call_id, const char *op,</a>
+<a name="ln241">                xmlNode * update, int result, xmlNode * diff)</a>
+<a name="ln242">{</a>
+<a name="ln243">    int add_updates = 0;</a>
+<a name="ln244">    int add_epoch = 0;</a>
+<a name="ln245">    int add_admin_epoch = 0;</a>
+<a name="ln246"> </a>
+<a name="ln247">    int del_updates = 0;</a>
+<a name="ln248">    int del_epoch = 0;</a>
+<a name="ln249">    int del_admin_epoch = 0;</a>
+<a name="ln250"> </a>
+<a name="ln251">    int log_level = LOG_DEBUG_2;</a>
+<a name="ln252"> </a>
+<a name="ln253">    if (diff == NULL) {</a>
+<a name="ln254">        return;</a>
+<a name="ln255">    }</a>
+<a name="ln256"> </a>
+<a name="ln257">    if (result != pcmk_ok) {</a>
+<a name="ln258">        log_level = LOG_WARNING;</a>
+<a name="ln259">    }</a>
+<a name="ln260"> </a>
+<a name="ln261">    cib_diff_version_details(diff, &amp;add_admin_epoch, &amp;add_epoch, &amp;add_updates,</a>
+<a name="ln262">                             &amp;del_admin_epoch, &amp;del_epoch, &amp;del_updates);</a>
+<a name="ln263"> </a>
+<a name="ln264">    if (add_updates != del_updates) {</a>
+<a name="ln265">        do_crm_log(log_level,</a>
+<a name="ln266">                   &quot;Update (client: %s%s%s): %d.%d.%d -&gt; %d.%d.%d (%s)&quot;,</a>
+<a name="ln267">                   client, call_id ? &quot;, call:&quot; : &quot;&quot;, call_id ? call_id : &quot;&quot;,</a>
+<a name="ln268">                   del_admin_epoch, del_epoch, del_updates,</a>
+<a name="ln269">                   add_admin_epoch, add_epoch, add_updates, pcmk_strerror(result));</a>
+<a name="ln270"> </a>
+<a name="ln271">    } else if (diff != NULL) {</a>
+<a name="ln272">        do_crm_log(log_level,</a>
+<a name="ln273">                   &quot;Local-only Change (client:%s%s%s): %d.%d.%d (%s)&quot;,</a>
+<a name="ln274">                   client, call_id ? &quot;, call: &quot; : &quot;&quot;, call_id ? call_id : &quot;&quot;,</a>
+<a name="ln275">                   add_admin_epoch, add_epoch, add_updates, pcmk_strerror(result));</a>
+<a name="ln276">    }</a>
+<a name="ln277"> </a>
+<a name="ln278">    do_cib_notify(options, op, update, result, diff, T_CIB_DIFF_NOTIFY);</a>
+<a name="ln279">}</a>
+<a name="ln280"> </a>
+<a name="ln281">void</a>
+<a name="ln282">do_cib_notify(int options, const char *op, xmlNode * update,</a>
+<a name="ln283">              int result, xmlNode * result_data, const char *msg_type)</a>
+<a name="ln284">{</a>
+<a name="ln285">    xmlNode *update_msg = NULL;</a>
+<a name="ln286">    const char *id = NULL;</a>
+<a name="ln287"> </a>
+<a name="ln288">    update_msg = create_xml_node(NULL, &quot;notify&quot;);</a>
+<a name="ln289"> </a>
+<a name="ln290">    if (result_data != NULL) {</a>
+<a name="ln291">        id = crm_element_value(result_data, XML_ATTR_ID);</a>
+<a name="ln292">    }</a>
+<a name="ln293"> </a>
+<a name="ln294">    crm_xml_add(update_msg, F_TYPE, T_CIB_NOTIFY);</a>
+<a name="ln295">    crm_xml_add(update_msg, F_SUBTYPE, msg_type);</a>
+<a name="ln296">    crm_xml_add(update_msg, F_CIB_OPERATION, op);</a>
+<a name="ln297">    crm_xml_add_int(update_msg, F_CIB_RC, result);</a>
+<a name="ln298"> </a>
+<a name="ln299">    if (id != NULL) {</a>
+<a name="ln300">        crm_xml_add(update_msg, F_CIB_OBJID, id);</a>
+<a name="ln301">    }</a>
+<a name="ln302"> </a>
+<a name="ln303">    if (update != NULL) {</a>
+<a name="ln304">        crm_trace(&quot;Setting type to update-&gt;name: %s&quot;, crm_element_name(update));</a>
+<a name="ln305">        crm_xml_add(update_msg, F_CIB_OBJTYPE, crm_element_name(update));</a>
+<a name="ln306"> </a>
+<a name="ln307">    } else if (result_data != NULL) {</a>
+<a name="ln308">        crm_trace(&quot;Setting type to new_obj-&gt;name: %s&quot;, crm_element_name(result_data));</a>
+<a name="ln309">        crm_xml_add(update_msg, F_CIB_OBJTYPE, crm_element_name(result_data));</a>
+<a name="ln310"> </a>
+<a name="ln311">    } else {</a>
+<a name="ln312">        crm_trace(&quot;Not Setting type&quot;);</a>
+<a name="ln313">    }</a>
+<a name="ln314"> </a>
+<a name="ln315">    attach_cib_generation(update_msg, &quot;cib_generation&quot;, the_cib);</a>
+<a name="ln316">    if (update != NULL) {</a>
+<a name="ln317">        add_message_xml(update_msg, F_CIB_UPDATE, update);</a>
+<a name="ln318">    }</a>
+<a name="ln319">    if (result_data != NULL) {</a>
+<a name="ln320">        add_message_xml(update_msg, F_CIB_UPDATE_RESULT, result_data);</a>
+<a name="ln321">    }</a>
+<a name="ln322"> </a>
+<a name="ln323">    cib_notify_send(update_msg);</a>
+<a name="ln324">    free_xml(update_msg);</a>
+<a name="ln325">}</a>
+<a name="ln326"> </a>
+<a name="ln327">void</a>
+<a name="ln328">attach_cib_generation(xmlNode * msg, const char *field, xmlNode * a_cib)</a>
+<a name="ln329">{</a>
+<a name="ln330">    xmlNode *generation = create_xml_node(NULL, XML_CIB_TAG_GENERATION_TUPPLE);</a>
+<a name="ln331"> </a>
+<a name="ln332">    if (a_cib != NULL) {</a>
+<a name="ln333">        copy_in_properties(generation, a_cib);</a>
+<a name="ln334">    }</a>
+<a name="ln335">    add_message_xml(msg, field, generation);</a>
+<a name="ln336">    free_xml(generation);</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">void</a>
+<a name="ln340">cib_replace_notify(const char *origin, xmlNode * update, int result, xmlNode * diff)</a>
+<a name="ln341">{</a>
+<a name="ln342">    xmlNode *replace_msg = NULL;</a>
+<a name="ln343"> </a>
+<a name="ln344">    int add_updates = 0;</a>
+<a name="ln345">    int add_epoch = 0;</a>
+<a name="ln346">    int add_admin_epoch = 0;</a>
+<a name="ln347"> </a>
+<a name="ln348">    int del_updates = 0;</a>
+<a name="ln349">    int del_epoch = 0;</a>
+<a name="ln350">    int del_admin_epoch = 0;</a>
+<a name="ln351"> </a>
+<a name="ln352">    if (diff == NULL) {</a>
+<a name="ln353">        return;</a>
+<a name="ln354">    }</a>
+<a name="ln355"> </a>
+<a name="ln356">    cib_diff_version_details(diff, &amp;add_admin_epoch, &amp;add_epoch, &amp;add_updates,</a>
+<a name="ln357">                             &amp;del_admin_epoch, &amp;del_epoch, &amp;del_updates);</a>
+<a name="ln358"> </a>
+<a name="ln359">    if (del_updates &lt; 0) {</a>
+<a name="ln360">        crm_log_xml_debug(diff, &quot;Bad replace diff&quot;);</a>
+<a name="ln361">    }</a>
+<a name="ln362"> </a>
+<a name="ln363">    if (add_updates != del_updates) {</a>
+<a name="ln364">        crm_info(&quot;Replaced: %d.%d.%d -&gt; %d.%d.%d from %s&quot;,</a>
+<a name="ln365">                 del_admin_epoch, del_epoch, del_updates,</a>
+<a name="ln366">                 add_admin_epoch, add_epoch, add_updates, crm_str(origin));</a>
+<a name="ln367">    } else if (diff != NULL) {</a>
+<a name="ln368">        crm_info(&quot;Local-only Replace: %d.%d.%d from %s&quot;,</a>
+<a name="ln369">                 add_admin_epoch, add_epoch, add_updates, crm_str(origin));</a>
+<a name="ln370">    }</a>
+<a name="ln371"> </a>
+<a name="ln372">    replace_msg = create_xml_node(NULL, &quot;notify-replace&quot;);</a>
+<a name="ln373">    crm_xml_add(replace_msg, F_TYPE, T_CIB_NOTIFY);</a>
+<a name="ln374">    crm_xml_add(replace_msg, F_SUBTYPE, T_CIB_REPLACE_NOTIFY);</a>
+<a name="ln375">    crm_xml_add(replace_msg, F_CIB_OPERATION, CIB_OP_REPLACE);</a>
+<a name="ln376">    crm_xml_add_int(replace_msg, F_CIB_RC, result);</a>
+<a name="ln377">    attach_cib_generation(replace_msg, &quot;cib-replace-generation&quot;, update);</a>
+<a name="ln378"> </a>
+<a name="ln379">    crm_log_xml_trace(replace_msg, &quot;CIB Replaced&quot;);</a>
+<a name="ln380"> </a>
+<a name="ln381">    cib_notify_send(replace_msg);</a>
+<a name="ln382">    free_xml(replace_msg);</a>
+<a name="ln383">}</a>
+
+</code></pre>
+<div class="balloon" rel="271"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'diff != NULL' is always true.</p></div>
+<div class="balloon" rel="367"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'diff != NULL' is always true.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

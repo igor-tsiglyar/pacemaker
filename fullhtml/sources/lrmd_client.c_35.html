@@ -1,0 +1,2288 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2012 David Vossel &lt;davidvossel@gmail.com&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27">#include &lt;stdlib.h&gt;</a>
+<a name="ln28">#include &lt;stdio.h&gt;</a>
+<a name="ln29">#include &lt;stdarg.h&gt;</a>
+<a name="ln30">#include &lt;string.h&gt;</a>
+<a name="ln31">#include &lt;ctype.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;sys/types.h&gt;</a>
+<a name="ln34">#include &lt;sys/wait.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;glib.h&gt;</a>
+<a name="ln37">#include &lt;dirent.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;crm/crm.h&gt;</a>
+<a name="ln40">#include &lt;crm/lrmd.h&gt;</a>
+<a name="ln41">#include &lt;crm/services.h&gt;</a>
+<a name="ln42">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln43">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln44">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln45"> </a>
+<a name="ln46">#include &lt;crm/stonith-ng.h&gt;</a>
+<a name="ln47"> </a>
+<a name="ln48">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln49">#  undef KEYFILE</a>
+<a name="ln50">#  include &lt;gnutls/gnutls.h&gt;</a>
+<a name="ln51">#endif</a>
+<a name="ln52"> </a>
+<a name="ln53">#include &lt;sys/socket.h&gt;</a>
+<a name="ln54">#include &lt;netinet/in.h&gt;</a>
+<a name="ln55">#include &lt;netinet/ip.h&gt;</a>
+<a name="ln56">#include &lt;arpa/inet.h&gt;</a>
+<a name="ln57">#include &lt;netdb.h&gt;</a>
+<a name="ln58"> </a>
+<a name="ln59">#define MAX_TLS_RECV_WAIT 10000</a>
+<a name="ln60"> </a>
+<a name="ln61">CRM_TRACE_INIT_DATA(lrmd);</a>
+<a name="ln62"> </a>
+<a name="ln63">static int lrmd_api_disconnect(lrmd_t * lrmd);</a>
+<a name="ln64">static int lrmd_api_is_connected(lrmd_t * lrmd);</a>
+<a name="ln65"> </a>
+<a name="ln66">/* IPC proxy functions */</a>
+<a name="ln67">int lrmd_internal_proxy_send(lrmd_t * lrmd, xmlNode *msg);</a>
+<a name="ln68">static void lrmd_internal_proxy_dispatch(lrmd_t *lrmd, xmlNode *msg);</a>
+<a name="ln69">void lrmd_internal_set_proxy_callback(lrmd_t * lrmd, void *userdata, void (*callback)(lrmd_t *lrmd, void *userdata, xmlNode *msg));</a>
+<a name="ln70"> </a>
+<a name="ln71">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln72">#  define LRMD_CLIENT_HANDSHAKE_TIMEOUT 5000    /* 5 seconds */</a>
+<a name="ln73">gnutls_psk_client_credentials_t psk_cred_s;</a>
+<a name="ln74">int lrmd_tls_set_key(gnutls_datum_t * key);</a>
+<a name="ln75">static void lrmd_tls_disconnect(lrmd_t * lrmd);</a>
+<a name="ln76">static int global_remote_msg_id = 0;</a>
+<a name="ln77">int lrmd_tls_send_msg(crm_remote_t * session, xmlNode * msg, uint32_t id, const char *msg_type);</a>
+<a name="ln78">static void lrmd_tls_connection_destroy(gpointer userdata);</a>
+<a name="ln79">#endif</a>
+<a name="ln80"> </a>
+<a name="ln81">typedef struct lrmd_private_s {</a>
+<a name="ln82">    enum client_type type;</a>
+<a name="ln83">    char *token;</a>
+<a name="ln84">    mainloop_io_t *source;</a>
+<a name="ln85"> </a>
+<a name="ln86">    /* IPC parameters */</a>
+<a name="ln87">    crm_ipc_t *ipc;</a>
+<a name="ln88"> </a>
+<a name="ln89">    crm_remote_t *remote;</a>
+<a name="ln90"> </a>
+<a name="ln91">    /* Extra TLS parameters */</a>
+<a name="ln92">    char *remote_nodename;</a>
+<a name="ln93">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln94">    char *server;</a>
+<a name="ln95">    int port;</a>
+<a name="ln96">    gnutls_psk_client_credentials_t psk_cred_c;</a>
+<a name="ln97"> </a>
+<a name="ln98">    /* while the async connection is occuring, this is the id</a>
+<a name="ln99">     * of the connection timeout timer. */</a>
+<a name="ln100">    int async_timer;</a>
+<a name="ln101">    int sock;</a>
+<a name="ln102">    /* since tls requires a round trip across the network for a</a>
+<a name="ln103">     * request/reply, there are times where we just want to be able</a>
+<a name="ln104">     * to send a request from the client and not wait around (or even care</a>
+<a name="ln105">     * about) what the reply is. */</a>
+<a name="ln106">    int expected_late_replies;</a>
+<a name="ln107">    GList *pending_notify;</a>
+<a name="ln108">    crm_trigger_t *process_notify;</a>
+<a name="ln109">#endif</a>
+<a name="ln110"> </a>
+<a name="ln111">    lrmd_event_callback callback;</a>
+<a name="ln112"> </a>
+<a name="ln113">    /* Internal IPC proxy msg passing for remote guests */</a>
+<a name="ln114">    void (*proxy_callback)(lrmd_t *lrmd, void *userdata, xmlNode *msg);</a>
+<a name="ln115">    void *proxy_callback_userdata;</a>
+<a name="ln116">    char *peer_version;</a>
+<a name="ln117">} lrmd_private_t;</a>
+<a name="ln118"> </a>
+<a name="ln119">static lrmd_list_t *</a>
+<a name="ln120">lrmd_list_add(lrmd_list_t * head, const char *value)</a>
+<a name="ln121">{</a>
+<a name="ln122">    lrmd_list_t *p, *end;</a>
+<a name="ln123"> </a>
+<a name="ln124">    p = calloc(1, sizeof(lrmd_list_t));</a>
+<a name="ln125">    p-&gt;val = strdup(value);</a>
+<a name="ln126"> </a>
+<a name="ln127">    end = head;</a>
+<a name="ln128">    while (end &amp;&amp; end-&gt;next) {</a>
+<a name="ln129">        end = end-&gt;next;</a>
+<a name="ln130">    }</a>
+<a name="ln131"> </a>
+<a name="ln132">    if (end) {</a>
+<a name="ln133">        end-&gt;next = p;</a>
+<a name="ln134">    } else {</a>
+<a name="ln135">        head = p;</a>
+<a name="ln136">    }</a>
+<a name="ln137"> </a>
+<a name="ln138">    return head;</a>
+<a name="ln139">}</a>
+<a name="ln140"> </a>
+<a name="ln141">void</a>
+<a name="ln142">lrmd_list_freeall(lrmd_list_t * head)</a>
+<a name="ln143">{</a>
+<a name="ln144">    lrmd_list_t *p;</a>
+<a name="ln145"> </a>
+<a name="ln146">    while (head) {</a>
+<a name="ln147">        char *val = (char *)head-&gt;val;</a>
+<a name="ln148"> </a>
+<a name="ln149">        p = head-&gt;next;</a>
+<a name="ln150">        free(val);</a>
+<a name="ln151">        free(head);</a>
+<a name="ln152">        head = p;</a>
+<a name="ln153">    }</a>
+<a name="ln154">}</a>
+<a name="ln155"> </a>
+<a name="ln156">lrmd_key_value_t *</a>
+<a name="ln157">lrmd_key_value_add(lrmd_key_value_t * head, const char *key, const char *value)</a>
+<a name="ln158">{</a>
+<a name="ln159">    lrmd_key_value_t *p, *end;</a>
+<a name="ln160"> </a>
+<a name="ln161">    p = calloc(1, sizeof(lrmd_key_value_t));</a>
+<a name="ln162">    p-&gt;key = strdup(key);</a>
+<a name="ln163">    p-&gt;value = strdup(value);</a>
+<a name="ln164"> </a>
+<a name="ln165">    end = head;</a>
+<a name="ln166">    while (end &amp;&amp; end-&gt;next) {</a>
+<a name="ln167">        end = end-&gt;next;</a>
+<a name="ln168">    }</a>
+<a name="ln169"> </a>
+<a name="ln170">    if (end) {</a>
+<a name="ln171">        end-&gt;next = p;</a>
+<a name="ln172">    } else {</a>
+<a name="ln173">        head = p;</a>
+<a name="ln174">    }</a>
+<a name="ln175"> </a>
+<a name="ln176">    return head;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">void</a>
+<a name="ln180">lrmd_key_value_freeall(lrmd_key_value_t * head)</a>
+<a name="ln181">{</a>
+<a name="ln182">    lrmd_key_value_t *p;</a>
+<a name="ln183"> </a>
+<a name="ln184">    while (head) {</a>
+<a name="ln185">        p = head-&gt;next;</a>
+<a name="ln186">        free(head-&gt;key);</a>
+<a name="ln187">        free(head-&gt;value);</a>
+<a name="ln188">        free(head);</a>
+<a name="ln189">        head = p;</a>
+<a name="ln190">    }</a>
+<a name="ln191">}</a>
+<a name="ln192"> </a>
+<a name="ln193">static void</a>
+<a name="ln194">dup_attr(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln195">{</a>
+<a name="ln196">    g_hash_table_replace(user_data, strdup(key), strdup(value));</a>
+<a name="ln197">}</a>
+<a name="ln198"> </a>
+<a name="ln199">lrmd_event_data_t *</a>
+<a name="ln200">lrmd_copy_event(lrmd_event_data_t * event)</a>
+<a name="ln201">{</a>
+<a name="ln202">    lrmd_event_data_t *copy = NULL;</a>
+<a name="ln203"> </a>
+<a name="ln204">    copy = calloc(1, sizeof(lrmd_event_data_t));</a>
+<a name="ln205"> </a>
+<a name="ln206">    /* This will get all the int values.</a>
+<a name="ln207">     * we just have to be careful not to leave any</a>
+<a name="ln208">     * dangling pointers to strings. */</a>
+<a name="ln209">    memcpy(copy, event, sizeof(lrmd_event_data_t));</a>
+<a name="ln210"> </a>
+<a name="ln211">    copy-&gt;rsc_id = event-&gt;rsc_id ? strdup(event-&gt;rsc_id) : NULL;</a>
+<a name="ln212">    copy-&gt;op_type = event-&gt;op_type ? strdup(event-&gt;op_type) : NULL;</a>
+<a name="ln213">    copy-&gt;user_data = event-&gt;user_data ? strdup(event-&gt;user_data) : NULL;</a>
+<a name="ln214">    copy-&gt;output = event-&gt;output ? strdup(event-&gt;output) : NULL;</a>
+<a name="ln215">    copy-&gt;exit_reason = event-&gt;exit_reason ? strdup(event-&gt;exit_reason) : NULL;</a>
+<a name="ln216">    copy-&gt;remote_nodename = event-&gt;remote_nodename ? strdup(event-&gt;remote_nodename) : NULL;</a>
+<a name="ln217"> </a>
+<a name="ln218">    if (event-&gt;params) {</a>
+<a name="ln219">        copy-&gt;params = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln220">                                             g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln221"> </a>
+<a name="ln222">        if (copy-&gt;params != NULL) {</a>
+<a name="ln223">            g_hash_table_foreach(event-&gt;params, dup_attr, copy-&gt;params);</a>
+<a name="ln224">        }</a>
+<a name="ln225">    }</a>
+<a name="ln226"> </a>
+<a name="ln227">    return copy;</a>
+<a name="ln228">}</a>
+<a name="ln229"> </a>
+<a name="ln230">void</a>
+<a name="ln231">lrmd_free_event(lrmd_event_data_t * event)</a>
+<a name="ln232">{</a>
+<a name="ln233">    if (!event) {</a>
+<a name="ln234">        return;</a>
+<a name="ln235">    }</a>
+<a name="ln236"> </a>
+<a name="ln237">    /* free gives me grief if i try to cast */</a>
+<a name="ln238">    free((char *)event-&gt;rsc_id);</a>
+<a name="ln239">    free((char *)event-&gt;op_type);</a>
+<a name="ln240">    free((char *)event-&gt;user_data);</a>
+<a name="ln241">    free((char *)event-&gt;output);</a>
+<a name="ln242">    free((char *)event-&gt;exit_reason);</a>
+<a name="ln243">    free((char *)event-&gt;remote_nodename);</a>
+<a name="ln244">    if (event-&gt;params) {</a>
+<a name="ln245">        g_hash_table_destroy(event-&gt;params);</a>
+<a name="ln246">    }</a>
+<a name="ln247">    free(event);</a>
+<a name="ln248">}</a>
+<a name="ln249"> </a>
+<a name="ln250">static int</a>
+<a name="ln251">lrmd_dispatch_internal(lrmd_t * lrmd, xmlNode * msg)</a>
+<a name="ln252">{</a>
+<a name="ln253">    const char *type;</a>
+<a name="ln254">    const char *proxy_session = crm_element_value(msg, F_LRMD_IPC_SESSION);</a>
+<a name="ln255">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln256">    lrmd_event_data_t event = { 0, };</a>
+<a name="ln257"> </a>
+<a name="ln258">    if (proxy_session != NULL) {</a>
+<a name="ln259">        /* this is proxy business */</a>
+<a name="ln260">        lrmd_internal_proxy_dispatch(lrmd, msg);</a>
+<a name="ln261">        return 1;</a>
+<a name="ln262">    } else if (!native-&gt;callback) {</a>
+<a name="ln263">        /* no callback set */</a>
+<a name="ln264">        crm_trace(&quot;notify event received but client has not set callback&quot;);</a>
+<a name="ln265">        return 1;</a>
+<a name="ln266">    }</a>
+<a name="ln267"> </a>
+<a name="ln268">    event.remote_nodename = native-&gt;remote_nodename;</a>
+<a name="ln269">    type = crm_element_value(msg, F_LRMD_OPERATION);</a>
+<a name="ln270">    crm_element_value_int(msg, F_LRMD_CALLID, &amp;event.call_id);</a>
+<a name="ln271">    event.rsc_id = crm_element_value(msg, F_LRMD_RSC_ID);</a>
+<a name="ln272"> </a>
+<a name="ln273">    if (crm_str_eq(type, LRMD_OP_RSC_REG, TRUE)) {</a>
+<a name="ln274">        event.type = lrmd_event_register;</a>
+<a name="ln275">    } else if (crm_str_eq(type, LRMD_OP_RSC_UNREG, TRUE)) {</a>
+<a name="ln276">        event.type = lrmd_event_unregister;</a>
+<a name="ln277">    } else if (crm_str_eq(type, LRMD_OP_RSC_EXEC, TRUE)) {</a>
+<a name="ln278">        crm_element_value_int(msg, F_LRMD_TIMEOUT, &amp;event.timeout);</a>
+<a name="ln279">        crm_element_value_int(msg, F_LRMD_RSC_INTERVAL, &amp;event.interval);</a>
+<a name="ln280">        crm_element_value_int(msg, F_LRMD_RSC_START_DELAY, &amp;event.start_delay);</a>
+<a name="ln281">        crm_element_value_int(msg, F_LRMD_EXEC_RC, (int *)&amp;event.rc);</a>
+<a name="ln282">        crm_element_value_int(msg, F_LRMD_OP_STATUS, &amp;event.op_status);</a>
+<a name="ln283">        crm_element_value_int(msg, F_LRMD_RSC_DELETED, &amp;event.rsc_deleted);</a>
+<a name="ln284"> </a>
+<a name="ln285">        crm_element_value_int(msg, F_LRMD_RSC_RUN_TIME, (int *)&amp;event.t_run);</a>
+<a name="ln286">        crm_element_value_int(msg, F_LRMD_RSC_RCCHANGE_TIME, (int *)&amp;event.t_rcchange);</a>
+<a name="ln287">        crm_element_value_int(msg, F_LRMD_RSC_EXEC_TIME, (int *)&amp;event.exec_time);</a>
+<a name="ln288">        crm_element_value_int(msg, F_LRMD_RSC_QUEUE_TIME, (int *)&amp;event.queue_time);</a>
+<a name="ln289"> </a>
+<a name="ln290">        event.op_type = crm_element_value(msg, F_LRMD_RSC_ACTION);</a>
+<a name="ln291">        event.user_data = crm_element_value(msg, F_LRMD_RSC_USERDATA_STR);</a>
+<a name="ln292">        event.output = crm_element_value(msg, F_LRMD_RSC_OUTPUT);</a>
+<a name="ln293">        event.exit_reason = crm_element_value(msg, F_LRMD_RSC_EXIT_REASON);</a>
+<a name="ln294">        event.type = lrmd_event_exec_complete;</a>
+<a name="ln295"> </a>
+<a name="ln296">        event.params = xml2list(msg);</a>
+<a name="ln297">    } else if (crm_str_eq(type, LRMD_OP_NEW_CLIENT, TRUE)) {</a>
+<a name="ln298">        event.type = lrmd_event_new_client;</a>
+<a name="ln299">    } else if (crm_str_eq(type, LRMD_OP_POKE, TRUE)) {</a>
+<a name="ln300">        event.type = lrmd_event_poke;</a>
+<a name="ln301">    } else {</a>
+<a name="ln302">        return 1;</a>
+<a name="ln303">    }</a>
+<a name="ln304"> </a>
+<a name="ln305">    crm_trace(&quot;op %s notify event received&quot;, type);</a>
+<a name="ln306">    native-&gt;callback(&amp;event);</a>
+<a name="ln307"> </a>
+<a name="ln308">    if (event.params) {</a>
+<a name="ln309">        g_hash_table_destroy(event.params);</a>
+<a name="ln310">    }</a>
+<a name="ln311">    return 1;</a>
+<a name="ln312">}</a>
+<a name="ln313"> </a>
+<a name="ln314">static int</a>
+<a name="ln315">lrmd_ipc_dispatch(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln316">{</a>
+<a name="ln317">    lrmd_t *lrmd = userdata;</a>
+<a name="ln318">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln319">    xmlNode *msg;</a>
+<a name="ln320">    int rc;</a>
+<a name="ln321"> </a>
+<a name="ln322">    if (!native-&gt;callback) {</a>
+<a name="ln323">        /* no callback set */</a>
+<a name="ln324">        return 1;</a>
+<a name="ln325">    }</a>
+<a name="ln326"> </a>
+<a name="ln327">    msg = string2xml(buffer);</a>
+<a name="ln328">    rc = lrmd_dispatch_internal(lrmd, msg);</a>
+<a name="ln329">    free_xml(msg);</a>
+<a name="ln330">    return rc;</a>
+<a name="ln331">}</a>
+<a name="ln332"> </a>
+<a name="ln333">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln334">static void</a>
+<a name="ln335">lrmd_free_xml(gpointer userdata)</a>
+<a name="ln336">{</a>
+<a name="ln337">    free_xml((xmlNode *) userdata);</a>
+<a name="ln338">}</a>
+<a name="ln339"> </a>
+<a name="ln340">static int</a>
+<a name="ln341">lrmd_tls_connected(lrmd_t * lrmd)</a>
+<a name="ln342">{</a>
+<a name="ln343">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln344"> </a>
+<a name="ln345">    if (native-&gt;remote-&gt;tls_session) {</a>
+<a name="ln346">        return TRUE;</a>
+<a name="ln347">    }</a>
+<a name="ln348"> </a>
+<a name="ln349">    return FALSE;</a>
+<a name="ln350">}</a>
+<a name="ln351"> </a>
+<a name="ln352">static int</a>
+<a name="ln353">lrmd_tls_dispatch(gpointer userdata)</a>
+<a name="ln354">{</a>
+<a name="ln355">    lrmd_t *lrmd = userdata;</a>
+<a name="ln356">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln357">    xmlNode *xml = NULL;</a>
+<a name="ln358">    int rc = 0;</a>
+<a name="ln359">    int disconnected = 0;</a>
+<a name="ln360"> </a>
+<a name="ln361">    if (lrmd_tls_connected(lrmd) == FALSE) {</a>
+<a name="ln362">        crm_trace(&quot;tls dispatch triggered after disconnect&quot;);</a>
+<a name="ln363">        return 0;</a>
+<a name="ln364">    }</a>
+<a name="ln365"> </a>
+<a name="ln366">    crm_trace(&quot;tls_dispatch triggered&quot;);</a>
+<a name="ln367"> </a>
+<a name="ln368">    /* First check if there are any pending notifies to process that came</a>
+<a name="ln369">     * while we were waiting for replies earlier. */</a>
+<a name="ln370">    if (native-&gt;pending_notify) {</a>
+<a name="ln371">        GList *iter = NULL;</a>
+<a name="ln372"> </a>
+<a name="ln373">        crm_trace(&quot;Processing pending notifies&quot;);</a>
+<a name="ln374">        for (iter = native-&gt;pending_notify; iter; iter = iter-&gt;next) {</a>
+<a name="ln375">            lrmd_dispatch_internal(lrmd, iter-&gt;data);</a>
+<a name="ln376">        }</a>
+<a name="ln377">        g_list_free_full(native-&gt;pending_notify, lrmd_free_xml);</a>
+<a name="ln378">        native-&gt;pending_notify = NULL;</a>
+<a name="ln379">    }</a>
+<a name="ln380"> </a>
+<a name="ln381">    /* Next read the current buffer and see if there are any messages to handle. */</a>
+<a name="ln382">    rc = crm_remote_ready(native-&gt;remote, 0);</a>
+<a name="ln383">    if (rc == 0) {</a>
+<a name="ln384">        /* nothing to read, see if any full messages are already in buffer. */</a>
+<a name="ln385">        xml = crm_remote_parse_buffer(native-&gt;remote);</a>
+<a name="ln386">    } else if (rc &lt; 0) {</a>
+<a name="ln387">        disconnected = 1;</a>
+<a name="ln388">    } else {</a>
+<a name="ln389">        crm_remote_recv(native-&gt;remote, -1, &amp;disconnected);</a>
+<a name="ln390">        xml = crm_remote_parse_buffer(native-&gt;remote);</a>
+<a name="ln391">    }</a>
+<a name="ln392">    while (xml) {</a>
+<a name="ln393">        const char *msg_type = crm_element_value(xml, F_LRMD_REMOTE_MSG_TYPE);</a>
+<a name="ln394">        if (safe_str_eq(msg_type, &quot;notify&quot;)) {</a>
+<a name="ln395">            lrmd_dispatch_internal(lrmd, xml);</a>
+<a name="ln396">        } else if (safe_str_eq(msg_type, &quot;reply&quot;)) {</a>
+<a name="ln397">            if (native-&gt;expected_late_replies &gt; 0) {</a>
+<a name="ln398">                native-&gt;expected_late_replies--;</a>
+<a name="ln399">            } else {</a>
+<a name="ln400">                int reply_id = 0;</a>
+<a name="ln401">                crm_element_value_int(xml, F_LRMD_CALLID, &amp;reply_id);</a>
+<a name="ln402">                /* if this happens, we want to know about it */</a>
+<a name="ln403">                crm_err(&quot;Got outdated reply %d&quot;, reply_id);</a>
+<a name="ln404">            }</a>
+<a name="ln405">        }</a>
+<a name="ln406">        free_xml(xml);</a>
+<a name="ln407">        xml = crm_remote_parse_buffer(native-&gt;remote);</a>
+<a name="ln408">    }</a>
+<a name="ln409"> </a>
+<a name="ln410">    if (disconnected) {</a>
+<a name="ln411">        crm_info(&quot;Server disconnected while reading remote server msg.&quot;);</a>
+<a name="ln412">        lrmd_tls_disconnect(lrmd);</a>
+<a name="ln413">        return 0;</a>
+<a name="ln414">    }</a>
+<a name="ln415">    return 1;</a>
+<a name="ln416">}</a>
+<a name="ln417">#endif</a>
+<a name="ln418"> </a>
+<a name="ln419">/* Not used with mainloop */</a>
+<a name="ln420">int</a>
+<a name="ln421">lrmd_poll(lrmd_t * lrmd, int timeout)</a>
+<a name="ln422">{</a>
+<a name="ln423">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln424"> </a>
+<a name="ln425">    switch (native-&gt;type) {</a>
+<a name="ln426">        case CRM_CLIENT_IPC:</a>
+<a name="ln427">            return crm_ipc_ready(native-&gt;ipc);</a>
+<a name="ln428"> </a>
+<a name="ln429">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln430">        case CRM_CLIENT_TLS:</a>
+<a name="ln431">            if (native-&gt;pending_notify) {</a>
+<a name="ln432">                return 1;</a>
+<a name="ln433">            }</a>
+<a name="ln434"> </a>
+<a name="ln435">            return crm_remote_ready(native-&gt;remote, 0);</a>
+<a name="ln436">#endif</a>
+<a name="ln437">        default:</a>
+<a name="ln438">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln439">    }</a>
+<a name="ln440"> </a>
+<a name="ln441">    return 0;</a>
+<a name="ln442">}</a>
+<a name="ln443"> </a>
+<a name="ln444">/* Not used with mainloop */</a>
+<a name="ln445">bool</a>
+<a name="ln446">lrmd_dispatch(lrmd_t * lrmd)</a>
+<a name="ln447">{</a>
+<a name="ln448">    lrmd_private_t *private = NULL;</a>
+<a name="ln449"> </a>
+<a name="ln450">    CRM_ASSERT(lrmd != NULL);</a>
+<a name="ln451"> </a>
+<a name="ln452">    private = lrmd-&gt;private;</a>
+<a name="ln453">    switch (private-&gt;type) {</a>
+<a name="ln454">        case CRM_CLIENT_IPC:</a>
+<a name="ln455">            while (crm_ipc_ready(private-&gt;ipc)) {</a>
+<a name="ln456">                if (crm_ipc_read(private-&gt;ipc) &gt; 0) {</a>
+<a name="ln457">                    const char *msg = crm_ipc_buffer(private-&gt;ipc);</a>
+<a name="ln458"> </a>
+<a name="ln459">                    lrmd_ipc_dispatch(msg, strlen(msg), lrmd);</a>
+<a name="ln460">                }</a>
+<a name="ln461">            }</a>
+<a name="ln462">            break;</a>
+<a name="ln463">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln464">        case CRM_CLIENT_TLS:</a>
+<a name="ln465">            lrmd_tls_dispatch(lrmd);</a>
+<a name="ln466">            break;</a>
+<a name="ln467">#endif</a>
+<a name="ln468">        default:</a>
+<a name="ln469">            crm_err(&quot;Unsupported connection type: %d&quot;, private-&gt;type);</a>
+<a name="ln470">    }</a>
+<a name="ln471"> </a>
+<a name="ln472">    if (lrmd_api_is_connected(lrmd) == FALSE) {</a>
+<a name="ln473">        crm_err(&quot;Connection closed&quot;);</a>
+<a name="ln474">        return FALSE;</a>
+<a name="ln475">    }</a>
+<a name="ln476"> </a>
+<a name="ln477">    return TRUE;</a>
+<a name="ln478">}</a>
+<a name="ln479"> </a>
+<a name="ln480">static xmlNode *</a>
+<a name="ln481">lrmd_create_op(const char *token, const char *op, xmlNode * data, enum lrmd_call_options options)</a>
+<a name="ln482">{</a>
+<a name="ln483">    xmlNode *op_msg = create_xml_node(NULL, &quot;lrmd_command&quot;);</a>
+<a name="ln484"> </a>
+<a name="ln485">    CRM_CHECK(op_msg != NULL, return NULL);</a>
+<a name="ln486">    CRM_CHECK(token != NULL, return NULL);</a>
+<a name="ln487"> </a>
+<a name="ln488">    crm_xml_add(op_msg, F_XML_TAGNAME, &quot;lrmd_command&quot;);</a>
+<a name="ln489"> </a>
+<a name="ln490">    crm_xml_add(op_msg, F_TYPE, T_LRMD);</a>
+<a name="ln491">    crm_xml_add(op_msg, F_LRMD_CALLBACK_TOKEN, token);</a>
+<a name="ln492">    crm_xml_add(op_msg, F_LRMD_OPERATION, op);</a>
+<a name="ln493">    crm_trace(&quot;Sending call options: %.8lx, %d&quot;, (long)options, options);</a>
+<a name="ln494">    crm_xml_add_int(op_msg, F_LRMD_CALLOPTS, options);</a>
+<a name="ln495"> </a>
+<a name="ln496">    if (data != NULL) {</a>
+<a name="ln497">        add_message_xml(op_msg, F_LRMD_CALLDATA, data);</a>
+<a name="ln498">    }</a>
+<a name="ln499"> </a>
+<a name="ln500">    return op_msg;</a>
+<a name="ln501">}</a>
+<a name="ln502"> </a>
+<a name="ln503">static void</a>
+<a name="ln504">lrmd_ipc_connection_destroy(gpointer userdata)</a>
+<a name="ln505">{</a>
+<a name="ln506">    lrmd_t *lrmd = userdata;</a>
+<a name="ln507">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln508"> </a>
+<a name="ln509">    crm_info(&quot;IPC connection destroyed&quot;);</a>
+<a name="ln510"> </a>
+<a name="ln511">    /* Prevent these from being cleaned up in lrmd_api_disconnect() */</a>
+<a name="ln512">    native-&gt;ipc = NULL;</a>
+<a name="ln513">    native-&gt;source = NULL;</a>
+<a name="ln514"> </a>
+<a name="ln515">    if (native-&gt;callback) {</a>
+<a name="ln516">        lrmd_event_data_t event = { 0, };</a>
+<a name="ln517">        event.type = lrmd_event_disconnect;</a>
+<a name="ln518">        event.remote_nodename = native-&gt;remote_nodename;</a>
+<a name="ln519">        native-&gt;callback(&amp;event);</a>
+<a name="ln520">    }</a>
+<a name="ln521">}</a>
+<a name="ln522"> </a>
+<a name="ln523">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln524">static void</a>
+<a name="ln525">lrmd_tls_connection_destroy(gpointer userdata)</a>
+<a name="ln526">{</a>
+<a name="ln527">    lrmd_t *lrmd = userdata;</a>
+<a name="ln528">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln529"> </a>
+<a name="ln530">    crm_info(&quot;TLS connection destroyed&quot;);</a>
+<a name="ln531"> </a>
+<a name="ln532">    if (native-&gt;remote-&gt;tls_session) {</a>
+<a name="ln533">        gnutls_bye(*native-&gt;remote-&gt;tls_session, GNUTLS_SHUT_RDWR);</a>
+<a name="ln534">        gnutls_deinit(*native-&gt;remote-&gt;tls_session);</a>
+<a name="ln535">        gnutls_free(native-&gt;remote-&gt;tls_session);</a>
+<a name="ln536">    }</a>
+<a name="ln537">    if (native-&gt;psk_cred_c) {</a>
+<a name="ln538">        gnutls_psk_free_client_credentials(native-&gt;psk_cred_c);</a>
+<a name="ln539">    }</a>
+<a name="ln540">    if (native-&gt;sock) {</a>
+<a name="ln541">        close(native-&gt;sock);</a>
+<a name="ln542">    }</a>
+<a name="ln543">    if (native-&gt;process_notify) {</a>
+<a name="ln544">        mainloop_destroy_trigger(native-&gt;process_notify);</a>
+<a name="ln545">        native-&gt;process_notify = NULL;</a>
+<a name="ln546">    }</a>
+<a name="ln547">    if (native-&gt;pending_notify) {</a>
+<a name="ln548">        g_list_free_full(native-&gt;pending_notify, lrmd_free_xml);</a>
+<a name="ln549">        native-&gt;pending_notify = NULL;</a>
+<a name="ln550">    }</a>
+<a name="ln551"> </a>
+<a name="ln552">    free(native-&gt;remote-&gt;buffer);</a>
+<a name="ln553">    native-&gt;remote-&gt;buffer = NULL;</a>
+<a name="ln554">    native-&gt;source = 0;</a>
+<a name="ln555">    native-&gt;sock = 0;</a>
+<a name="ln556">    native-&gt;psk_cred_c = NULL;</a>
+<a name="ln557">    native-&gt;remote-&gt;tls_session = NULL;</a>
+<a name="ln558">    native-&gt;sock = 0;</a>
+<a name="ln559"> </a>
+<a name="ln560">    if (native-&gt;callback) {</a>
+<a name="ln561">        lrmd_event_data_t event = { 0, };</a>
+<a name="ln562">        event.remote_nodename = native-&gt;remote_nodename;</a>
+<a name="ln563">        event.type = lrmd_event_disconnect;</a>
+<a name="ln564">        native-&gt;callback(&amp;event);</a>
+<a name="ln565">    }</a>
+<a name="ln566">    return;</a>
+<a name="ln567">}</a>
+<a name="ln568"> </a>
+<a name="ln569">int</a>
+<a name="ln570">lrmd_tls_send_msg(crm_remote_t * session, xmlNode * msg, uint32_t id, const char *msg_type)</a>
+<a name="ln571">{</a>
+<a name="ln572">    int rc = -1;</a>
+<a name="ln573"> </a>
+<a name="ln574">    crm_xml_add_int(msg, F_LRMD_REMOTE_MSG_ID, id);</a>
+<a name="ln575">    crm_xml_add(msg, F_LRMD_REMOTE_MSG_TYPE, msg_type);</a>
+<a name="ln576"> </a>
+<a name="ln577">    rc = crm_remote_send(session, msg);</a>
+<a name="ln578"> </a>
+<a name="ln579">    if (rc &lt; 0) {</a>
+<a name="ln580">        crm_err(&quot;Failed to send remote lrmd tls msg, rc = %d&quot;, rc);</a>
+<a name="ln581">        return rc;</a>
+<a name="ln582">    }</a>
+<a name="ln583"> </a>
+<a name="ln584">    return rc;</a>
+<a name="ln585">}</a>
+<a name="ln586"> </a>
+<a name="ln587">static xmlNode *</a>
+<a name="ln588">lrmd_tls_recv_reply(lrmd_t * lrmd, int total_timeout, int expected_reply_id, int *disconnected)</a>
+<a name="ln589">{</a>
+<a name="ln590">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln591">    xmlNode *xml = NULL;</a>
+<a name="ln592">    time_t start = time(NULL);</a>
+<a name="ln593">    const char *msg_type = NULL;</a>
+<a name="ln594">    int reply_id = 0;</a>
+<a name="ln595">    int remaining_timeout = 0;</a>
+<a name="ln596"> </a>
+<a name="ln597">    /* A timeout of 0 here makes no sense.  We have to wait a period of time</a>
+<a name="ln598">     * for the response to come back.  If -1 or 0, default to 10 seconds. */</a>
+<a name="ln599">    if (total_timeout &lt;= 0 || total_timeout &gt; MAX_TLS_RECV_WAIT) {</a>
+<a name="ln600">        total_timeout = MAX_TLS_RECV_WAIT;</a>
+<a name="ln601">    }</a>
+<a name="ln602"> </a>
+<a name="ln603">    while (!xml) {</a>
+<a name="ln604"> </a>
+<a name="ln605">        xml = crm_remote_parse_buffer(native-&gt;remote);</a>
+<a name="ln606">        if (!xml) {</a>
+<a name="ln607">            /* read some more off the tls buffer if we still have time left. */</a>
+<a name="ln608">            if (remaining_timeout) {</a>
+<a name="ln609">                remaining_timeout = total_timeout - ((time(NULL) - start) * 1000);</a>
+<a name="ln610">            } else {</a>
+<a name="ln611">                remaining_timeout = total_timeout;</a>
+<a name="ln612">            }</a>
+<a name="ln613">            if (remaining_timeout &lt;= 0) {</a>
+<a name="ln614">                crm_err(&quot;Never received the expected reply during the timeout period, disconnecting.&quot;);</a>
+<a name="ln615">                *disconnected = TRUE;</a>
+<a name="ln616">                return NULL;</a>
+<a name="ln617">            }</a>
+<a name="ln618"> </a>
+<a name="ln619">            crm_remote_recv(native-&gt;remote, remaining_timeout, disconnected);</a>
+<a name="ln620">            xml = crm_remote_parse_buffer(native-&gt;remote);</a>
+<a name="ln621">            if (!xml) {</a>
+<a name="ln622">                crm_err(&quot;Unable to receive expected reply, disconnecting.&quot;);</a>
+<a name="ln623">                *disconnected = TRUE;</a>
+<a name="ln624">                return NULL;</a>
+<a name="ln625">            } else if (*disconnected) {</a>
+<a name="ln626">                return NULL;</a>
+<a name="ln627">            }</a>
+<a name="ln628">        }</a>
+<a name="ln629"> </a>
+<a name="ln630">        CRM_ASSERT(xml != NULL);</a>
+<a name="ln631"> </a>
+<a name="ln632">        crm_element_value_int(xml, F_LRMD_REMOTE_MSG_ID, &amp;reply_id);</a>
+<a name="ln633">        msg_type = crm_element_value(xml, F_LRMD_REMOTE_MSG_TYPE);</a>
+<a name="ln634"> </a>
+<a name="ln635">        if (!msg_type) {</a>
+<a name="ln636">            crm_err(&quot;Empty msg type received while waiting for reply&quot;);</a>
+<a name="ln637">            free_xml(xml);</a>
+<a name="ln638">            xml = NULL;</a>
+<a name="ln639">        } else if (safe_str_eq(msg_type, &quot;notify&quot;)) {</a>
+<a name="ln640">            /* got a notify while waiting for reply, trigger the notify to be processed later */</a>
+<a name="ln641">            crm_info(&quot;queueing notify&quot;);</a>
+<a name="ln642">            native-&gt;pending_notify = g_list_append(native-&gt;pending_notify, xml);</a>
+<a name="ln643">            if (native-&gt;process_notify) {</a>
+<a name="ln644">                crm_info(&quot;notify trigger set.&quot;);</a>
+<a name="ln645">                mainloop_set_trigger(native-&gt;process_notify);</a>
+<a name="ln646">            }</a>
+<a name="ln647">            xml = NULL;</a>
+<a name="ln648">        } else if (safe_str_neq(msg_type, &quot;reply&quot;)) {</a>
+<a name="ln649">            /* msg isn't a reply, make some noise */</a>
+<a name="ln650">            crm_err(&quot;Expected a reply, got %s&quot;, msg_type);</a>
+<a name="ln651">            free_xml(xml);</a>
+<a name="ln652">            xml = NULL;</a>
+<a name="ln653">        } else if (reply_id != expected_reply_id) {</a>
+<a name="ln654">            if (native-&gt;expected_late_replies &gt; 0) {</a>
+<a name="ln655">                native-&gt;expected_late_replies--;</a>
+<a name="ln656">            } else {</a>
+<a name="ln657">                crm_err(&quot;Got outdated reply, expected id %d got id %d&quot;, expected_reply_id, reply_id);</a>
+<a name="ln658">            }</a>
+<a name="ln659">            free_xml(xml);</a>
+<a name="ln660">            xml = NULL;</a>
+<a name="ln661">        }</a>
+<a name="ln662">    }</a>
+<a name="ln663"> </a>
+<a name="ln664">    if (native-&gt;remote-&gt;buffer &amp;&amp; native-&gt;process_notify) {</a>
+<a name="ln665">        mainloop_set_trigger(native-&gt;process_notify);</a>
+<a name="ln666">    }</a>
+<a name="ln667"> </a>
+<a name="ln668">    return xml;</a>
+<a name="ln669">}</a>
+<a name="ln670"> </a>
+<a name="ln671">static int</a>
+<a name="ln672">lrmd_tls_send(lrmd_t * lrmd, xmlNode * msg)</a>
+<a name="ln673">{</a>
+<a name="ln674">    int rc = 0;</a>
+<a name="ln675">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln676"> </a>
+<a name="ln677">    global_remote_msg_id++;</a>
+<a name="ln678">    if (global_remote_msg_id &lt;= 0) {</a>
+<a name="ln679">        global_remote_msg_id = 1;</a>
+<a name="ln680">    }</a>
+<a name="ln681"> </a>
+<a name="ln682">    rc = lrmd_tls_send_msg(native-&gt;remote, msg, global_remote_msg_id, &quot;request&quot;);</a>
+<a name="ln683">    if (rc &lt;= 0) {</a>
+<a name="ln684">        crm_err(&quot;Remote lrmd send failed, disconnecting&quot;);</a>
+<a name="ln685">        lrmd_tls_disconnect(lrmd);</a>
+<a name="ln686">        return -ENOTCONN;</a>
+<a name="ln687">    }</a>
+<a name="ln688">    return pcmk_ok;</a>
+<a name="ln689">}</a>
+<a name="ln690"> </a>
+<a name="ln691">static int</a>
+<a name="ln692">lrmd_tls_send_recv(lrmd_t * lrmd, xmlNode * msg, int timeout, xmlNode ** reply)</a>
+<a name="ln693">{</a>
+<a name="ln694">    int rc = 0;</a>
+<a name="ln695">    int disconnected = 0;</a>
+<a name="ln696">    xmlNode *xml = NULL;</a>
+<a name="ln697"> </a>
+<a name="ln698">    if (lrmd_tls_connected(lrmd) == FALSE) {</a>
+<a name="ln699">        return -1;</a>
+<a name="ln700">    }</a>
+<a name="ln701"> </a>
+<a name="ln702">    rc = lrmd_tls_send(lrmd, msg);</a>
+<a name="ln703">    if (rc &lt; 0) {</a>
+<a name="ln704">        return rc;</a>
+<a name="ln705">    }</a>
+<a name="ln706"> </a>
+<a name="ln707">    xml = lrmd_tls_recv_reply(lrmd, timeout, global_remote_msg_id, &amp;disconnected);</a>
+<a name="ln708"> </a>
+<a name="ln709">    if (disconnected) {</a>
+<a name="ln710">        crm_err(&quot;Remote lrmd server disconnected while waiting for reply with id %d. &quot;,</a>
+<a name="ln711">                global_remote_msg_id);</a>
+<a name="ln712">        lrmd_tls_disconnect(lrmd);</a>
+<a name="ln713">        rc = -ENOTCONN;</a>
+<a name="ln714">    } else if (!xml) {</a>
+<a name="ln715">        crm_err(&quot;Remote lrmd never received reply for request id %d. timeout: %dms &quot;,</a>
+<a name="ln716">                global_remote_msg_id, timeout);</a>
+<a name="ln717">        rc = -ECOMM;</a>
+<a name="ln718">    }</a>
+<a name="ln719"> </a>
+<a name="ln720">    if (reply) {</a>
+<a name="ln721">        *reply = xml;</a>
+<a name="ln722">    } else {</a>
+<a name="ln723">        free_xml(xml);</a>
+<a name="ln724">    }</a>
+<a name="ln725"> </a>
+<a name="ln726">    return rc;</a>
+<a name="ln727">}</a>
+<a name="ln728">#endif</a>
+<a name="ln729"> </a>
+<a name="ln730">static int</a>
+<a name="ln731">lrmd_send_xml(lrmd_t * lrmd, xmlNode * msg, int timeout, xmlNode ** reply)</a>
+<a name="ln732">{</a>
+<a name="ln733">    int rc = -1;</a>
+<a name="ln734">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln735"> </a>
+<a name="ln736">    switch (native-&gt;type) {</a>
+<a name="ln737">        case CRM_CLIENT_IPC:</a>
+<a name="ln738">            rc = crm_ipc_send(native-&gt;ipc, msg, crm_ipc_client_response, timeout, reply);</a>
+<a name="ln739">            break;</a>
+<a name="ln740">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln741">        case CRM_CLIENT_TLS:</a>
+<a name="ln742">            rc = lrmd_tls_send_recv(lrmd, msg, timeout, reply);</a>
+<a name="ln743">            break;</a>
+<a name="ln744">#endif</a>
+<a name="ln745">        default:</a>
+<a name="ln746">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln747">    }</a>
+<a name="ln748"> </a>
+<a name="ln749">    return rc;</a>
+<a name="ln750">}</a>
+<a name="ln751"> </a>
+<a name="ln752">static int</a>
+<a name="ln753">lrmd_send_xml_no_reply(lrmd_t * lrmd, xmlNode * msg)</a>
+<a name="ln754">{</a>
+<a name="ln755">    int rc = -1;</a>
+<a name="ln756">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln757"> </a>
+<a name="ln758">    switch (native-&gt;type) {</a>
+<a name="ln759">        case CRM_CLIENT_IPC:</a>
+<a name="ln760">            rc = crm_ipc_send(native-&gt;ipc, msg, crm_ipc_flags_none, 0, NULL);</a>
+<a name="ln761">            break;</a>
+<a name="ln762">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln763">        case CRM_CLIENT_TLS:</a>
+<a name="ln764">            rc = lrmd_tls_send(lrmd, msg);</a>
+<a name="ln765">            if (rc == pcmk_ok) {</a>
+<a name="ln766">                /* we don't want to wait around for the reply, but</a>
+<a name="ln767">                 * since the request/reply protocol needs to behave the same</a>
+<a name="ln768">                 * as libqb, a reply will eventually come later anyway. */</a>
+<a name="ln769">                native-&gt;expected_late_replies++;</a>
+<a name="ln770">            }</a>
+<a name="ln771">            break;</a>
+<a name="ln772">#endif</a>
+<a name="ln773">        default:</a>
+<a name="ln774">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln775">    }</a>
+<a name="ln776"> </a>
+<a name="ln777">    return rc;</a>
+<a name="ln778">}</a>
+<a name="ln779"> </a>
+<a name="ln780">static int</a>
+<a name="ln781">lrmd_api_is_connected(lrmd_t * lrmd)</a>
+<a name="ln782">{</a>
+<a name="ln783">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln784"> </a>
+<a name="ln785">    switch (native-&gt;type) {</a>
+<a name="ln786">        case CRM_CLIENT_IPC:</a>
+<a name="ln787">            return crm_ipc_connected(native-&gt;ipc);</a>
+<a name="ln788">            break;</a>
+<a name="ln789">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln790">        case CRM_CLIENT_TLS:</a>
+<a name="ln791">            return lrmd_tls_connected(lrmd);</a>
+<a name="ln792">            break;</a>
+<a name="ln793">#endif</a>
+<a name="ln794">        default:</a>
+<a name="ln795">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln796">    }</a>
+<a name="ln797"> </a>
+<a name="ln798">    return 0;</a>
+<a name="ln799">}</a>
+<a name="ln800"> </a>
+<a name="ln801">static int</a>
+<a name="ln802">lrmd_send_command(lrmd_t * lrmd, const char *op, xmlNode * data, xmlNode ** output_data, int timeout,   /* ms. defaults to 1000 if set to 0 */</a>
+<a name="ln803">                  enum lrmd_call_options options, gboolean expect_reply)</a>
+<a name="ln804">{                               /* TODO we need to reduce usage of this boolean */</a>
+<a name="ln805">    int rc = pcmk_ok;</a>
+<a name="ln806">    int reply_id = -1;</a>
+<a name="ln807">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln808">    xmlNode *op_msg = NULL;</a>
+<a name="ln809">    xmlNode *op_reply = NULL;</a>
+<a name="ln810"> </a>
+<a name="ln811">    if (!lrmd_api_is_connected(lrmd)) {</a>
+<a name="ln812">        return -ENOTCONN;</a>
+<a name="ln813">    }</a>
+<a name="ln814"> </a>
+<a name="ln815">    if (op == NULL) {</a>
+<a name="ln816">        crm_err(&quot;No operation specified&quot;);</a>
+<a name="ln817">        return -EINVAL;</a>
+<a name="ln818">    }</a>
+<a name="ln819"> </a>
+<a name="ln820">    CRM_CHECK(native-&gt;token != NULL,;</a>
+<a name="ln821">        );</a>
+<a name="ln822">    crm_trace(&quot;sending %s op to lrmd&quot;, op);</a>
+<a name="ln823"> </a>
+<a name="ln824">    op_msg = lrmd_create_op(native-&gt;token, op, data, options);</a>
+<a name="ln825"> </a>
+<a name="ln826">    if (op_msg == NULL) {</a>
+<a name="ln827">        return -EINVAL;</a>
+<a name="ln828">    }</a>
+<a name="ln829"> </a>
+<a name="ln830">    crm_xml_add_int(op_msg, F_LRMD_TIMEOUT, timeout);</a>
+<a name="ln831"> </a>
+<a name="ln832">    if (expect_reply) {</a>
+<a name="ln833">        rc = lrmd_send_xml(lrmd, op_msg, timeout, &amp;op_reply);</a>
+<a name="ln834">    } else {</a>
+<a name="ln835">        rc = lrmd_send_xml_no_reply(lrmd, op_msg);</a>
+<a name="ln836">        goto done;</a>
+<a name="ln837">    }</a>
+<a name="ln838"> </a>
+<a name="ln839">    if (rc &lt; 0) {</a>
+<a name="ln840">        crm_perror(LOG_ERR, &quot;Couldn't perform %s operation (timeout=%d): %d&quot;, op, timeout, rc);</a>
+<a name="ln841">        rc = -ECOMM;</a>
+<a name="ln842">        goto done;</a>
+<a name="ln843"> </a>
+<a name="ln844">    } else if(op_reply == NULL) {</a>
+<a name="ln845">        rc = -ENOMSG;</a>
+<a name="ln846">        goto done;</a>
+<a name="ln847">    }</a>
+<a name="ln848"> </a>
+<a name="ln849">    rc = pcmk_ok;</a>
+<a name="ln850">    crm_element_value_int(op_reply, F_LRMD_CALLID, &amp;reply_id);</a>
+<a name="ln851">    crm_trace(&quot;%s op reply received&quot;, op);</a>
+<a name="ln852">    if (crm_element_value_int(op_reply, F_LRMD_RC, &amp;rc) != 0) {</a>
+<a name="ln853">        rc = -ENOMSG;</a>
+<a name="ln854">        goto done;</a>
+<a name="ln855">    }</a>
+<a name="ln856"> </a>
+<a name="ln857">    crm_log_xml_trace(op_reply, &quot;Reply&quot;);</a>
+<a name="ln858"> </a>
+<a name="ln859">    if (output_data) {</a>
+<a name="ln860">        *output_data = op_reply;</a>
+<a name="ln861">        op_reply = NULL;        /* Prevent subsequent free */</a>
+<a name="ln862">    }</a>
+<a name="ln863"> </a>
+<a name="ln864">  done:</a>
+<a name="ln865">    if (lrmd_api_is_connected(lrmd) == FALSE) {</a>
+<a name="ln866">        crm_err(&quot;LRMD disconnected&quot;);</a>
+<a name="ln867">    }</a>
+<a name="ln868"> </a>
+<a name="ln869">    free_xml(op_msg);</a>
+<a name="ln870">    free_xml(op_reply);</a>
+<a name="ln871">    return rc;</a>
+<a name="ln872">}</a>
+<a name="ln873"> </a>
+<a name="ln874">static int</a>
+<a name="ln875">lrmd_api_poke_connection(lrmd_t * lrmd)</a>
+<a name="ln876">{</a>
+<a name="ln877">    int rc;</a>
+<a name="ln878">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln879">    xmlNode *data = create_xml_node(NULL, F_LRMD_RSC);</a>
+<a name="ln880"> </a>
+<a name="ln881">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln882">    rc = lrmd_send_command(lrmd, LRMD_OP_POKE, data, NULL, 0, 0, native-&gt;type == CRM_CLIENT_IPC ? TRUE : FALSE);</a>
+<a name="ln883">    free_xml(data);</a>
+<a name="ln884"> </a>
+<a name="ln885">    return rc &lt; 0 ? rc : pcmk_ok;</a>
+<a name="ln886">}</a>
+<a name="ln887"> </a>
+<a name="ln888">int</a>
+<a name="ln889">remote_proxy_check(lrmd_t * lrmd, GHashTable *hash)</a>
+<a name="ln890">{</a>
+<a name="ln891">    int rc;</a>
+<a name="ln892">    const char *value;</a>
+<a name="ln893">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln894">    xmlNode *data = create_xml_node(NULL, F_LRMD_OPERATION);</a>
+<a name="ln895"> </a>
+<a name="ln896">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln897"> </a>
+<a name="ln898">    value = g_hash_table_lookup(hash, &quot;stonith-watchdog-timeout&quot;);</a>
+<a name="ln899">    crm_xml_add(data, F_LRMD_WATCHDOG, value);</a>
+<a name="ln900"> </a>
+<a name="ln901">    rc = lrmd_send_command(lrmd, LRMD_OP_CHECK, data, NULL, 0, 0, native-&gt;type == CRM_CLIENT_IPC ? TRUE : FALSE);</a>
+<a name="ln902">    free_xml(data);</a>
+<a name="ln903"> </a>
+<a name="ln904">    return rc &lt; 0 ? rc : pcmk_ok;</a>
+<a name="ln905">}</a>
+<a name="ln906"> </a>
+<a name="ln907">static int</a>
+<a name="ln908">lrmd_handshake(lrmd_t * lrmd, const char *name)</a>
+<a name="ln909">{</a>
+<a name="ln910">    int rc = pcmk_ok;</a>
+<a name="ln911">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln912">    xmlNode *reply = NULL;</a>
+<a name="ln913">    xmlNode *hello = create_xml_node(NULL, &quot;lrmd_command&quot;);</a>
+<a name="ln914"> </a>
+<a name="ln915">    crm_xml_add(hello, F_TYPE, T_LRMD);</a>
+<a name="ln916">    crm_xml_add(hello, F_LRMD_OPERATION, CRM_OP_REGISTER);</a>
+<a name="ln917">    crm_xml_add(hello, F_LRMD_CLIENTNAME, name);</a>
+<a name="ln918">    crm_xml_add(hello, F_LRMD_PROTOCOL_VERSION, LRMD_PROTOCOL_VERSION);</a>
+<a name="ln919"> </a>
+<a name="ln920">    /* advertise that we are a proxy provider */</a>
+<a name="ln921">    if (native-&gt;proxy_callback) {</a>
+<a name="ln922">        crm_xml_add(hello, F_LRMD_IS_IPC_PROVIDER, &quot;true&quot;);</a>
+<a name="ln923">    }</a>
+<a name="ln924"> </a>
+<a name="ln925">    rc = lrmd_send_xml(lrmd, hello, -1, &amp;reply);</a>
+<a name="ln926"> </a>
+<a name="ln927">    if (rc &lt; 0) {</a>
+<a name="ln928">        crm_perror(LOG_DEBUG, &quot;Couldn't complete registration with the lrmd API: %d&quot;, rc);</a>
+<a name="ln929">        rc = -ECOMM;</a>
+<a name="ln930">    } else if (reply == NULL) {</a>
+<a name="ln931">        crm_err(&quot;Did not receive registration reply&quot;);</a>
+<a name="ln932">        rc = -EPROTO;</a>
+<a name="ln933">    } else {</a>
+<a name="ln934">        const char *version = crm_element_value(reply, F_LRMD_PROTOCOL_VERSION);</a>
+<a name="ln935">        const char *msg_type = crm_element_value(reply, F_LRMD_OPERATION);</a>
+<a name="ln936">        const char *tmp_ticket = crm_element_value(reply, F_LRMD_CLIENTID);</a>
+<a name="ln937"> </a>
+<a name="ln938">        crm_element_value_int(reply, F_LRMD_RC, &amp;rc);</a>
+<a name="ln939"> </a>
+<a name="ln940">        if (rc == -EPROTO) {</a>
+<a name="ln941">            crm_err(&quot;LRMD protocol mismatch client version %s, server version %s&quot;,</a>
+<a name="ln942">                LRMD_PROTOCOL_VERSION, version);</a>
+<a name="ln943">            crm_log_xml_err(reply, &quot;Protocol Error&quot;);</a>
+<a name="ln944"> </a>
+<a name="ln945">        } else if (safe_str_neq(msg_type, CRM_OP_REGISTER)) {</a>
+<a name="ln946">            crm_err(&quot;Invalid registration message: %s&quot;, msg_type);</a>
+<a name="ln947">            crm_log_xml_err(reply, &quot;Bad reply&quot;);</a>
+<a name="ln948">            rc = -EPROTO;</a>
+<a name="ln949">        } else if (tmp_ticket == NULL) {</a>
+<a name="ln950">            crm_err(&quot;No registration token provided&quot;);</a>
+<a name="ln951">            crm_log_xml_err(reply, &quot;Bad reply&quot;);</a>
+<a name="ln952">            rc = -EPROTO;</a>
+<a name="ln953">        } else {</a>
+<a name="ln954">            crm_trace(&quot;Obtained registration token: %s&quot;, tmp_ticket);</a>
+<a name="ln955">            native-&gt;token = strdup(tmp_ticket);</a>
+<a name="ln956">            native-&gt;peer_version = strdup(version?version:&quot;1.0&quot;); /* Included since 1.1 */</a>
+<a name="ln957">            rc = pcmk_ok;</a>
+<a name="ln958">        }</a>
+<a name="ln959">    }</a>
+<a name="ln960"> </a>
+<a name="ln961">    free_xml(reply);</a>
+<a name="ln962">    free_xml(hello);</a>
+<a name="ln963"> </a>
+<a name="ln964">    if (rc != pcmk_ok) {</a>
+<a name="ln965">        lrmd_api_disconnect(lrmd);</a>
+<a name="ln966">    }</a>
+<a name="ln967">    return rc;</a>
+<a name="ln968">}</a>
+<a name="ln969"> </a>
+<a name="ln970">static int</a>
+<a name="ln971">lrmd_ipc_connect(lrmd_t * lrmd, int *fd)</a>
+<a name="ln972">{</a>
+<a name="ln973">    int rc = pcmk_ok;</a>
+<a name="ln974">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln975"> </a>
+<a name="ln976">    static struct ipc_client_callbacks lrmd_callbacks = {</a>
+<a name="ln977">        .dispatch = lrmd_ipc_dispatch,</a>
+<a name="ln978">        .destroy = lrmd_ipc_connection_destroy</a>
+<a name="ln979">    };</a>
+<a name="ln980"> </a>
+<a name="ln981">    crm_info(&quot;Connecting to lrmd&quot;);</a>
+<a name="ln982"> </a>
+<a name="ln983">    if (fd) {</a>
+<a name="ln984">        /* No mainloop */</a>
+<a name="ln985">        native-&gt;ipc = crm_ipc_new(CRM_SYSTEM_LRMD, 0);</a>
+<a name="ln986">        if (native-&gt;ipc &amp;&amp; crm_ipc_connect(native-&gt;ipc)) {</a>
+<a name="ln987">            *fd = crm_ipc_get_fd(native-&gt;ipc);</a>
+<a name="ln988">        } else if (native-&gt;ipc) {</a>
+<a name="ln989">            crm_perror(LOG_ERR, &quot;Connection to local resource manager failed&quot;);</a>
+<a name="ln990">            rc = -ENOTCONN;</a>
+<a name="ln991">        }</a>
+<a name="ln992">    } else {</a>
+<a name="ln993">        native-&gt;source = mainloop_add_ipc_client(CRM_SYSTEM_LRMD, G_PRIORITY_HIGH, 0, lrmd, &amp;lrmd_callbacks);</a>
+<a name="ln994">        native-&gt;ipc = mainloop_get_ipc_client(native-&gt;source);</a>
+<a name="ln995">    }</a>
+<a name="ln996"> </a>
+<a name="ln997">    if (native-&gt;ipc == NULL) {</a>
+<a name="ln998">        crm_debug(&quot;Could not connect to the LRMD API&quot;);</a>
+<a name="ln999">        rc = -ENOTCONN;</a>
+<a name="ln1000">    }</a>
+<a name="ln1001"> </a>
+<a name="ln1002">    return rc;</a>
+<a name="ln1003">}</a>
+<a name="ln1004"> </a>
+<a name="ln1005">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1006">static int</a>
+<a name="ln1007">set_key(gnutls_datum_t * key, const char *location)</a>
+<a name="ln1008">{</a>
+<a name="ln1009">    FILE *stream;</a>
+<a name="ln1010">    int read_len = 256;</a>
+<a name="ln1011">    int cur_len = 0;</a>
+<a name="ln1012">    int buf_len = read_len;</a>
+<a name="ln1013">    static char *key_cache = NULL;</a>
+<a name="ln1014">    static size_t key_cache_len = 0;</a>
+<a name="ln1015">    static time_t key_cache_updated;</a>
+<a name="ln1016"> </a>
+<a name="ln1017">    if (location == NULL) {</a>
+<a name="ln1018">        return -1;</a>
+<a name="ln1019">    }</a>
+<a name="ln1020"> </a>
+<a name="ln1021">    if (key_cache) {</a>
+<a name="ln1022">        time_t now = time(NULL);</a>
+<a name="ln1023"> </a>
+<a name="ln1024">        if ((now - key_cache_updated) &lt; 60) {</a>
+<a name="ln1025">            key-&gt;data = gnutls_malloc(key_cache_len + 1);</a>
+<a name="ln1026">            key-&gt;size = key_cache_len;</a>
+<a name="ln1027">            memcpy(key-&gt;data, key_cache, key_cache_len);</a>
+<a name="ln1028"> </a>
+<a name="ln1029">            crm_debug(&quot;using cached LRMD key&quot;);</a>
+<a name="ln1030">            return 0;</a>
+<a name="ln1031">        } else {</a>
+<a name="ln1032">            key_cache_len = 0;</a>
+<a name="ln1033">            key_cache_updated = 0;</a>
+<a name="ln1034">            free(key_cache);</a>
+<a name="ln1035">            key_cache = NULL;</a>
+<a name="ln1036">            crm_debug(&quot;clearing lrmd key cache&quot;);</a>
+<a name="ln1037">        }</a>
+<a name="ln1038">    }</a>
+<a name="ln1039"> </a>
+<a name="ln1040">    stream = fopen(location, &quot;r&quot;);</a>
+<a name="ln1041">    if (!stream) {</a>
+<a name="ln1042">        return -1;</a>
+<a name="ln1043">    }</a>
+<a name="ln1044"> </a>
+<a name="ln1045">    key-&gt;data = gnutls_malloc(read_len);</a>
+<a name="ln1046">    while (!feof(stream)) {</a>
+<a name="ln1047">        int next;</a>
+<a name="ln1048"> </a>
+<a name="ln1049">        if (cur_len == buf_len) {</a>
+<a name="ln1050">            buf_len = cur_len + read_len;</a>
+<a name="ln1051">            key-&gt;data = gnutls_realloc(key-&gt;data, buf_len);</a>
+<a name="ln1052">        }</a>
+<a name="ln1053">        next = fgetc(stream);</a>
+<a name="ln1054">        if (next == EOF &amp;&amp; feof(stream)) {</a>
+<a name="ln1055">            break;</a>
+<a name="ln1056">        }</a>
+<a name="ln1057"> </a>
+<a name="ln1058">        key-&gt;data[cur_len] = next;</a>
+<a name="ln1059">        cur_len++;</a>
+<a name="ln1060">    }</a>
+<a name="ln1061">    fclose(stream);</a>
+<a name="ln1062"> </a>
+<a name="ln1063">    key-&gt;size = cur_len;</a>
+<a name="ln1064">    if (!cur_len) {</a>
+<a name="ln1065">        gnutls_free(key-&gt;data);</a>
+<a name="ln1066">        key-&gt;data = 0;</a>
+<a name="ln1067">        return -1;</a>
+<a name="ln1068">    }</a>
+<a name="ln1069"> </a>
+<a name="ln1070">    if (!key_cache) {</a>
+<a name="ln1071">        key_cache = calloc(1, key-&gt;size + 1);</a>
+<a name="ln1072">        memcpy(key_cache, key-&gt;data, key-&gt;size);</a>
+<a name="ln1073"> </a>
+<a name="ln1074">        key_cache_len = key-&gt;size;</a>
+<a name="ln1075">        key_cache_updated = time(NULL);</a>
+<a name="ln1076">    }</a>
+<a name="ln1077"> </a>
+<a name="ln1078">    return 0;</a>
+<a name="ln1079">}</a>
+<a name="ln1080"> </a>
+<a name="ln1081">int</a>
+<a name="ln1082">lrmd_tls_set_key(gnutls_datum_t * key)</a>
+<a name="ln1083">{</a>
+<a name="ln1084">    int rc = 0;</a>
+<a name="ln1085">    const char *specific_location = getenv(&quot;PCMK_authkey_location&quot;);</a>
+<a name="ln1086"> </a>
+<a name="ln1087">    if (set_key(key, specific_location) == 0) {</a>
+<a name="ln1088">        crm_debug(&quot;Using custom authkey location %s&quot;, specific_location);</a>
+<a name="ln1089">        return 0;</a>
+<a name="ln1090"> </a>
+<a name="ln1091">    } else if (specific_location) {</a>
+<a name="ln1092">        crm_err(&quot;No valid lrmd remote key found at %s, trying default location&quot;, specific_location);</a>
+<a name="ln1093">    }</a>
+<a name="ln1094"> </a>
+<a name="ln1095">    if (set_key(key, DEFAULT_REMOTE_KEY_LOCATION) != 0) {</a>
+<a name="ln1096">        rc = set_key(key, ALT_REMOTE_KEY_LOCATION);</a>
+<a name="ln1097">    }</a>
+<a name="ln1098"> </a>
+<a name="ln1099">    if (rc) {</a>
+<a name="ln1100">        crm_err(&quot;No valid lrmd remote key found at %s&quot;, DEFAULT_REMOTE_KEY_LOCATION);</a>
+<a name="ln1101">        return -1;</a>
+<a name="ln1102">    }</a>
+<a name="ln1103"> </a>
+<a name="ln1104">    return rc;</a>
+<a name="ln1105">}</a>
+<a name="ln1106"> </a>
+<a name="ln1107">static void</a>
+<a name="ln1108">lrmd_gnutls_global_init(void)</a>
+<a name="ln1109">{</a>
+<a name="ln1110">    static int gnutls_init = 0;</a>
+<a name="ln1111"> </a>
+<a name="ln1112">    if (!gnutls_init) {</a>
+<a name="ln1113">        crm_gnutls_global_init();</a>
+<a name="ln1114">    }</a>
+<a name="ln1115">    gnutls_init = 1;</a>
+<a name="ln1116">}</a>
+<a name="ln1117">#endif</a>
+<a name="ln1118"> </a>
+<a name="ln1119">static void</a>
+<a name="ln1120">report_async_connection_result(lrmd_t * lrmd, int rc)</a>
+<a name="ln1121">{</a>
+<a name="ln1122">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1123"> </a>
+<a name="ln1124">    if (native-&gt;callback) {</a>
+<a name="ln1125">        lrmd_event_data_t event = { 0, };</a>
+<a name="ln1126">        event.type = lrmd_event_connect;</a>
+<a name="ln1127">        event.remote_nodename = native-&gt;remote_nodename;</a>
+<a name="ln1128">        event.connection_rc = rc;</a>
+<a name="ln1129">        native-&gt;callback(&amp;event);</a>
+<a name="ln1130">    }</a>
+<a name="ln1131">}</a>
+<a name="ln1132"> </a>
+<a name="ln1133">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1134">static void</a>
+<a name="ln1135">lrmd_tcp_connect_cb(void *userdata, int sock)</a>
+<a name="ln1136">{</a>
+<a name="ln1137">    lrmd_t *lrmd = userdata;</a>
+<a name="ln1138">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1139">    char name[256] = { 0, };</a>
+<a name="ln1140">    static struct mainloop_fd_callbacks lrmd_tls_callbacks = {</a>
+<a name="ln1141">        .dispatch = lrmd_tls_dispatch,</a>
+<a name="ln1142">        .destroy = lrmd_tls_connection_destroy,</a>
+<a name="ln1143">    };</a>
+<a name="ln1144">    int rc = sock;</a>
+<a name="ln1145">    gnutls_datum_t psk_key = { NULL, 0 };</a>
+<a name="ln1146"> </a>
+<a name="ln1147">    native-&gt;async_timer = 0;</a>
+<a name="ln1148"> </a>
+<a name="ln1149">    if (rc &lt; 0) {</a>
+<a name="ln1150">        lrmd_tls_connection_destroy(lrmd);</a>
+<a name="ln1151">        crm_info(&quot;remote lrmd connect to %s at port %d failed&quot;, native-&gt;server, native-&gt;port);</a>
+<a name="ln1152">        report_async_connection_result(lrmd, rc);</a>
+<a name="ln1153">        return;</a>
+<a name="ln1154">    }</a>
+<a name="ln1155"> </a>
+<a name="ln1156">    /* TODO continue with tls stuff now that tcp connect passed. make this async as well soon</a>
+<a name="ln1157">     * to avoid all blocking code in the client. */</a>
+<a name="ln1158">    native-&gt;sock = sock;</a>
+<a name="ln1159"> </a>
+<a name="ln1160">    if (lrmd_tls_set_key(&amp;psk_key) != 0) {</a>
+<a name="ln1161">        lrmd_tls_connection_destroy(lrmd);</a>
+<a name="ln1162">        return;</a>
+<a name="ln1163">    }</a>
+<a name="ln1164"> </a>
+<a name="ln1165">    gnutls_psk_allocate_client_credentials(&amp;native-&gt;psk_cred_c);</a>
+<a name="ln1166">    gnutls_psk_set_client_credentials(native-&gt;psk_cred_c, DEFAULT_REMOTE_USERNAME, &amp;psk_key, GNUTLS_PSK_KEY_RAW);</a>
+<a name="ln1167">    gnutls_free(psk_key.data);</a>
+<a name="ln1168"> </a>
+<a name="ln1169">    native-&gt;remote-&gt;tls_session = create_psk_tls_session(sock, GNUTLS_CLIENT, native-&gt;psk_cred_c);</a>
+<a name="ln1170"> </a>
+<a name="ln1171">    if (crm_initiate_client_tls_handshake(native-&gt;remote, LRMD_CLIENT_HANDSHAKE_TIMEOUT) != 0) {</a>
+<a name="ln1172">        crm_warn(&quot;Client tls handshake failed for server %s:%d. Disconnecting&quot;, native-&gt;server,</a>
+<a name="ln1173">                 native-&gt;port);</a>
+<a name="ln1174">        gnutls_deinit(*native-&gt;remote-&gt;tls_session);</a>
+<a name="ln1175">        gnutls_free(native-&gt;remote-&gt;tls_session);</a>
+<a name="ln1176">        native-&gt;remote-&gt;tls_session = NULL;</a>
+<a name="ln1177">        lrmd_tls_connection_destroy(lrmd);</a>
+<a name="ln1178">        report_async_connection_result(lrmd, -1);</a>
+<a name="ln1179">        return;</a>
+<a name="ln1180">    }</a>
+<a name="ln1181"> </a>
+<a name="ln1182">    crm_info(&quot;Remote lrmd client TLS connection established with server %s:%d&quot;, native-&gt;server,</a>
+<a name="ln1183">             native-&gt;port);</a>
+<a name="ln1184"> </a>
+<a name="ln1185">    snprintf(name, 128, &quot;remote-lrmd-%s:%d&quot;, native-&gt;server, native-&gt;port);</a>
+<a name="ln1186"> </a>
+<a name="ln1187">    native-&gt;process_notify = mainloop_add_trigger(G_PRIORITY_HIGH, lrmd_tls_dispatch, lrmd);</a>
+<a name="ln1188">    native-&gt;source =</a>
+<a name="ln1189">        mainloop_add_fd(name, G_PRIORITY_HIGH, native-&gt;sock, lrmd, &amp;lrmd_tls_callbacks);</a>
+<a name="ln1190"> </a>
+<a name="ln1191">    rc = lrmd_handshake(lrmd, name);</a>
+<a name="ln1192">    report_async_connection_result(lrmd, rc);</a>
+<a name="ln1193"> </a>
+<a name="ln1194">    return;</a>
+<a name="ln1195">}</a>
+<a name="ln1196"> </a>
+<a name="ln1197">static int</a>
+<a name="ln1198">lrmd_tls_connect_async(lrmd_t * lrmd, int timeout /*ms */ )</a>
+<a name="ln1199">{</a>
+<a name="ln1200">    int rc = -1;</a>
+<a name="ln1201">    int sock = 0;</a>
+<a name="ln1202">    int timer_id = 0;</a>
+<a name="ln1203"> </a>
+<a name="ln1204">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1205"> </a>
+<a name="ln1206">    lrmd_gnutls_global_init();</a>
+<a name="ln1207"> </a>
+<a name="ln1208">    sock = crm_remote_tcp_connect_async(native-&gt;server, native-&gt;port, timeout, &amp;timer_id, lrmd,</a>
+<a name="ln1209">                                      lrmd_tcp_connect_cb);</a>
+<a name="ln1210"> </a>
+<a name="ln1211">    if (sock != -1) {</a>
+<a name="ln1212">        native-&gt;sock = sock;</a>
+<a name="ln1213">        rc = 0;</a>
+<a name="ln1214">        native-&gt;async_timer = timer_id;</a>
+<a name="ln1215">    }</a>
+<a name="ln1216"> </a>
+<a name="ln1217">    return rc;</a>
+<a name="ln1218">}</a>
+<a name="ln1219"> </a>
+<a name="ln1220">static int</a>
+<a name="ln1221">lrmd_tls_connect(lrmd_t * lrmd, int *fd)</a>
+<a name="ln1222">{</a>
+<a name="ln1223">    static struct mainloop_fd_callbacks lrmd_tls_callbacks = {</a>
+<a name="ln1224">        .dispatch = lrmd_tls_dispatch,</a>
+<a name="ln1225">        .destroy = lrmd_tls_connection_destroy,</a>
+<a name="ln1226">    };</a>
+<a name="ln1227"> </a>
+<a name="ln1228">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1229">    int sock;</a>
+<a name="ln1230">    gnutls_datum_t psk_key = { NULL, 0 };</a>
+<a name="ln1231"> </a>
+<a name="ln1232">    lrmd_gnutls_global_init();</a>
+<a name="ln1233"> </a>
+<a name="ln1234">    sock = crm_remote_tcp_connect(native-&gt;server, native-&gt;port);</a>
+<a name="ln1235">    if (sock &lt; 0) {</a>
+<a name="ln1236">        crm_warn(&quot;Could not establish remote lrmd connection to %s&quot;, native-&gt;server);</a>
+<a name="ln1237">        lrmd_tls_connection_destroy(lrmd);</a>
+<a name="ln1238">        return -ENOTCONN;</a>
+<a name="ln1239">    }</a>
+<a name="ln1240"> </a>
+<a name="ln1241">    native-&gt;sock = sock;</a>
+<a name="ln1242"> </a>
+<a name="ln1243">    if (lrmd_tls_set_key(&amp;psk_key) != 0) {</a>
+<a name="ln1244">        lrmd_tls_connection_destroy(lrmd);</a>
+<a name="ln1245">        return -1;</a>
+<a name="ln1246">    }</a>
+<a name="ln1247"> </a>
+<a name="ln1248">    gnutls_psk_allocate_client_credentials(&amp;native-&gt;psk_cred_c);</a>
+<a name="ln1249">    gnutls_psk_set_client_credentials(native-&gt;psk_cred_c, DEFAULT_REMOTE_USERNAME, &amp;psk_key, GNUTLS_PSK_KEY_RAW);</a>
+<a name="ln1250">    gnutls_free(psk_key.data);</a>
+<a name="ln1251"> </a>
+<a name="ln1252">    native-&gt;remote-&gt;tls_session = create_psk_tls_session(sock, GNUTLS_CLIENT, native-&gt;psk_cred_c);</a>
+<a name="ln1253"> </a>
+<a name="ln1254">    if (crm_initiate_client_tls_handshake(native-&gt;remote, LRMD_CLIENT_HANDSHAKE_TIMEOUT) != 0) {</a>
+<a name="ln1255">        crm_err(&quot;Session creation for %s:%d failed&quot;, native-&gt;server, native-&gt;port);</a>
+<a name="ln1256">        gnutls_deinit(*native-&gt;remote-&gt;tls_session);</a>
+<a name="ln1257">        gnutls_free(native-&gt;remote-&gt;tls_session);</a>
+<a name="ln1258">        native-&gt;remote-&gt;tls_session = NULL;</a>
+<a name="ln1259">        lrmd_tls_connection_destroy(lrmd);</a>
+<a name="ln1260">        return -1;</a>
+<a name="ln1261">    }</a>
+<a name="ln1262"> </a>
+<a name="ln1263">    crm_info(&quot;Remote lrmd client TLS connection established with server %s:%d&quot;, native-&gt;server,</a>
+<a name="ln1264">             native-&gt;port);</a>
+<a name="ln1265"> </a>
+<a name="ln1266">    if (fd) {</a>
+<a name="ln1267">        *fd = sock;</a>
+<a name="ln1268">    } else {</a>
+<a name="ln1269">        char name[256] = { 0, };</a>
+<a name="ln1270">        snprintf(name, 128, &quot;remote-lrmd-%s:%d&quot;, native-&gt;server, native-&gt;port);</a>
+<a name="ln1271"> </a>
+<a name="ln1272">        native-&gt;process_notify = mainloop_add_trigger(G_PRIORITY_HIGH, lrmd_tls_dispatch, lrmd);</a>
+<a name="ln1273">        native-&gt;source =</a>
+<a name="ln1274">            mainloop_add_fd(name, G_PRIORITY_HIGH, native-&gt;sock, lrmd, &amp;lrmd_tls_callbacks);</a>
+<a name="ln1275">    }</a>
+<a name="ln1276">    return pcmk_ok;</a>
+<a name="ln1277">}</a>
+<a name="ln1278">#endif</a>
+<a name="ln1279"> </a>
+<a name="ln1280">static int</a>
+<a name="ln1281">lrmd_api_connect(lrmd_t * lrmd, const char *name, int *fd)</a>
+<a name="ln1282">{</a>
+<a name="ln1283">    int rc = -ENOTCONN;</a>
+<a name="ln1284">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1285"> </a>
+<a name="ln1286">    switch (native-&gt;type) {</a>
+<a name="ln1287">        case CRM_CLIENT_IPC:</a>
+<a name="ln1288">            rc = lrmd_ipc_connect(lrmd, fd);</a>
+<a name="ln1289">            break;</a>
+<a name="ln1290">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1291">        case CRM_CLIENT_TLS:</a>
+<a name="ln1292">            rc = lrmd_tls_connect(lrmd, fd);</a>
+<a name="ln1293">            break;</a>
+<a name="ln1294">#endif</a>
+<a name="ln1295">        default:</a>
+<a name="ln1296">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln1297">    }</a>
+<a name="ln1298"> </a>
+<a name="ln1299">    if (rc == pcmk_ok) {</a>
+<a name="ln1300">        rc = lrmd_handshake(lrmd, name);</a>
+<a name="ln1301">    }</a>
+<a name="ln1302"> </a>
+<a name="ln1303">    return rc;</a>
+<a name="ln1304">}</a>
+<a name="ln1305"> </a>
+<a name="ln1306">static int</a>
+<a name="ln1307">lrmd_api_connect_async(lrmd_t * lrmd, const char *name, int timeout)</a>
+<a name="ln1308">{</a>
+<a name="ln1309">    int rc = 0;</a>
+<a name="ln1310">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1311"> </a>
+<a name="ln1312">    if (!native-&gt;callback) {</a>
+<a name="ln1313">        crm_err(&quot;Async connect not possible, no lrmd client callback set.&quot;);</a>
+<a name="ln1314">        return -1;</a>
+<a name="ln1315">    }</a>
+<a name="ln1316"> </a>
+<a name="ln1317">    switch (native-&gt;type) {</a>
+<a name="ln1318">        case CRM_CLIENT_IPC:</a>
+<a name="ln1319">            /* fake async connection with ipc.  it should be fast</a>
+<a name="ln1320">             * enough that we gain very little from async */</a>
+<a name="ln1321">            rc = lrmd_api_connect(lrmd, name, NULL);</a>
+<a name="ln1322">            if (!rc) {</a>
+<a name="ln1323">                report_async_connection_result(lrmd, rc);</a>
+<a name="ln1324">            }</a>
+<a name="ln1325">            break;</a>
+<a name="ln1326">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1327">        case CRM_CLIENT_TLS:</a>
+<a name="ln1328">            rc = lrmd_tls_connect_async(lrmd, timeout);</a>
+<a name="ln1329">            if (rc) {</a>
+<a name="ln1330">                /* connection failed, report rc now */</a>
+<a name="ln1331">                report_async_connection_result(lrmd, rc);</a>
+<a name="ln1332">            }</a>
+<a name="ln1333">            break;</a>
+<a name="ln1334">#endif</a>
+<a name="ln1335">        default:</a>
+<a name="ln1336">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln1337">    }</a>
+<a name="ln1338"> </a>
+<a name="ln1339">    return rc;</a>
+<a name="ln1340">}</a>
+<a name="ln1341"> </a>
+<a name="ln1342">static void</a>
+<a name="ln1343">lrmd_ipc_disconnect(lrmd_t * lrmd)</a>
+<a name="ln1344">{</a>
+<a name="ln1345">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1346"> </a>
+<a name="ln1347">    if (native-&gt;source != NULL) {</a>
+<a name="ln1348">        /* Attached to mainloop */</a>
+<a name="ln1349">        mainloop_del_ipc_client(native-&gt;source);</a>
+<a name="ln1350">        native-&gt;source = NULL;</a>
+<a name="ln1351">        native-&gt;ipc = NULL;</a>
+<a name="ln1352"> </a>
+<a name="ln1353">    } else if (native-&gt;ipc) {</a>
+<a name="ln1354">        /* Not attached to mainloop */</a>
+<a name="ln1355">        crm_ipc_t *ipc = native-&gt;ipc;</a>
+<a name="ln1356"> </a>
+<a name="ln1357">        native-&gt;ipc = NULL;</a>
+<a name="ln1358">        crm_ipc_close(ipc);</a>
+<a name="ln1359">        crm_ipc_destroy(ipc);</a>
+<a name="ln1360">    }</a>
+<a name="ln1361">}</a>
+<a name="ln1362"> </a>
+<a name="ln1363">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1364">static void</a>
+<a name="ln1365">lrmd_tls_disconnect(lrmd_t * lrmd)</a>
+<a name="ln1366">{</a>
+<a name="ln1367">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1368"> </a>
+<a name="ln1369">    if (native-&gt;remote-&gt;tls_session) {</a>
+<a name="ln1370">        gnutls_bye(*native-&gt;remote-&gt;tls_session, GNUTLS_SHUT_RDWR);</a>
+<a name="ln1371">        gnutls_deinit(*native-&gt;remote-&gt;tls_session);</a>
+<a name="ln1372">        gnutls_free(native-&gt;remote-&gt;tls_session);</a>
+<a name="ln1373">        native-&gt;remote-&gt;tls_session = 0;</a>
+<a name="ln1374">    }</a>
+<a name="ln1375"> </a>
+<a name="ln1376">    if (native-&gt;async_timer) {</a>
+<a name="ln1377">        g_source_remove(native-&gt;async_timer);</a>
+<a name="ln1378">        native-&gt;async_timer = 0;</a>
+<a name="ln1379">    }</a>
+<a name="ln1380"> </a>
+<a name="ln1381">    if (native-&gt;source != NULL) {</a>
+<a name="ln1382">        /* Attached to mainloop */</a>
+<a name="ln1383">        mainloop_del_ipc_client(native-&gt;source);</a>
+<a name="ln1384">        native-&gt;source = NULL;</a>
+<a name="ln1385"> </a>
+<a name="ln1386">    } else if (native-&gt;sock) {</a>
+<a name="ln1387">        close(native-&gt;sock);</a>
+<a name="ln1388">        native-&gt;sock = 0;</a>
+<a name="ln1389">    }</a>
+<a name="ln1390"> </a>
+<a name="ln1391">    if (native-&gt;pending_notify) {</a>
+<a name="ln1392">        g_list_free_full(native-&gt;pending_notify, lrmd_free_xml);</a>
+<a name="ln1393">        native-&gt;pending_notify = NULL;</a>
+<a name="ln1394">    }</a>
+<a name="ln1395">}</a>
+<a name="ln1396">#endif</a>
+<a name="ln1397"> </a>
+<a name="ln1398">static int</a>
+<a name="ln1399">lrmd_api_disconnect(lrmd_t * lrmd)</a>
+<a name="ln1400">{</a>
+<a name="ln1401">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1402"> </a>
+<a name="ln1403">    crm_info(&quot;Disconnecting from %d lrmd service&quot;, native-&gt;type);</a>
+<a name="ln1404">    switch (native-&gt;type) {</a>
+<a name="ln1405">        case CRM_CLIENT_IPC:</a>
+<a name="ln1406">            lrmd_ipc_disconnect(lrmd);</a>
+<a name="ln1407">            break;</a>
+<a name="ln1408">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1409">        case CRM_CLIENT_TLS:</a>
+<a name="ln1410">            lrmd_tls_disconnect(lrmd);</a>
+<a name="ln1411">            break;</a>
+<a name="ln1412">#endif</a>
+<a name="ln1413">        default:</a>
+<a name="ln1414">            crm_err(&quot;Unsupported connection type: %d&quot;, native-&gt;type);</a>
+<a name="ln1415">    }</a>
+<a name="ln1416"> </a>
+<a name="ln1417">    free(native-&gt;token);</a>
+<a name="ln1418">    native-&gt;token = NULL;</a>
+<a name="ln1419"> </a>
+<a name="ln1420">    free(native-&gt;peer_version);</a>
+<a name="ln1421">    native-&gt;peer_version = NULL;</a>
+<a name="ln1422">    return 0;</a>
+<a name="ln1423">}</a>
+<a name="ln1424"> </a>
+<a name="ln1425">static int</a>
+<a name="ln1426">lrmd_api_register_rsc(lrmd_t * lrmd,</a>
+<a name="ln1427">                      const char *rsc_id,</a>
+<a name="ln1428">                      const char *class,</a>
+<a name="ln1429">                      const char *provider, const char *type, enum lrmd_call_options options)</a>
+<a name="ln1430">{</a>
+<a name="ln1431">    int rc = pcmk_ok;</a>
+<a name="ln1432">    xmlNode *data = NULL;</a>
+<a name="ln1433"> </a>
+<a name="ln1434">    if (!class || !type || !rsc_id) {</a>
+<a name="ln1435">        return -EINVAL;</a>
+<a name="ln1436">    }</a>
+<a name="ln1437">    if (safe_str_eq(class, PCMK_RESOURCE_CLASS_OCF) &amp;&amp; !provider) {</a>
+<a name="ln1438">        return -EINVAL;</a>
+<a name="ln1439">    }</a>
+<a name="ln1440"> </a>
+<a name="ln1441">    data = create_xml_node(NULL, F_LRMD_RSC);</a>
+<a name="ln1442"> </a>
+<a name="ln1443">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln1444">    crm_xml_add(data, F_LRMD_RSC_ID, rsc_id);</a>
+<a name="ln1445">    crm_xml_add(data, F_LRMD_CLASS, class);</a>
+<a name="ln1446">    crm_xml_add(data, F_LRMD_PROVIDER, provider);</a>
+<a name="ln1447">    crm_xml_add(data, F_LRMD_TYPE, type);</a>
+<a name="ln1448">    rc = lrmd_send_command(lrmd, LRMD_OP_RSC_REG, data, NULL, 0, options, TRUE);</a>
+<a name="ln1449">    free_xml(data);</a>
+<a name="ln1450"> </a>
+<a name="ln1451">    return rc;</a>
+<a name="ln1452">}</a>
+<a name="ln1453"> </a>
+<a name="ln1454">static int</a>
+<a name="ln1455">lrmd_api_unregister_rsc(lrmd_t * lrmd, const char *rsc_id, enum lrmd_call_options options)</a>
+<a name="ln1456">{</a>
+<a name="ln1457">    int rc = pcmk_ok;</a>
+<a name="ln1458">    xmlNode *data = create_xml_node(NULL, F_LRMD_RSC);</a>
+<a name="ln1459"> </a>
+<a name="ln1460">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln1461">    crm_xml_add(data, F_LRMD_RSC_ID, rsc_id);</a>
+<a name="ln1462">    rc = lrmd_send_command(lrmd, LRMD_OP_RSC_UNREG, data, NULL, 0, options, TRUE);</a>
+<a name="ln1463">    free_xml(data);</a>
+<a name="ln1464"> </a>
+<a name="ln1465">    return rc;</a>
+<a name="ln1466">}</a>
+<a name="ln1467"> </a>
+<a name="ln1468">lrmd_rsc_info_t *</a>
+<a name="ln1469">lrmd_copy_rsc_info(lrmd_rsc_info_t * rsc_info)</a>
+<a name="ln1470">{</a>
+<a name="ln1471">    lrmd_rsc_info_t *copy = NULL;</a>
+<a name="ln1472"> </a>
+<a name="ln1473">    copy = calloc(1, sizeof(lrmd_rsc_info_t));</a>
+<a name="ln1474"> </a>
+<a name="ln1475">    copy-&gt;id = strdup(rsc_info-&gt;id);</a>
+<a name="ln1476">    copy-&gt;type = strdup(rsc_info-&gt;type);</a>
+<a name="ln1477">    copy-&gt;class = strdup(rsc_info-&gt;class);</a>
+<a name="ln1478">    if (rsc_info-&gt;provider) {</a>
+<a name="ln1479">        copy-&gt;provider = strdup(rsc_info-&gt;provider);</a>
+<a name="ln1480">    }</a>
+<a name="ln1481"> </a>
+<a name="ln1482">    return copy;</a>
+<a name="ln1483">}</a>
+<a name="ln1484"> </a>
+<a name="ln1485">void</a>
+<a name="ln1486">lrmd_free_rsc_info(lrmd_rsc_info_t * rsc_info)</a>
+<a name="ln1487">{</a>
+<a name="ln1488">    if (!rsc_info) {</a>
+<a name="ln1489">        return;</a>
+<a name="ln1490">    }</a>
+<a name="ln1491">    free(rsc_info-&gt;id);</a>
+<a name="ln1492">    free(rsc_info-&gt;type);</a>
+<a name="ln1493">    free(rsc_info-&gt;class);</a>
+<a name="ln1494">    free(rsc_info-&gt;provider);</a>
+<a name="ln1495">    free(rsc_info);</a>
+<a name="ln1496">}</a>
+<a name="ln1497"> </a>
+<a name="ln1498">static lrmd_rsc_info_t *</a>
+<a name="ln1499">lrmd_api_get_rsc_info(lrmd_t * lrmd, const char *rsc_id, enum lrmd_call_options options)</a>
+<a name="ln1500">{</a>
+<a name="ln1501">    lrmd_rsc_info_t *rsc_info = NULL;</a>
+<a name="ln1502">    xmlNode *data = create_xml_node(NULL, F_LRMD_RSC);</a>
+<a name="ln1503">    xmlNode *output = NULL;</a>
+<a name="ln1504">    const char *class = NULL;</a>
+<a name="ln1505">    const char *provider = NULL;</a>
+<a name="ln1506">    const char *type = NULL;</a>
+<a name="ln1507"> </a>
+<a name="ln1508">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln1509">    crm_xml_add(data, F_LRMD_RSC_ID, rsc_id);</a>
+<a name="ln1510">    lrmd_send_command(lrmd, LRMD_OP_RSC_INFO, data, &amp;output, 0, options, TRUE);</a>
+<a name="ln1511">    free_xml(data);</a>
+<a name="ln1512"> </a>
+<a name="ln1513">    if (!output) {</a>
+<a name="ln1514">        return NULL;</a>
+<a name="ln1515">    }</a>
+<a name="ln1516"> </a>
+<a name="ln1517">    class = crm_element_value(output, F_LRMD_CLASS);</a>
+<a name="ln1518">    provider = crm_element_value(output, F_LRMD_PROVIDER);</a>
+<a name="ln1519">    type = crm_element_value(output, F_LRMD_TYPE);</a>
+<a name="ln1520"> </a>
+<a name="ln1521">    if (!class || !type) {</a>
+<a name="ln1522">        free_xml(output);</a>
+<a name="ln1523">        return NULL;</a>
+<a name="ln1524">    } else if (safe_str_eq(class, PCMK_RESOURCE_CLASS_OCF) &amp;&amp; !provider) {</a>
+<a name="ln1525">        free_xml(output);</a>
+<a name="ln1526">        return NULL;</a>
+<a name="ln1527">    }</a>
+<a name="ln1528"> </a>
+<a name="ln1529">    rsc_info = calloc(1, sizeof(lrmd_rsc_info_t));</a>
+<a name="ln1530">    rsc_info-&gt;id = strdup(rsc_id);</a>
+<a name="ln1531">    rsc_info-&gt;class = strdup(class);</a>
+<a name="ln1532">    if (provider) {</a>
+<a name="ln1533">        rsc_info-&gt;provider = strdup(provider);</a>
+<a name="ln1534">    }</a>
+<a name="ln1535">    rsc_info-&gt;type = strdup(type);</a>
+<a name="ln1536"> </a>
+<a name="ln1537">    free_xml(output);</a>
+<a name="ln1538">    return rsc_info;</a>
+<a name="ln1539">}</a>
+<a name="ln1540"> </a>
+<a name="ln1541">static void</a>
+<a name="ln1542">lrmd_api_set_callback(lrmd_t * lrmd, lrmd_event_callback callback)</a>
+<a name="ln1543">{</a>
+<a name="ln1544">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1545"> </a>
+<a name="ln1546">    native-&gt;callback = callback;</a>
+<a name="ln1547">}</a>
+<a name="ln1548"> </a>
+<a name="ln1549">void</a>
+<a name="ln1550">lrmd_internal_set_proxy_callback(lrmd_t * lrmd, void *userdata, void (*callback)(lrmd_t *lrmd, void *userdata, xmlNode *msg))</a>
+<a name="ln1551">{</a>
+<a name="ln1552">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1553"> </a>
+<a name="ln1554">    native-&gt;proxy_callback = callback;</a>
+<a name="ln1555">    native-&gt;proxy_callback_userdata = userdata;</a>
+<a name="ln1556">}</a>
+<a name="ln1557"> </a>
+<a name="ln1558">void</a>
+<a name="ln1559">lrmd_internal_proxy_dispatch(lrmd_t *lrmd, xmlNode *msg)</a>
+<a name="ln1560">{</a>
+<a name="ln1561">    lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln1562"> </a>
+<a name="ln1563">    if (native-&gt;proxy_callback) {</a>
+<a name="ln1564">        crm_log_xml_trace(msg, &quot;PROXY_INBOUND&quot;);</a>
+<a name="ln1565">        native-&gt;proxy_callback(lrmd, native-&gt;proxy_callback_userdata, msg);</a>
+<a name="ln1566">    }</a>
+<a name="ln1567">}</a>
+<a name="ln1568"> </a>
+<a name="ln1569">int</a>
+<a name="ln1570">lrmd_internal_proxy_send(lrmd_t * lrmd, xmlNode *msg)</a>
+<a name="ln1571">{</a>
+<a name="ln1572">    if (lrmd == NULL) {</a>
+<a name="ln1573">        return -ENOTCONN;</a>
+<a name="ln1574">    }</a>
+<a name="ln1575">    crm_xml_add(msg, F_LRMD_OPERATION, CRM_OP_IPC_FWD);</a>
+<a name="ln1576"> </a>
+<a name="ln1577">    crm_log_xml_trace(msg, &quot;PROXY_OUTBOUND&quot;);</a>
+<a name="ln1578">    return lrmd_send_xml_no_reply(lrmd, msg);</a>
+<a name="ln1579">}</a>
+<a name="ln1580"> </a>
+<a name="ln1581">static int</a>
+<a name="ln1582">stonith_get_metadata(const char *provider, const char *type, char **output)</a>
+<a name="ln1583">{</a>
+<a name="ln1584">    int rc = pcmk_ok;</a>
+<a name="ln1585">    stonith_t *stonith_api = stonith_api_new();</a>
+<a name="ln1586"> </a>
+<a name="ln1587">    if(stonith_api) {</a>
+<a name="ln1588">        stonith_api-&gt;cmds-&gt;metadata(stonith_api, st_opt_sync_call, type, provider, output, 0);</a>
+<a name="ln1589">        stonith_api-&gt;cmds-&gt;free(stonith_api);</a>
+<a name="ln1590">    }</a>
+<a name="ln1591">    if (*output == NULL) {</a>
+<a name="ln1592">        rc = -EIO;</a>
+<a name="ln1593">    }</a>
+<a name="ln1594">    return rc;</a>
+<a name="ln1595">}</a>
+<a name="ln1596"> </a>
+<a name="ln1597">#define lsb_metadata_template  \</a>
+<a name="ln1598">    &quot;&lt;?xml version='1.0'?&gt;\n&quot;                                           \</a>
+<a name="ln1599">    &quot;&lt;!DOCTYPE resource-agent SYSTEM 'ra-api-1.dtd'&gt;\n&quot;                 \</a>
+<a name="ln1600">    &quot;&lt;resource-agent name='%s' version='0.1'&gt;\n&quot;                        \</a>
+<a name="ln1601">    &quot;  &lt;version&gt;1.0&lt;/version&gt;\n&quot;                                        \</a>
+<a name="ln1602">    &quot;  &lt;longdesc lang='en'&gt;\n&quot;                                          \</a>
+<a name="ln1603">    &quot;    %s\n&quot;                                                          \</a>
+<a name="ln1604">    &quot;  &lt;/longdesc&gt;\n&quot;                                                   \</a>
+<a name="ln1605">    &quot;  &lt;shortdesc lang='en'&gt;%s&lt;/shortdesc&gt;\n&quot;                           \</a>
+<a name="ln1606">    &quot;  &lt;parameters&gt;\n&quot;                                                  \</a>
+<a name="ln1607">    &quot;  &lt;/parameters&gt;\n&quot;                                                 \</a>
+<a name="ln1608">    &quot;  &lt;actions&gt;\n&quot;                                                     \</a>
+<a name="ln1609">    &quot;    &lt;action name='meta-data'    timeout='5' /&gt;\n&quot;                  \</a>
+<a name="ln1610">    &quot;    &lt;action name='start'        timeout='15' /&gt;\n&quot;                 \</a>
+<a name="ln1611">    &quot;    &lt;action name='stop'         timeout='15' /&gt;\n&quot;                 \</a>
+<a name="ln1612">    &quot;    &lt;action name='status'       timeout='15' /&gt;\n&quot;                 \</a>
+<a name="ln1613">    &quot;    &lt;action name='restart'      timeout='15' /&gt;\n&quot;                 \</a>
+<a name="ln1614">    &quot;    &lt;action name='force-reload' timeout='15' /&gt;\n&quot;                 \</a>
+<a name="ln1615">    &quot;    &lt;action name='monitor'      timeout='15' interval='15' /&gt;\n&quot;   \</a>
+<a name="ln1616">    &quot;  &lt;/actions&gt;\n&quot;                                                    \</a>
+<a name="ln1617">    &quot;  &lt;special tag='LSB'&gt;\n&quot;                                           \</a>
+<a name="ln1618">    &quot;    &lt;Provides&gt;%s&lt;/Provides&gt;\n&quot;                                     \</a>
+<a name="ln1619">    &quot;    &lt;Required-Start&gt;%s&lt;/Required-Start&gt;\n&quot;                         \</a>
+<a name="ln1620">    &quot;    &lt;Required-Stop&gt;%s&lt;/Required-Stop&gt;\n&quot;                           \</a>
+<a name="ln1621">    &quot;    &lt;Should-Start&gt;%s&lt;/Should-Start&gt;\n&quot;                             \</a>
+<a name="ln1622">    &quot;    &lt;Should-Stop&gt;%s&lt;/Should-Stop&gt;\n&quot;                               \</a>
+<a name="ln1623">    &quot;    &lt;Default-Start&gt;%s&lt;/Default-Start&gt;\n&quot;                           \</a>
+<a name="ln1624">    &quot;    &lt;Default-Stop&gt;%s&lt;/Default-Stop&gt;\n&quot;                             \</a>
+<a name="ln1625">    &quot;  &lt;/special&gt;\n&quot;                                                    \</a>
+<a name="ln1626">    &quot;&lt;/resource-agent&gt;\n&quot;</a>
+<a name="ln1627"> </a>
+<a name="ln1628">#define LSB_INITSCRIPT_INFOBEGIN_TAG &quot;### BEGIN INIT INFO&quot;</a>
+<a name="ln1629">#define LSB_INITSCRIPT_INFOEND_TAG &quot;### END INIT INFO&quot;</a>
+<a name="ln1630">#define PROVIDES    &quot;# Provides:&quot;</a>
+<a name="ln1631">#define REQ_START   &quot;# Required-Start:&quot;</a>
+<a name="ln1632">#define REQ_STOP    &quot;# Required-Stop:&quot;</a>
+<a name="ln1633">#define SHLD_START  &quot;# Should-Start:&quot;</a>
+<a name="ln1634">#define SHLD_STOP   &quot;# Should-Stop:&quot;</a>
+<a name="ln1635">#define DFLT_START  &quot;# Default-Start:&quot;</a>
+<a name="ln1636">#define DFLT_STOP   &quot;# Default-Stop:&quot;</a>
+<a name="ln1637">#define SHORT_DSCR  &quot;# Short-Description:&quot;</a>
+<a name="ln1638">#define DESCRIPTION &quot;# Description:&quot;</a>
+<a name="ln1639"> </a>
+<a name="ln1640">#define lsb_meta_helper_free_value(m)           \</a>
+<a name="ln1641">    do {                                        \</a>
+<a name="ln1642">        if ((m) != NULL) {                      \</a>
+<a name="ln1643">            xmlFree(m);                         \</a>
+<a name="ln1644">            (m) = NULL;                         \</a>
+<a name="ln1645">        }                                       \</a>
+<a name="ln1646">    } while(0)</a>
+<a name="ln1647"> </a>
+<a name="ln1648">/*!</a>
+<a name="ln1649"> * \internal</a>
+<a name="ln1650"> * \brief Grab an LSB header value</a>
+<a name="ln1651"> *</a>
+<a name="ln1652"> * \param[in]     line    Line read from LSB init script</a>
+<a name="ln1653"> * \param[in/out] value   If not set, will be set to XML-safe copy of value</a>
+<a name="ln1654"> * \param[in]     prefix  Set value if line starts with this pattern</a>
+<a name="ln1655"> *</a>
+<a name="ln1656"> * \return TRUE if value was set, FALSE otherwise</a>
+<a name="ln1657"> */</a>
+<a name="ln1658">static inline gboolean</a>
+<a name="ln1659">lsb_meta_helper_get_value(const char *line, char **value, const char *prefix)</a>
+<a name="ln1660">{</a>
+<a name="ln1661">    if (!*value &amp;&amp; !strncasecmp(line, prefix, strlen(prefix))) {</a>
+<a name="ln1662">        *value = (char *)xmlEncodeEntitiesReentrant(NULL, BAD_CAST line+strlen(prefix));</a>
+<a name="ln1663">        return TRUE;</a>
+<a name="ln1664">    }</a>
+<a name="ln1665">    return FALSE;</a>
+<a name="ln1666">}</a>
+<a name="ln1667"> </a>
+<a name="ln1668">static int</a>
+<a name="ln1669">lsb_get_metadata(const char *type, char **output)</a>
+<a name="ln1670">{</a>
+<a name="ln1671">    char ra_pathname[PATH_MAX] = { 0, };</a>
+<a name="ln1672">    FILE *fp;</a>
+<a name="ln1673">    char buffer[1024];</a>
+<a name="ln1674">    char *provides = NULL;</a>
+<a name="ln1675">    char *req_start = NULL;</a>
+<a name="ln1676">    char *req_stop = NULL;</a>
+<a name="ln1677">    char *shld_start = NULL;</a>
+<a name="ln1678">    char *shld_stop = NULL;</a>
+<a name="ln1679">    char *dflt_start = NULL;</a>
+<a name="ln1680">    char *dflt_stop = NULL;</a>
+<a name="ln1681">    char *s_dscrpt = NULL;</a>
+<a name="ln1682">    char *xml_l_dscrpt = NULL;</a>
+<a name="ln1683">    int offset = 0;</a>
+<a name="ln1684">    int max = 2048;</a>
+<a name="ln1685">    char description[max];</a>
+<a name="ln1686"> </a>
+<a name="ln1687">    if(type[0] == '/') {</a>
+<a name="ln1688">        snprintf(ra_pathname, sizeof(ra_pathname), &quot;%s&quot;, type);</a>
+<a name="ln1689">    } else {</a>
+<a name="ln1690">        snprintf(ra_pathname, sizeof(ra_pathname), &quot;%s/%s&quot;, LSB_ROOT_DIR, type);</a>
+<a name="ln1691">    }</a>
+<a name="ln1692"> </a>
+<a name="ln1693">    crm_trace(&quot;Looking into %s&quot;, ra_pathname);</a>
+<a name="ln1694">    if (!(fp = fopen(ra_pathname, &quot;r&quot;))) {</a>
+<a name="ln1695">        return -errno;</a>
+<a name="ln1696">    }</a>
+<a name="ln1697"> </a>
+<a name="ln1698">    /* Enter into the lsb-compliant comment block */</a>
+<a name="ln1699">    while (fgets(buffer, sizeof(buffer), fp)) {</a>
+<a name="ln1700"> </a>
+<a name="ln1701">        /* Now suppose each of the following eight arguments contain only one line */</a>
+<a name="ln1702">        if (lsb_meta_helper_get_value(buffer, &amp;provides, PROVIDES)) {</a>
+<a name="ln1703">            continue;</a>
+<a name="ln1704">        }</a>
+<a name="ln1705">        if (lsb_meta_helper_get_value(buffer, &amp;req_start, REQ_START)) {</a>
+<a name="ln1706">            continue;</a>
+<a name="ln1707">        }</a>
+<a name="ln1708">        if (lsb_meta_helper_get_value(buffer, &amp;req_stop, REQ_STOP)) {</a>
+<a name="ln1709">            continue;</a>
+<a name="ln1710">        }</a>
+<a name="ln1711">        if (lsb_meta_helper_get_value(buffer, &amp;shld_start, SHLD_START)) {</a>
+<a name="ln1712">            continue;</a>
+<a name="ln1713">        }</a>
+<a name="ln1714">        if (lsb_meta_helper_get_value(buffer, &amp;shld_stop, SHLD_STOP)) {</a>
+<a name="ln1715">            continue;</a>
+<a name="ln1716">        }</a>
+<a name="ln1717">        if (lsb_meta_helper_get_value(buffer, &amp;dflt_start, DFLT_START)) {</a>
+<a name="ln1718">            continue;</a>
+<a name="ln1719">        }</a>
+<a name="ln1720">        if (lsb_meta_helper_get_value(buffer, &amp;dflt_stop, DFLT_STOP)) {</a>
+<a name="ln1721">            continue;</a>
+<a name="ln1722">        }</a>
+<a name="ln1723">        if (lsb_meta_helper_get_value(buffer, &amp;s_dscrpt, SHORT_DSCR)) {</a>
+<a name="ln1724">            continue;</a>
+<a name="ln1725">        }</a>
+<a name="ln1726"> </a>
+<a name="ln1727">        /* Long description may cross multiple lines */</a>
+<a name="ln1728">        if (offset == 0 &amp;&amp; (0 == strncasecmp(buffer, DESCRIPTION, strlen(DESCRIPTION)))) {</a>
+<a name="ln1729">            /* Between # and keyword, more than one space, or a tab</a>
+<a name="ln1730">             * character, indicates the continuation line.</a>
+<a name="ln1731">             *</a>
+<a name="ln1732">             * Extracted from LSB init script standard</a>
+<a name="ln1733">             */</a>
+<a name="ln1734">            while (fgets(buffer, sizeof(buffer), fp)) {</a>
+<a name="ln1735">                if (!strncmp(buffer, &quot;#  &quot;, 3) || !strncmp(buffer, &quot;#\t&quot;, 2)) {</a>
+<a name="ln1736">                    buffer[0] = ' ';</a>
+<a name="ln1737">                    offset += snprintf(description+offset, max-offset, &quot;%s&quot;, buffer);</a>
+<a name="ln1738"> </a>
+<a name="ln1739">                } else {</a>
+<a name="ln1740">                    fputs(buffer, fp);</a>
+<a name="ln1741">                    break;      /* Long description ends */</a>
+<a name="ln1742">                }</a>
+<a name="ln1743">            }</a>
+<a name="ln1744">            continue;</a>
+<a name="ln1745">        }</a>
+<a name="ln1746"> </a>
+<a name="ln1747">        if (xml_l_dscrpt == NULL &amp;&amp; offset &gt; 0) {</a>
+<a name="ln1748">            xml_l_dscrpt = (char *)xmlEncodeEntitiesReentrant(NULL, BAD_CAST(description));</a>
+<a name="ln1749">        }</a>
+<a name="ln1750"> </a>
+<a name="ln1751">        if (!strncasecmp(buffer, LSB_INITSCRIPT_INFOEND_TAG, strlen(LSB_INITSCRIPT_INFOEND_TAG))) {</a>
+<a name="ln1752">            /* Get to the out border of LSB comment block */</a>
+<a name="ln1753">            break;</a>
+<a name="ln1754">        }</a>
+<a name="ln1755">        if (buffer[0] != '#') {</a>
+<a name="ln1756">            break;              /* Out of comment block in the beginning */</a>
+<a name="ln1757">        }</a>
+<a name="ln1758">    }</a>
+<a name="ln1759">    fclose(fp);</a>
+<a name="ln1760"> </a>
+<a name="ln1761">    *output = crm_strdup_printf(lsb_metadata_template, type,</a>
+<a name="ln1762">                                (xml_l_dscrpt == NULL) ? type : xml_l_dscrpt,</a>
+<a name="ln1763">                                (s_dscrpt == NULL) ? type : s_dscrpt, (provides == NULL) ? &quot;&quot; : provides,</a>
+<a name="ln1764">                                (req_start == NULL) ? &quot;&quot; : req_start, (req_stop == NULL) ? &quot;&quot; : req_stop,</a>
+<a name="ln1765">                                (shld_start == NULL) ? &quot;&quot; : shld_start, (shld_stop == NULL) ? &quot;&quot; : shld_stop,</a>
+<a name="ln1766">                                (dflt_start == NULL) ? &quot;&quot; : dflt_start, (dflt_stop == NULL) ? &quot;&quot; : dflt_stop);</a>
+<a name="ln1767"> </a>
+<a name="ln1768">    lsb_meta_helper_free_value(xml_l_dscrpt);</a>
+<a name="ln1769">    lsb_meta_helper_free_value(s_dscrpt);</a>
+<a name="ln1770">    lsb_meta_helper_free_value(provides);</a>
+<a name="ln1771">    lsb_meta_helper_free_value(req_start);</a>
+<a name="ln1772">    lsb_meta_helper_free_value(req_stop);</a>
+<a name="ln1773">    lsb_meta_helper_free_value(shld_start);</a>
+<a name="ln1774">    lsb_meta_helper_free_value(shld_stop);</a>
+<a name="ln1775">    lsb_meta_helper_free_value(dflt_start);</a>
+<a name="ln1776">    lsb_meta_helper_free_value(dflt_stop);</a>
+<a name="ln1777"> </a>
+<a name="ln1778">    crm_trace(&quot;Created fake metadata: %llu&quot;,</a>
+<a name="ln1779">              (unsigned long long) strlen(*output));</a>
+<a name="ln1780">    return pcmk_ok;</a>
+<a name="ln1781">}</a>
+<a name="ln1782"> </a>
+<a name="ln1783">#if SUPPORT_NAGIOS</a>
+<a name="ln1784">static int</a>
+<a name="ln1785">nagios_get_metadata(const char *type, char **output)</a>
+<a name="ln1786">{</a>
+<a name="ln1787">    int rc = pcmk_ok;</a>
+<a name="ln1788">    FILE *file_strm = NULL;</a>
+<a name="ln1789">    int start = 0, length = 0, read_len = 0;</a>
+<a name="ln1790">    char *metadata_file = NULL;</a>
+<a name="ln1791">    int len = 36;</a>
+<a name="ln1792"> </a>
+<a name="ln1793">    len += strlen(NAGIOS_METADATA_DIR);</a>
+<a name="ln1794">    len += strlen(type);</a>
+<a name="ln1795">    metadata_file = calloc(1, len);</a>
+<a name="ln1796">    CRM_CHECK(metadata_file != NULL, return -ENOMEM);</a>
+<a name="ln1797"> </a>
+<a name="ln1798">    sprintf(metadata_file, &quot;%s/%s.xml&quot;, NAGIOS_METADATA_DIR, type);</a>
+<a name="ln1799">    file_strm = fopen(metadata_file, &quot;r&quot;);</a>
+<a name="ln1800">    if (file_strm == NULL) {</a>
+<a name="ln1801">        crm_err(&quot;Metadata file %s does not exist&quot;, metadata_file);</a>
+<a name="ln1802">        free(metadata_file);</a>
+<a name="ln1803">        return -EIO;</a>
+<a name="ln1804">    }</a>
+<a name="ln1805"> </a>
+<a name="ln1806">    /* see how big the file is */</a>
+<a name="ln1807">    start = ftell(file_strm);</a>
+<a name="ln1808">    fseek(file_strm, 0L, SEEK_END);</a>
+<a name="ln1809">    length = ftell(file_strm);</a>
+<a name="ln1810">    fseek(file_strm, 0L, start);</a>
+<a name="ln1811"> </a>
+<a name="ln1812">    CRM_ASSERT(length &gt;= 0);</a>
+<a name="ln1813">    CRM_ASSERT(start == ftell(file_strm));</a>
+<a name="ln1814"> </a>
+<a name="ln1815">    if (length &lt;= 0) {</a>
+<a name="ln1816">        crm_info(&quot;%s was not valid&quot;, metadata_file);</a>
+<a name="ln1817">        free(*output);</a>
+<a name="ln1818">        *output = NULL;</a>
+<a name="ln1819">        rc = -EIO;</a>
+<a name="ln1820"> </a>
+<a name="ln1821">    } else {</a>
+<a name="ln1822">        crm_trace(&quot;Reading %d bytes from file&quot;, length);</a>
+<a name="ln1823">        *output = calloc(1, (length + 1));</a>
+<a name="ln1824">        read_len = fread(*output, 1, length, file_strm);</a>
+<a name="ln1825">        if (read_len != length) {</a>
+<a name="ln1826">            crm_err(&quot;Calculated and read bytes differ: %d vs. %d&quot;, length, read_len);</a>
+<a name="ln1827">            free(*output);</a>
+<a name="ln1828">            *output = NULL;</a>
+<a name="ln1829">            rc = -EIO;</a>
+<a name="ln1830">        }</a>
+<a name="ln1831">    }</a>
+<a name="ln1832"> </a>
+<a name="ln1833">    fclose(file_strm);</a>
+<a name="ln1834">    free(metadata_file);</a>
+<a name="ln1835">    return rc;</a>
+<a name="ln1836">}</a>
+<a name="ln1837">#endif</a>
+<a name="ln1838"> </a>
+<a name="ln1839">#if SUPPORT_HEARTBEAT</a>
+<a name="ln1840">/* strictly speaking, support for class=heartbeat style scripts</a>
+<a name="ln1841"> * does not require &quot;heartbeat support&quot; to be enabled.</a>
+<a name="ln1842"> * But since those scripts are part of the &quot;heartbeat&quot; package usually,</a>
+<a name="ln1843"> * and are very unlikely to be present in any other deployment,</a>
+<a name="ln1844"> * I leave it inside this ifdef.</a>
+<a name="ln1845"> *</a>
+<a name="ln1846"> * Yes, I know, these are legacy and should die,</a>
+<a name="ln1847"> * or at least be rewritten to be a proper OCF style agent.</a>
+<a name="ln1848"> * But they exist, and custom scripts following these rules do, too.</a>
+<a name="ln1849"> *</a>
+<a name="ln1850"> * Taken from the old &quot;glue&quot; lrmd, see</a>
+<a name="ln1851"> * http://hg.linux-ha.org/glue/file/0a7add1d9996/lib/plugins/lrm/raexechb.c#l49</a>
+<a name="ln1852"> * http://hg.linux-ha.org/glue/file/0a7add1d9996/lib/plugins/lrm/raexechb.c#l393</a>
+<a name="ln1853"> */</a>
+<a name="ln1854"> </a>
+<a name="ln1855">static const char hb_metadata_template[] =</a>
+<a name="ln1856">&quot;&lt;?xml version='1.0'?&gt;\n&quot;</a>
+<a name="ln1857">&quot;&lt;!DOCTYPE resource-agent SYSTEM 'ra-api-1.dtd'&gt;\n&quot;</a>
+<a name="ln1858">&quot;&lt;resource-agent name='%s' version='0.1'&gt;\n&quot;</a>
+<a name="ln1859">&quot;&lt;version&gt;1.0&lt;/version&gt;\n&quot;</a>
+<a name="ln1860">&quot;&lt;longdesc lang='en'&gt;\n&quot;</a>
+<a name="ln1861">&quot;%s&quot;</a>
+<a name="ln1862">&quot;&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln1863">&quot;&lt;shortdesc lang='en'&gt;%s&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln1864">&quot;&lt;parameters&gt;\n&quot;</a>
+<a name="ln1865">&quot;&lt;parameter name='1' unique='1' required='0'&gt;\n&quot;</a>
+<a name="ln1866">&quot;&lt;longdesc lang='en'&gt;\n&quot;</a>
+<a name="ln1867">&quot;This argument will be passed as the first argument to the &quot;</a>
+<a name="ln1868">&quot;heartbeat resource agent (assuming it supports one)\n&quot;</a>
+<a name="ln1869">&quot;&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln1870">&quot;&lt;shortdesc lang='en'&gt;argv[1]&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln1871">&quot;&lt;content type='string' default=' ' /&gt;\n&quot;</a>
+<a name="ln1872">&quot;&lt;/parameter&gt;\n&quot;</a>
+<a name="ln1873">&quot;&lt;parameter name='2' unique='1' required='0'&gt;\n&quot;</a>
+<a name="ln1874">&quot;&lt;longdesc lang='en'&gt;\n&quot;</a>
+<a name="ln1875">&quot;This argument will be passed as the second argument to the &quot;</a>
+<a name="ln1876">&quot;heartbeat resource agent (assuming it supports one)\n&quot;</a>
+<a name="ln1877">&quot;&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln1878">&quot;&lt;shortdesc lang='en'&gt;argv[2]&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln1879">&quot;&lt;content type='string' default=' ' /&gt;\n&quot;</a>
+<a name="ln1880">&quot;&lt;/parameter&gt;\n&quot;</a>
+<a name="ln1881">&quot;&lt;parameter name='3' unique='1' required='0'&gt;\n&quot;</a>
+<a name="ln1882">&quot;&lt;longdesc lang='en'&gt;\n&quot;</a>
+<a name="ln1883">&quot;This argument will be passed as the third argument to the &quot;</a>
+<a name="ln1884">&quot;heartbeat resource agent (assuming it supports one)\n&quot;</a>
+<a name="ln1885">&quot;&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln1886">&quot;&lt;shortdesc lang='en'&gt;argv[3]&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln1887">&quot;&lt;content type='string' default=' ' /&gt;\n&quot;</a>
+<a name="ln1888">&quot;&lt;/parameter&gt;\n&quot;</a>
+<a name="ln1889">&quot;&lt;parameter name='4' unique='1' required='0'&gt;\n&quot;</a>
+<a name="ln1890">&quot;&lt;longdesc lang='en'&gt;\n&quot;</a>
+<a name="ln1891">&quot;This argument will be passed as the fourth argument to the &quot;</a>
+<a name="ln1892">&quot;heartbeat resource agent (assuming it supports one)\n&quot;</a>
+<a name="ln1893">&quot;&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln1894">&quot;&lt;shortdesc lang='en'&gt;argv[4]&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln1895">&quot;&lt;content type='string' default=' ' /&gt;\n&quot;</a>
+<a name="ln1896">&quot;&lt;/parameter&gt;\n&quot;</a>
+<a name="ln1897">&quot;&lt;parameter name='5' unique='1' required='0'&gt;\n&quot;</a>
+<a name="ln1898">&quot;&lt;longdesc lang='en'&gt;\n&quot;</a>
+<a name="ln1899">&quot;This argument will be passed as the fifth argument to the &quot;</a>
+<a name="ln1900">&quot;heartbeat resource agent (assuming it supports one)\n&quot;</a>
+<a name="ln1901">&quot;&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln1902">&quot;&lt;shortdesc lang='en'&gt;argv[5]&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln1903">&quot;&lt;content type='string' default=' ' /&gt;\n&quot;</a>
+<a name="ln1904">&quot;&lt;/parameter&gt;\n&quot;</a>
+<a name="ln1905">&quot;&lt;/parameters&gt;\n&quot;</a>
+<a name="ln1906">&quot;&lt;actions&gt;\n&quot;</a>
+<a name="ln1907">&quot;&lt;action name='start'   timeout='15' /&gt;\n&quot;</a>
+<a name="ln1908">&quot;&lt;action name='stop'    timeout='15' /&gt;\n&quot;</a>
+<a name="ln1909">&quot;&lt;action name='status'  timeout='15' /&gt;\n&quot;</a>
+<a name="ln1910">&quot;&lt;action name='monitor' timeout='15' interval='15' start-delay='15' /&gt;\n&quot;</a>
+<a name="ln1911">&quot;&lt;action name='meta-data'  timeout='5' /&gt;\n&quot;</a>
+<a name="ln1912">&quot;&lt;/actions&gt;\n&quot;</a>
+<a name="ln1913">&quot;&lt;special tag='heartbeat'&gt;\n&quot;</a>
+<a name="ln1914">&quot;&lt;/special&gt;\n&quot;</a>
+<a name="ln1915">&quot;&lt;/resource-agent&gt;\n&quot;;</a>
+<a name="ln1916"> </a>
+<a name="ln1917">static int</a>
+<a name="ln1918">heartbeat_get_metadata(const char *type, char **output)</a>
+<a name="ln1919">{</a>
+<a name="ln1920">	*output = crm_strdup_printf(hb_metadata_template, type, type, type);</a>
+<a name="ln1921">	crm_trace(&quot;Created fake metadata: %llu&quot;,</a>
+<a name="ln1922">              (unsigned long long) strlen(*output));</a>
+<a name="ln1923">	return pcmk_ok;</a>
+<a name="ln1924">}</a>
+<a name="ln1925">#endif</a>
+<a name="ln1926"> </a>
+<a name="ln1927">static int</a>
+<a name="ln1928">generic_get_metadata(const char *standard, const char *provider, const char *type, char **output)</a>
+<a name="ln1929">{</a>
+<a name="ln1930">    svc_action_t *action;</a>
+<a name="ln1931"> </a>
+<a name="ln1932">    action = resources_action_create(type, standard, provider, type,</a>
+<a name="ln1933">                                     &quot;meta-data&quot;, 0, 30000, NULL, 0);</a>
+<a name="ln1934">    if (action == NULL) {</a>
+<a name="ln1935">        crm_err(&quot;Unable to retrieve meta-data for %s:%s:%s&quot;, standard, provider, type);</a>
+<a name="ln1936">        services_action_free(action);</a>
+<a name="ln1937">        return -EINVAL;</a>
+<a name="ln1938">    }</a>
+<a name="ln1939"> </a>
+<a name="ln1940">    if (!(services_action_sync(action))) {</a>
+<a name="ln1941">        crm_err(&quot;Failed to retrieve meta-data for %s:%s:%s&quot;, standard, provider, type);</a>
+<a name="ln1942">        services_action_free(action);</a>
+<a name="ln1943">        return -EIO;</a>
+<a name="ln1944">    }</a>
+<a name="ln1945"> </a>
+<a name="ln1946">    if (!action-&gt;stdout_data) {</a>
+<a name="ln1947">        crm_err(&quot;Failed to receive meta-data for %s:%s:%s&quot;, standard, provider, type);</a>
+<a name="ln1948">        services_action_free(action);</a>
+<a name="ln1949">        return -EIO;</a>
+<a name="ln1950">    }</a>
+<a name="ln1951"> </a>
+<a name="ln1952">    *output = strdup(action-&gt;stdout_data);</a>
+<a name="ln1953">    services_action_free(action);</a>
+<a name="ln1954"> </a>
+<a name="ln1955">    return pcmk_ok;</a>
+<a name="ln1956">}</a>
+<a name="ln1957"> </a>
+<a name="ln1958">static int</a>
+<a name="ln1959">lrmd_api_get_metadata(lrmd_t * lrmd,</a>
+<a name="ln1960">                      const char *class,</a>
+<a name="ln1961">                      const char *provider,</a>
+<a name="ln1962">                      const char *type, char **output, enum lrmd_call_options options)</a>
+<a name="ln1963">{</a>
+<a name="ln1964">    if (!class || !type) {</a>
+<a name="ln1965">        return -EINVAL;</a>
+<a name="ln1966">    }</a>
+<a name="ln1967"> </a>
+<a name="ln1968">    if (safe_str_eq(class, PCMK_RESOURCE_CLASS_SERVICE)) {</a>
+<a name="ln1969">        class = resources_find_service_class(type);</a>
+<a name="ln1970">    }</a>
+<a name="ln1971"> </a>
+<a name="ln1972">    if (safe_str_eq(class, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln1973">        return stonith_get_metadata(provider, type, output);</a>
+<a name="ln1974">    } else if (safe_str_eq(class, PCMK_RESOURCE_CLASS_LSB)) {</a>
+<a name="ln1975">        return lsb_get_metadata(type, output);</a>
+<a name="ln1976">#if SUPPORT_NAGIOS</a>
+<a name="ln1977">    } else if (safe_str_eq(class, PCMK_RESOURCE_CLASS_NAGIOS)) {</a>
+<a name="ln1978">        return nagios_get_metadata(type, output);</a>
+<a name="ln1979">#endif</a>
+<a name="ln1980">#if SUPPORT_HEARTBEAT</a>
+<a name="ln1981">    } else if (safe_str_eq(class, PCMK_RESOURCE_CLASS_HB)) {</a>
+<a name="ln1982">	return heartbeat_get_metadata(type, output);</a>
+<a name="ln1983">#endif</a>
+<a name="ln1984">    }</a>
+<a name="ln1985">    return generic_get_metadata(class, provider, type, output);</a>
+<a name="ln1986">}</a>
+<a name="ln1987"> </a>
+<a name="ln1988">static int</a>
+<a name="ln1989">lrmd_api_exec(lrmd_t * lrmd, const char *rsc_id, const char *action, const char *userdata, int interval,        /* ms */</a>
+<a name="ln1990">              int timeout,      /* ms */</a>
+<a name="ln1991">              int start_delay,  /* ms */</a>
+<a name="ln1992">              enum lrmd_call_options options, lrmd_key_value_t * params)</a>
+<a name="ln1993">{</a>
+<a name="ln1994">    int rc = pcmk_ok;</a>
+<a name="ln1995">    xmlNode *data = create_xml_node(NULL, F_LRMD_RSC);</a>
+<a name="ln1996">    xmlNode *args = create_xml_node(data, XML_TAG_ATTRS);</a>
+<a name="ln1997">    lrmd_key_value_t *tmp = NULL;</a>
+<a name="ln1998"> </a>
+<a name="ln1999">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln2000">    crm_xml_add(data, F_LRMD_RSC_ID, rsc_id);</a>
+<a name="ln2001">    crm_xml_add(data, F_LRMD_RSC_ACTION, action);</a>
+<a name="ln2002">    crm_xml_add(data, F_LRMD_RSC_USERDATA_STR, userdata);</a>
+<a name="ln2003">    crm_xml_add_int(data, F_LRMD_RSC_INTERVAL, interval);</a>
+<a name="ln2004">    crm_xml_add_int(data, F_LRMD_TIMEOUT, timeout);</a>
+<a name="ln2005">    crm_xml_add_int(data, F_LRMD_RSC_START_DELAY, start_delay);</a>
+<a name="ln2006"> </a>
+<a name="ln2007">    for (tmp = params; tmp; tmp = tmp-&gt;next) {</a>
+<a name="ln2008">        hash2smartfield((gpointer) tmp-&gt;key, (gpointer) tmp-&gt;value, args);</a>
+<a name="ln2009">    }</a>
+<a name="ln2010"> </a>
+<a name="ln2011">    rc = lrmd_send_command(lrmd, LRMD_OP_RSC_EXEC, data, NULL, timeout, options, TRUE);</a>
+<a name="ln2012">    free_xml(data);</a>
+<a name="ln2013"> </a>
+<a name="ln2014">    lrmd_key_value_freeall(params);</a>
+<a name="ln2015">    return rc;</a>
+<a name="ln2016">}</a>
+<a name="ln2017"> </a>
+<a name="ln2018">static int</a>
+<a name="ln2019">lrmd_api_cancel(lrmd_t * lrmd, const char *rsc_id, const char *action, int interval)</a>
+<a name="ln2020">{</a>
+<a name="ln2021">    int rc = pcmk_ok;</a>
+<a name="ln2022">    xmlNode *data = create_xml_node(NULL, F_LRMD_RSC);</a>
+<a name="ln2023"> </a>
+<a name="ln2024">    crm_xml_add(data, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln2025">    crm_xml_add(data, F_LRMD_RSC_ACTION, action);</a>
+<a name="ln2026">    crm_xml_add(data, F_LRMD_RSC_ID, rsc_id);</a>
+<a name="ln2027">    crm_xml_add_int(data, F_LRMD_RSC_INTERVAL, interval);</a>
+<a name="ln2028">    rc = lrmd_send_command(lrmd, LRMD_OP_RSC_CANCEL, data, NULL, 0, 0, TRUE);</a>
+<a name="ln2029">    free_xml(data);</a>
+<a name="ln2030">    return rc;</a>
+<a name="ln2031">}</a>
+<a name="ln2032"> </a>
+<a name="ln2033">static int</a>
+<a name="ln2034">list_stonith_agents(lrmd_list_t ** resources)</a>
+<a name="ln2035">{</a>
+<a name="ln2036">    int rc = 0;</a>
+<a name="ln2037">    stonith_t *stonith_api = stonith_api_new();</a>
+<a name="ln2038">    stonith_key_value_t *stonith_resources = NULL;</a>
+<a name="ln2039">    stonith_key_value_t *dIter = NULL;</a>
+<a name="ln2040"> </a>
+<a name="ln2041">    if(stonith_api) {</a>
+<a name="ln2042">        stonith_api-&gt;cmds-&gt;list_agents(stonith_api, st_opt_sync_call, NULL, &amp;stonith_resources, 0);</a>
+<a name="ln2043">        stonith_api-&gt;cmds-&gt;free(stonith_api);</a>
+<a name="ln2044">    }</a>
+<a name="ln2045"> </a>
+<a name="ln2046">    for (dIter = stonith_resources; dIter; dIter = dIter-&gt;next) {</a>
+<a name="ln2047">        rc++;</a>
+<a name="ln2048">        if (resources) {</a>
+<a name="ln2049">            *resources = lrmd_list_add(*resources, dIter-&gt;value);</a>
+<a name="ln2050">        }</a>
+<a name="ln2051">    }</a>
+<a name="ln2052"> </a>
+<a name="ln2053">    stonith_key_value_freeall(stonith_resources, 1, 0);</a>
+<a name="ln2054">    return rc;</a>
+<a name="ln2055">}</a>
+<a name="ln2056"> </a>
+<a name="ln2057">static int</a>
+<a name="ln2058">lrmd_api_list_agents(lrmd_t * lrmd, lrmd_list_t ** resources, const char *class,</a>
+<a name="ln2059">                     const char *provider)</a>
+<a name="ln2060">{</a>
+<a name="ln2061">    int rc = 0;</a>
+<a name="ln2062"> </a>
+<a name="ln2063">    if (safe_str_eq(class, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln2064">        rc += list_stonith_agents(resources);</a>
+<a name="ln2065"> </a>
+<a name="ln2066">    } else {</a>
+<a name="ln2067">        GListPtr gIter = NULL;</a>
+<a name="ln2068">        GList *agents = resources_list_agents(class, provider);</a>
+<a name="ln2069"> </a>
+<a name="ln2070">        for (gIter = agents; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln2071">            *resources = lrmd_list_add(*resources, (const char *)gIter-&gt;data);</a>
+<a name="ln2072">            rc++;</a>
+<a name="ln2073">        }</a>
+<a name="ln2074">        g_list_free_full(agents, free);</a>
+<a name="ln2075"> </a>
+<a name="ln2076">        if (!class) {</a>
+<a name="ln2077">            rc += list_stonith_agents(resources);</a>
+<a name="ln2078">        }</a>
+<a name="ln2079">    }</a>
+<a name="ln2080"> </a>
+<a name="ln2081">    if (rc == 0) {</a>
+<a name="ln2082">        crm_notice(&quot;No agents found for class %s&quot;, class);</a>
+<a name="ln2083">        rc = -EPROTONOSUPPORT;</a>
+<a name="ln2084">    }</a>
+<a name="ln2085">    return rc;</a>
+<a name="ln2086">}</a>
+<a name="ln2087"> </a>
+<a name="ln2088">static int</a>
+<a name="ln2089">does_provider_have_agent(const char *agent, const char *provider, const char *class)</a>
+<a name="ln2090">{</a>
+<a name="ln2091">    int found = 0;</a>
+<a name="ln2092">    GList *agents = NULL;</a>
+<a name="ln2093">    GListPtr gIter2 = NULL;</a>
+<a name="ln2094"> </a>
+<a name="ln2095">    agents = resources_list_agents(class, provider);</a>
+<a name="ln2096">    for (gIter2 = agents; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln2097">        if (safe_str_eq(agent, gIter2-&gt;data)) {</a>
+<a name="ln2098">            found = 1;</a>
+<a name="ln2099">        }</a>
+<a name="ln2100">    }</a>
+<a name="ln2101">    g_list_free_full(agents, free);</a>
+<a name="ln2102"> </a>
+<a name="ln2103">    return found;</a>
+<a name="ln2104">}</a>
+<a name="ln2105"> </a>
+<a name="ln2106">static int</a>
+<a name="ln2107">lrmd_api_list_ocf_providers(lrmd_t * lrmd, const char *agent, lrmd_list_t ** providers)</a>
+<a name="ln2108">{</a>
+<a name="ln2109">    int rc = pcmk_ok;</a>
+<a name="ln2110">    char *provider = NULL;</a>
+<a name="ln2111">    GList *ocf_providers = NULL;</a>
+<a name="ln2112">    GListPtr gIter = NULL;</a>
+<a name="ln2113"> </a>
+<a name="ln2114">    ocf_providers = resources_list_providers(PCMK_RESOURCE_CLASS_OCF);</a>
+<a name="ln2115"> </a>
+<a name="ln2116">    for (gIter = ocf_providers; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln2117">        provider = gIter-&gt;data;</a>
+<a name="ln2118">        if (!agent || does_provider_have_agent(agent, provider,</a>
+<a name="ln2119">                                               PCMK_RESOURCE_CLASS_OCF)) {</a>
+<a name="ln2120">            *providers = lrmd_list_add(*providers, (const char *)gIter-&gt;data);</a>
+<a name="ln2121">            rc++;</a>
+<a name="ln2122">        }</a>
+<a name="ln2123">    }</a>
+<a name="ln2124"> </a>
+<a name="ln2125">    g_list_free_full(ocf_providers, free);</a>
+<a name="ln2126">    return rc;</a>
+<a name="ln2127">}</a>
+<a name="ln2128"> </a>
+<a name="ln2129">static int</a>
+<a name="ln2130">lrmd_api_list_standards(lrmd_t * lrmd, lrmd_list_t ** supported)</a>
+<a name="ln2131">{</a>
+<a name="ln2132">    int rc = 0;</a>
+<a name="ln2133">    GList *standards = NULL;</a>
+<a name="ln2134">    GListPtr gIter = NULL;</a>
+<a name="ln2135"> </a>
+<a name="ln2136">    standards = resources_list_standards();</a>
+<a name="ln2137"> </a>
+<a name="ln2138">    for (gIter = standards; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln2139">        *supported = lrmd_list_add(*supported, (const char *)gIter-&gt;data);</a>
+<a name="ln2140">        rc++;</a>
+<a name="ln2141">    }</a>
+<a name="ln2142"> </a>
+<a name="ln2143">    if (list_stonith_agents(NULL) &gt; 0) {</a>
+<a name="ln2144">        *supported = lrmd_list_add(*supported, PCMK_RESOURCE_CLASS_STONITH);</a>
+<a name="ln2145">        rc++;</a>
+<a name="ln2146">    }</a>
+<a name="ln2147"> </a>
+<a name="ln2148">    g_list_free_full(standards, free);</a>
+<a name="ln2149">    return rc;</a>
+<a name="ln2150">}</a>
+<a name="ln2151"> </a>
+<a name="ln2152">lrmd_t *</a>
+<a name="ln2153">lrmd_api_new(void)</a>
+<a name="ln2154">{</a>
+<a name="ln2155">    lrmd_t *new_lrmd = NULL;</a>
+<a name="ln2156">    lrmd_private_t *pvt = NULL;</a>
+<a name="ln2157"> </a>
+<a name="ln2158">    new_lrmd = calloc(1, sizeof(lrmd_t));</a>
+<a name="ln2159">    pvt = calloc(1, sizeof(lrmd_private_t));</a>
+<a name="ln2160">    pvt-&gt;remote = calloc(1, sizeof(crm_remote_t));</a>
+<a name="ln2161">    new_lrmd-&gt;cmds = calloc(1, sizeof(lrmd_api_operations_t));</a>
+<a name="ln2162"> </a>
+<a name="ln2163">    pvt-&gt;type = CRM_CLIENT_IPC;</a>
+<a name="ln2164">    new_lrmd-&gt;private = pvt;</a>
+<a name="ln2165"> </a>
+<a name="ln2166">    new_lrmd-&gt;cmds-&gt;connect = lrmd_api_connect;</a>
+<a name="ln2167">    new_lrmd-&gt;cmds-&gt;connect_async = lrmd_api_connect_async;</a>
+<a name="ln2168">    new_lrmd-&gt;cmds-&gt;is_connected = lrmd_api_is_connected;</a>
+<a name="ln2169">    new_lrmd-&gt;cmds-&gt;poke_connection = lrmd_api_poke_connection;</a>
+<a name="ln2170">    new_lrmd-&gt;cmds-&gt;disconnect = lrmd_api_disconnect;</a>
+<a name="ln2171">    new_lrmd-&gt;cmds-&gt;register_rsc = lrmd_api_register_rsc;</a>
+<a name="ln2172">    new_lrmd-&gt;cmds-&gt;unregister_rsc = lrmd_api_unregister_rsc;</a>
+<a name="ln2173">    new_lrmd-&gt;cmds-&gt;get_rsc_info = lrmd_api_get_rsc_info;</a>
+<a name="ln2174">    new_lrmd-&gt;cmds-&gt;set_callback = lrmd_api_set_callback;</a>
+<a name="ln2175">    new_lrmd-&gt;cmds-&gt;get_metadata = lrmd_api_get_metadata;</a>
+<a name="ln2176">    new_lrmd-&gt;cmds-&gt;exec = lrmd_api_exec;</a>
+<a name="ln2177">    new_lrmd-&gt;cmds-&gt;cancel = lrmd_api_cancel;</a>
+<a name="ln2178">    new_lrmd-&gt;cmds-&gt;list_agents = lrmd_api_list_agents;</a>
+<a name="ln2179">    new_lrmd-&gt;cmds-&gt;list_ocf_providers = lrmd_api_list_ocf_providers;</a>
+<a name="ln2180">    new_lrmd-&gt;cmds-&gt;list_standards = lrmd_api_list_standards;</a>
+<a name="ln2181"> </a>
+<a name="ln2182">    return new_lrmd;</a>
+<a name="ln2183">}</a>
+<a name="ln2184"> </a>
+<a name="ln2185">lrmd_t *</a>
+<a name="ln2186">lrmd_remote_api_new(const char *nodename, const char *server, int port)</a>
+<a name="ln2187">{</a>
+<a name="ln2188">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln2189">    lrmd_t *new_lrmd = lrmd_api_new();</a>
+<a name="ln2190">    lrmd_private_t *native = new_lrmd-&gt;private;</a>
+<a name="ln2191"> </a>
+<a name="ln2192">    if (!nodename &amp;&amp; !server) {</a>
+<a name="ln2193">        lrmd_api_delete(new_lrmd);</a>
+<a name="ln2194">        return NULL;</a>
+<a name="ln2195">    }</a>
+<a name="ln2196"> </a>
+<a name="ln2197">    native-&gt;type = CRM_CLIENT_TLS;</a>
+<a name="ln2198">    native-&gt;remote_nodename = nodename ? strdup(nodename) : strdup(server);</a>
+<a name="ln2199">    native-&gt;server = server ? strdup(server) : strdup(nodename);</a>
+<a name="ln2200">    native-&gt;port = port;</a>
+<a name="ln2201">    if (native-&gt;port == 0) {</a>
+<a name="ln2202">        const char *remote_port_str = getenv(&quot;PCMK_remote_port&quot;);</a>
+<a name="ln2203">        native-&gt;port = remote_port_str ? atoi(remote_port_str) : DEFAULT_REMOTE_PORT;</a>
+<a name="ln2204">    }</a>
+<a name="ln2205"> </a>
+<a name="ln2206">    return new_lrmd;</a>
+<a name="ln2207">#else</a>
+<a name="ln2208">    crm_err(&quot;GNUTLS is not enabled for this build, remote LRMD client can not be created&quot;);</a>
+<a name="ln2209">    return NULL;</a>
+<a name="ln2210">#endif</a>
+<a name="ln2211"> </a>
+<a name="ln2212">}</a>
+<a name="ln2213"> </a>
+<a name="ln2214">void</a>
+<a name="ln2215">lrmd_api_delete(lrmd_t * lrmd)</a>
+<a name="ln2216">{</a>
+<a name="ln2217">    if (!lrmd) {</a>
+<a name="ln2218">        return;</a>
+<a name="ln2219">    }</a>
+<a name="ln2220">    lrmd-&gt;cmds-&gt;disconnect(lrmd);       /* no-op if already disconnected */</a>
+<a name="ln2221">    free(lrmd-&gt;cmds);</a>
+<a name="ln2222">    if (lrmd-&gt;private) {</a>
+<a name="ln2223">        lrmd_private_t *native = lrmd-&gt;private;</a>
+<a name="ln2224"> </a>
+<a name="ln2225">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln2226">        free(native-&gt;server);</a>
+<a name="ln2227">#endif</a>
+<a name="ln2228">        free(native-&gt;remote_nodename);</a>
+<a name="ln2229">        free(native-&gt;remote);</a>
+<a name="ln2230">        free(native-&gt;token);</a>
+<a name="ln2231">        free(native-&gt;peer_version);</a>
+<a name="ln2232">    }</a>
+<a name="ln2233"> </a>
+<a name="ln2234">    free(lrmd-&gt;private);</a>
+<a name="ln2235">    free(lrmd);</a>
+<a name="ln2236">}</a>
+
+</code></pre>
+<div class="balloon" rel="125"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'p'. Check lines: 125, 124.</p></div>
+<div class="balloon" rel="162"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'p'. Check lines: 162, 161.</p></div>
+<div class="balloon" rel="196"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 196, 196.</p></div>
+<div class="balloon" rel="209"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 209, 204.</p></div>
+<div class="balloon" rel="1475"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'copy'. Check lines: 1475, 1473.</p></div>
+<div class="balloon" rel="1530"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'rsc_info'. Check lines: 1530, 1529.</p></div>
+<div class="balloon" rel="1796"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'metadata_file' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="1798"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 1798, 1795.</p></div>
+<div class="balloon" rel="1812"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (length >= 0) == (0).</p></div>
+<div class="balloon" rel="2160"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'pvt'. Check lines: 2160, 2159.</p></div>
+<div class="balloon" rel="2161"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_lrmd'. Check lines: 2161, 2158.</p></div>
+<div class="balloon" rel="2166"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_lrmd->cmds'. Check lines: 2166, 2161.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

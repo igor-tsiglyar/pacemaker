@@ -1,0 +1,1093 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5"> </a>
+<a name="ln6">/* </a>
+<a name="ln7"> * Copyright (C) 2012 Gao,Yan &lt;ygao@suse.com&gt;</a>
+<a name="ln8"> * </a>
+<a name="ln9"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln10"> * modify it under the terms of the GNU General Public</a>
+<a name="ln11"> * License as published by the Free Software Foundation; either</a>
+<a name="ln12"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln13"> * </a>
+<a name="ln14"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln15"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln17"> * General Public License for more details.</a>
+<a name="ln18"> * </a>
+<a name="ln19"> * You should have received a copy of the GNU General Public</a>
+<a name="ln20"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln21"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;sys/param.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;crm/crm.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;stdio.h&gt;</a>
+<a name="ln31">#include &lt;sys/types.h&gt;</a>
+<a name="ln32">#include &lt;unistd.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;stdlib.h&gt;</a>
+<a name="ln35">#include &lt;errno.h&gt;</a>
+<a name="ln36">#include &lt;fcntl.h&gt;</a>
+<a name="ln37">#include &lt;libgen.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln41">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;crm/cib.h&gt;</a>
+<a name="ln44">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln45">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln46"> </a>
+<a name="ln47">#include &lt;../pengine/pengine.h&gt;</a>
+<a name="ln48"> </a>
+<a name="ln49">gboolean do_force = FALSE;</a>
+<a name="ln50">gboolean BE_QUIET = FALSE;</a>
+<a name="ln51">const char *ticket_id = NULL;</a>
+<a name="ln52">const char *get_attr_name = NULL;</a>
+<a name="ln53">const char *attr_name = NULL;</a>
+<a name="ln54">const char *attr_value = NULL;</a>
+<a name="ln55">const char *attr_id = NULL;</a>
+<a name="ln56">const char *set_name = NULL;</a>
+<a name="ln57">const char *attr_default = NULL;</a>
+<a name="ln58">char ticket_cmd = 'S';</a>
+<a name="ln59">char *xml_file = NULL;</a>
+<a name="ln60">int cib_options = cib_sync_call;</a>
+<a name="ln61"> </a>
+<a name="ln62">extern void cleanup_alloc_calculations(pe_working_set_t * data_set);</a>
+<a name="ln63"> </a>
+<a name="ln64">#define CMD_ERR(fmt, args...) do {		\</a>
+<a name="ln65">	crm_warn(fmt, ##args);			\</a>
+<a name="ln66">	fprintf(stderr, fmt, ##args);		\</a>
+<a name="ln67">    } while(0)</a>
+<a name="ln68"> </a>
+<a name="ln69">static ticket_t *</a>
+<a name="ln70">find_ticket(const char *ticket_id, pe_working_set_t * data_set)</a>
+<a name="ln71">{</a>
+<a name="ln72">    ticket_t *ticket = NULL;</a>
+<a name="ln73"> </a>
+<a name="ln74">    ticket = g_hash_table_lookup(data_set-&gt;tickets, ticket_id);</a>
+<a name="ln75"> </a>
+<a name="ln76">    return ticket;</a>
+<a name="ln77">}</a>
+<a name="ln78"> </a>
+<a name="ln79">static void</a>
+<a name="ln80">print_date(time_t time)</a>
+<a name="ln81">{</a>
+<a name="ln82">    int lpc = 0;</a>
+<a name="ln83">    char date_str[26];</a>
+<a name="ln84"> </a>
+<a name="ln85">    asctime_r(localtime(&amp;time), date_str);</a>
+<a name="ln86">    for (; lpc &lt; 26; lpc++) {</a>
+<a name="ln87">        if (date_str[lpc] == '\n') {</a>
+<a name="ln88">            date_str[lpc] = 0;</a>
+<a name="ln89">        }</a>
+<a name="ln90">    }</a>
+<a name="ln91">    fprintf(stdout, &quot;'%s'&quot;, date_str);</a>
+<a name="ln92">}</a>
+<a name="ln93"> </a>
+<a name="ln94">static int</a>
+<a name="ln95">print_ticket(ticket_t * ticket, gboolean raw, gboolean details)</a>
+<a name="ln96">{</a>
+<a name="ln97">    if (raw) {</a>
+<a name="ln98">        fprintf(stdout, &quot;%s\n&quot;, ticket-&gt;id);</a>
+<a name="ln99">        return pcmk_ok;</a>
+<a name="ln100">    }</a>
+<a name="ln101"> </a>
+<a name="ln102">    fprintf(stdout, &quot;%s\t%s %s&quot;,</a>
+<a name="ln103">            ticket-&gt;id, ticket-&gt;granted ? &quot;granted&quot; : &quot;revoked&quot;,</a>
+<a name="ln104">            ticket-&gt;standby ? &quot;[standby]&quot; : &quot;         &quot;);</a>
+<a name="ln105"> </a>
+<a name="ln106">    if (details &amp;&amp; g_hash_table_size(ticket-&gt;state) &gt; 0) {</a>
+<a name="ln107">        GHashTableIter iter;</a>
+<a name="ln108">        const char *name = NULL;</a>
+<a name="ln109">        const char *value = NULL;</a>
+<a name="ln110">        int lpc = 0;</a>
+<a name="ln111"> </a>
+<a name="ln112">        fprintf(stdout, &quot; (&quot;);</a>
+<a name="ln113"> </a>
+<a name="ln114">        g_hash_table_iter_init(&amp;iter, ticket-&gt;state);</a>
+<a name="ln115">        while (g_hash_table_iter_next(&amp;iter, (void **)&amp;name, (void **)&amp;value)) {</a>
+<a name="ln116">            if (lpc &gt; 0) {</a>
+<a name="ln117">                fprintf(stdout, &quot;, &quot;);</a>
+<a name="ln118">            }</a>
+<a name="ln119">            fprintf(stdout, &quot;%s=&quot;, name);</a>
+<a name="ln120">            if (crm_str_eq(name, &quot;last-granted&quot;, TRUE)</a>
+<a name="ln121">                || crm_str_eq(name, &quot;expires&quot;, TRUE)) {</a>
+<a name="ln122">                print_date(crm_parse_int(value, 0));</a>
+<a name="ln123">            } else {</a>
+<a name="ln124">                fprintf(stdout, &quot;%s&quot;, value);</a>
+<a name="ln125">            }</a>
+<a name="ln126">            lpc++;</a>
+<a name="ln127">        }</a>
+<a name="ln128"> </a>
+<a name="ln129">        fprintf(stdout, &quot;)\n&quot;);</a>
+<a name="ln130"> </a>
+<a name="ln131">    } else {</a>
+<a name="ln132">        if (ticket-&gt;last_granted &gt; -1) {</a>
+<a name="ln133">            fprintf(stdout, &quot; last-granted=&quot;);</a>
+<a name="ln134">            print_date(ticket-&gt;last_granted);</a>
+<a name="ln135">        }</a>
+<a name="ln136">        fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln137">    }</a>
+<a name="ln138"> </a>
+<a name="ln139">    return pcmk_ok;</a>
+<a name="ln140">}</a>
+<a name="ln141"> </a>
+<a name="ln142">static int</a>
+<a name="ln143">print_ticket_list(pe_working_set_t * data_set, gboolean raw, gboolean details)</a>
+<a name="ln144">{</a>
+<a name="ln145">    GHashTableIter iter;</a>
+<a name="ln146">    ticket_t *ticket = NULL;</a>
+<a name="ln147"> </a>
+<a name="ln148">    g_hash_table_iter_init(&amp;iter, data_set-&gt;tickets);</a>
+<a name="ln149"> </a>
+<a name="ln150">    while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;ticket)) {</a>
+<a name="ln151">        print_ticket(ticket, raw, details);</a>
+<a name="ln152">    }</a>
+<a name="ln153"> </a>
+<a name="ln154">    return pcmk_ok;</a>
+<a name="ln155">}</a>
+<a name="ln156"> </a>
+<a name="ln157">static int</a>
+<a name="ln158">find_ticket_state(cib_t * the_cib, const char *ticket_id, xmlNode ** ticket_state_xml)</a>
+<a name="ln159">{</a>
+<a name="ln160">    int offset = 0;</a>
+<a name="ln161">    static int xpath_max = 1024;</a>
+<a name="ln162">    int rc = pcmk_ok;</a>
+<a name="ln163">    xmlNode *xml_search = NULL;</a>
+<a name="ln164"> </a>
+<a name="ln165">    char *xpath_string = NULL;</a>
+<a name="ln166"> </a>
+<a name="ln167">    CRM_ASSERT(ticket_state_xml != NULL);</a>
+<a name="ln168">    *ticket_state_xml = NULL;</a>
+<a name="ln169"> </a>
+<a name="ln170">    xpath_string = calloc(1, xpath_max);</a>
+<a name="ln171">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;%s&quot;, &quot;/cib/status/tickets&quot;);</a>
+<a name="ln172"> </a>
+<a name="ln173">    if (ticket_id) {</a>
+<a name="ln174">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;/%s[@id=\&quot;%s\&quot;]&quot;,</a>
+<a name="ln175">                           XML_CIB_TAG_TICKET_STATE, ticket_id);</a>
+<a name="ln176">    }</a>
+<a name="ln177"> </a>
+<a name="ln178">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln179">    rc = the_cib-&gt;cmds-&gt;query(the_cib, xpath_string, &amp;xml_search,</a>
+<a name="ln180">                              cib_sync_call | cib_scope_local | cib_xpath);</a>
+<a name="ln181"> </a>
+<a name="ln182">    if (rc != pcmk_ok) {</a>
+<a name="ln183">        goto bail;</a>
+<a name="ln184">    }</a>
+<a name="ln185"> </a>
+<a name="ln186">    crm_log_xml_debug(xml_search, &quot;Match&quot;);</a>
+<a name="ln187">    if (xml_has_children(xml_search)) {</a>
+<a name="ln188">        if (ticket_id) {</a>
+<a name="ln189">            fprintf(stdout, &quot;Multiple ticket_states match ticket_id=%s\n&quot;, ticket_id);</a>
+<a name="ln190">        }</a>
+<a name="ln191">        *ticket_state_xml = xml_search;</a>
+<a name="ln192">    } else {</a>
+<a name="ln193">        *ticket_state_xml = xml_search;</a>
+<a name="ln194">    }</a>
+<a name="ln195"> </a>
+<a name="ln196">  bail:</a>
+<a name="ln197">    free(xpath_string);</a>
+<a name="ln198">    return rc;</a>
+<a name="ln199">}</a>
+<a name="ln200"> </a>
+<a name="ln201">static int</a>
+<a name="ln202">find_ticket_constraints(cib_t * the_cib, const char *ticket_id, xmlNode ** ticket_cons_xml)</a>
+<a name="ln203">{</a>
+<a name="ln204">    int offset = 0;</a>
+<a name="ln205">    static int xpath_max = 1024;</a>
+<a name="ln206">    int rc = pcmk_ok;</a>
+<a name="ln207">    xmlNode *xml_search = NULL;</a>
+<a name="ln208"> </a>
+<a name="ln209">    char *xpath_string = NULL;</a>
+<a name="ln210"> </a>
+<a name="ln211">    CRM_ASSERT(ticket_cons_xml != NULL);</a>
+<a name="ln212">    *ticket_cons_xml = NULL;</a>
+<a name="ln213"> </a>
+<a name="ln214">    xpath_string = calloc(1, xpath_max);</a>
+<a name="ln215">    offset +=</a>
+<a name="ln216">        snprintf(xpath_string + offset, xpath_max - offset, &quot;%s/%s&quot;,</a>
+<a name="ln217">                 get_object_path(XML_CIB_TAG_CONSTRAINTS), XML_CONS_TAG_RSC_TICKET);</a>
+<a name="ln218"> </a>
+<a name="ln219">    if (ticket_id) {</a>
+<a name="ln220">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;[@ticket=\&quot;%s\&quot;]&quot;,</a>
+<a name="ln221">                           ticket_id);</a>
+<a name="ln222">    }</a>
+<a name="ln223"> </a>
+<a name="ln224">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln225">    rc = the_cib-&gt;cmds-&gt;query(the_cib, xpath_string, &amp;xml_search,</a>
+<a name="ln226">                              cib_sync_call | cib_scope_local | cib_xpath);</a>
+<a name="ln227"> </a>
+<a name="ln228">    if (rc != pcmk_ok) {</a>
+<a name="ln229">        goto bail;</a>
+<a name="ln230">    }</a>
+<a name="ln231"> </a>
+<a name="ln232">    crm_log_xml_debug(xml_search, &quot;Match&quot;);</a>
+<a name="ln233">    *ticket_cons_xml = xml_search;</a>
+<a name="ln234"> </a>
+<a name="ln235">  bail:</a>
+<a name="ln236">    free(xpath_string);</a>
+<a name="ln237">    return rc;</a>
+<a name="ln238">}</a>
+<a name="ln239"> </a>
+<a name="ln240">static int</a>
+<a name="ln241">dump_ticket_xml(cib_t * the_cib, const char *ticket_id)</a>
+<a name="ln242">{</a>
+<a name="ln243">    int rc = pcmk_ok;</a>
+<a name="ln244">    xmlNode *state_xml = NULL;</a>
+<a name="ln245"> </a>
+<a name="ln246">    rc = find_ticket_state(the_cib, ticket_id, &amp;state_xml);</a>
+<a name="ln247"> </a>
+<a name="ln248">    if (state_xml == NULL) {</a>
+<a name="ln249">        return rc;</a>
+<a name="ln250">    }</a>
+<a name="ln251"> </a>
+<a name="ln252">    fprintf(stdout, &quot;State XML:\n&quot;);</a>
+<a name="ln253">    if (state_xml) {</a>
+<a name="ln254">        char *state_xml_str = NULL;</a>
+<a name="ln255"> </a>
+<a name="ln256">        state_xml_str = dump_xml_formatted(state_xml);</a>
+<a name="ln257">        fprintf(stdout, &quot;\n%s\n&quot;, crm_str(state_xml_str));</a>
+<a name="ln258">        free_xml(state_xml);</a>
+<a name="ln259">        free(state_xml_str);</a>
+<a name="ln260">    }</a>
+<a name="ln261"> </a>
+<a name="ln262">    return pcmk_ok;</a>
+<a name="ln263">}</a>
+<a name="ln264"> </a>
+<a name="ln265">static int</a>
+<a name="ln266">dump_constraints(cib_t * the_cib, const char *ticket_id)</a>
+<a name="ln267">{</a>
+<a name="ln268">    int rc = pcmk_ok;</a>
+<a name="ln269">    xmlNode *cons_xml = NULL;</a>
+<a name="ln270">    char *cons_xml_str = NULL;</a>
+<a name="ln271"> </a>
+<a name="ln272">    rc = find_ticket_constraints(the_cib, ticket_id, &amp;cons_xml);</a>
+<a name="ln273"> </a>
+<a name="ln274">    if (cons_xml == NULL) {</a>
+<a name="ln275">        return rc;</a>
+<a name="ln276">    }</a>
+<a name="ln277"> </a>
+<a name="ln278">    cons_xml_str = dump_xml_formatted(cons_xml);</a>
+<a name="ln279">    fprintf(stdout, &quot;Constraints XML:\n\n%s\n&quot;, crm_str(cons_xml_str));</a>
+<a name="ln280">    free_xml(cons_xml);</a>
+<a name="ln281">    free(cons_xml_str);</a>
+<a name="ln282"> </a>
+<a name="ln283">    return pcmk_ok;</a>
+<a name="ln284">}</a>
+<a name="ln285"> </a>
+<a name="ln286">static int</a>
+<a name="ln287">find_ticket_state_attr_legacy(cib_t * the_cib, const char *attr, const char *ticket_id,</a>
+<a name="ln288">                              const char *set_type, const char *set_name, const char *attr_id,</a>
+<a name="ln289">                              const char *attr_name, char **value)</a>
+<a name="ln290">{</a>
+<a name="ln291">    int offset = 0;</a>
+<a name="ln292">    static int xpath_max = 1024;</a>
+<a name="ln293">    int rc = pcmk_ok;</a>
+<a name="ln294">    xmlNode *xml_search = NULL;</a>
+<a name="ln295"> </a>
+<a name="ln296">    char *xpath_string = NULL;</a>
+<a name="ln297"> </a>
+<a name="ln298">    CRM_ASSERT(value != NULL);</a>
+<a name="ln299">    *value = NULL;</a>
+<a name="ln300"> </a>
+<a name="ln301">    xpath_string = calloc(1, xpath_max);</a>
+<a name="ln302">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;%s&quot;, &quot;/cib/status/tickets&quot;);</a>
+<a name="ln303"> </a>
+<a name="ln304">    if (set_type) {</a>
+<a name="ln305">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;/%s&quot;, set_type);</a>
+<a name="ln306">        if (set_name) {</a>
+<a name="ln307">            offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;[@id=\&quot;%s\&quot;]&quot;, set_name);</a>
+<a name="ln308">        }</a>
+<a name="ln309">    }</a>
+<a name="ln310"> </a>
+<a name="ln311">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;//nvpair[&quot;);</a>
+<a name="ln312">    if (attr_id) {</a>
+<a name="ln313">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;@id=\&quot;%s\&quot;&quot;, attr_id);</a>
+<a name="ln314">    }</a>
+<a name="ln315"> </a>
+<a name="ln316">    if (attr_name) {</a>
+<a name="ln317">        const char *attr_prefix = NULL;</a>
+<a name="ln318">        char *long_key = NULL;</a>
+<a name="ln319"> </a>
+<a name="ln320">        if (crm_str_eq(attr_name, &quot;granted&quot;, TRUE)) {</a>
+<a name="ln321">            attr_prefix = &quot;granted-ticket&quot;;</a>
+<a name="ln322">        } else {</a>
+<a name="ln323">            attr_prefix = attr_name;</a>
+<a name="ln324">        }</a>
+<a name="ln325">        long_key = crm_concat(attr_prefix, ticket_id, '-');</a>
+<a name="ln326"> </a>
+<a name="ln327">        if (attr_id) {</a>
+<a name="ln328">            offset += snprintf(xpath_string + offset, xpath_max - offset, &quot; and &quot;);</a>
+<a name="ln329">        }</a>
+<a name="ln330">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;@name=\&quot;%s\&quot;&quot;, long_key);</a>
+<a name="ln331"> </a>
+<a name="ln332">        free(long_key);</a>
+<a name="ln333">    }</a>
+<a name="ln334">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;]&quot;);</a>
+<a name="ln335">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln336"> </a>
+<a name="ln337">    rc = the_cib-&gt;cmds-&gt;query(the_cib, xpath_string, &amp;xml_search,</a>
+<a name="ln338">                              cib_sync_call | cib_scope_local | cib_xpath);</a>
+<a name="ln339"> </a>
+<a name="ln340">    if (rc != pcmk_ok) {</a>
+<a name="ln341">        goto bail;</a>
+<a name="ln342">    }</a>
+<a name="ln343"> </a>
+<a name="ln344">    crm_log_xml_debug(xml_search, &quot;Match&quot;);</a>
+<a name="ln345">    if (xml_has_children(xml_search)) {</a>
+<a name="ln346">        xmlNode *child = NULL;</a>
+<a name="ln347"> </a>
+<a name="ln348">        rc = -EINVAL;</a>
+<a name="ln349">        fprintf(stdout, &quot;Multiple attributes match name=%s\n&quot;, attr_name);</a>
+<a name="ln350"> </a>
+<a name="ln351">        for (child = __xml_first_child(xml_search); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln352">            fprintf(stdout, &quot;  Value: %s \t(id=%s)\n&quot;,</a>
+<a name="ln353">                    crm_element_value(child, XML_NVPAIR_ATTR_VALUE), ID(child));</a>
+<a name="ln354">        }</a>
+<a name="ln355"> </a>
+<a name="ln356">    } else {</a>
+<a name="ln357">        const char *tmp = crm_element_value(xml_search, attr);</a>
+<a name="ln358"> </a>
+<a name="ln359">        if (tmp) {</a>
+<a name="ln360">            *value = strdup(tmp);</a>
+<a name="ln361">        }</a>
+<a name="ln362">    }</a>
+<a name="ln363"> </a>
+<a name="ln364">  bail:</a>
+<a name="ln365">    free(xpath_string);</a>
+<a name="ln366">    free_xml(xml_search);</a>
+<a name="ln367">    return rc;</a>
+<a name="ln368">}</a>
+<a name="ln369"> </a>
+<a name="ln370">static int</a>
+<a name="ln371">delete_ticket_state_attr_legacy(const char *ticket_id, const char *set_name, const char *attr_id,</a>
+<a name="ln372">                                const char *attr_name, cib_t * cib)</a>
+<a name="ln373">{</a>
+<a name="ln374">    xmlNode *xml_obj = NULL;</a>
+<a name="ln375"> </a>
+<a name="ln376">    int rc = pcmk_ok;</a>
+<a name="ln377">    char *local_attr_id = NULL;</a>
+<a name="ln378"> </a>
+<a name="ln379">    rc = find_ticket_state_attr_legacy(cib, XML_ATTR_ID, ticket_id, XML_TAG_ATTR_SETS, set_name,</a>
+<a name="ln380">                                       attr_id, attr_name, &amp;local_attr_id);</a>
+<a name="ln381"> </a>
+<a name="ln382">    if (rc == -ENXIO) {</a>
+<a name="ln383">        return pcmk_ok;</a>
+<a name="ln384"> </a>
+<a name="ln385">    } else if (rc != pcmk_ok) {</a>
+<a name="ln386">        return rc;</a>
+<a name="ln387">    }</a>
+<a name="ln388"> </a>
+<a name="ln389">    if (attr_id == NULL) {</a>
+<a name="ln390">        attr_id = local_attr_id;</a>
+<a name="ln391">    }</a>
+<a name="ln392"> </a>
+<a name="ln393">    xml_obj = create_xml_node(NULL, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln394">    crm_xml_add(xml_obj, XML_ATTR_ID, attr_id);</a>
+<a name="ln395">    /*crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name); */</a>
+<a name="ln396"> </a>
+<a name="ln397">    crm_log_xml_debug(xml_obj, &quot;Delete&quot;);</a>
+<a name="ln398"> </a>
+<a name="ln399">    rc = cib-&gt;cmds-&gt;delete(cib, XML_CIB_TAG_STATUS, xml_obj, cib_options);</a>
+<a name="ln400"> </a>
+<a name="ln401">    if (rc == pcmk_ok) {</a>
+<a name="ln402">        fprintf(stdout, &quot;Deleted legacy %s state attribute: id=%s%s%s%s%s\n&quot;, ticket_id,</a>
+<a name="ln403">                local_attr_id, set_name ? &quot; set=&quot; : &quot;&quot;, set_name ? set_name : &quot;&quot;,</a>
+<a name="ln404">                attr_name ? &quot; name=&quot; : &quot;&quot;, attr_name ? attr_name : &quot;&quot;);</a>
+<a name="ln405">    }</a>
+<a name="ln406"> </a>
+<a name="ln407">    free_xml(xml_obj);</a>
+<a name="ln408">    free(local_attr_id);</a>
+<a name="ln409">    return rc;</a>
+<a name="ln410">}</a>
+<a name="ln411"> </a>
+<a name="ln412">static int</a>
+<a name="ln413">get_ticket_state_attr(const char *ticket_id, const char *attr_name, const char **attr_value,</a>
+<a name="ln414">                      pe_working_set_t * data_set)</a>
+<a name="ln415">{</a>
+<a name="ln416">    ticket_t *ticket = NULL;</a>
+<a name="ln417"> </a>
+<a name="ln418">    CRM_ASSERT(attr_value != NULL);</a>
+<a name="ln419">    *attr_value = NULL;</a>
+<a name="ln420"> </a>
+<a name="ln421">    ticket = g_hash_table_lookup(data_set-&gt;tickets, ticket_id);</a>
+<a name="ln422">    if (ticket == NULL) {</a>
+<a name="ln423">        return -ENXIO;</a>
+<a name="ln424">    }</a>
+<a name="ln425"> </a>
+<a name="ln426">    *attr_value = g_hash_table_lookup(ticket-&gt;state, attr_name);</a>
+<a name="ln427">    if (*attr_value == NULL) {</a>
+<a name="ln428">        return -ENXIO;</a>
+<a name="ln429">    }</a>
+<a name="ln430"> </a>
+<a name="ln431">    return pcmk_ok;</a>
+<a name="ln432">}</a>
+<a name="ln433"> </a>
+<a name="ln434">static gboolean</a>
+<a name="ln435">ticket_warning(const char *ticket_id, const char *action)</a>
+<a name="ln436">{</a>
+<a name="ln437">    gboolean rc = FALSE;</a>
+<a name="ln438">    int offset = 0;</a>
+<a name="ln439">    static int text_max = 1024;</a>
+<a name="ln440"> </a>
+<a name="ln441">    char *warning = NULL;</a>
+<a name="ln442">    const char *word = NULL;</a>
+<a name="ln443"> </a>
+<a name="ln444">    warning = calloc(1, text_max);</a>
+<a name="ln445">    if (safe_str_eq(action, &quot;grant&quot;)) {</a>
+<a name="ln446">        offset += snprintf(warning + offset, text_max - offset,</a>
+<a name="ln447">                           &quot;This command cannot help you verify whether '%s' has been already granted elsewhere.\n&quot;,</a>
+<a name="ln448">                           ticket_id);</a>
+<a name="ln449">        word = &quot;to&quot;;</a>
+<a name="ln450"> </a>
+<a name="ln451">    } else {</a>
+<a name="ln452">        offset += snprintf(warning + offset, text_max - offset,</a>
+<a name="ln453">                           &quot;Revoking '%s' can trigger the specified 'loss-policy'(s) relating to '%s'.\n\n&quot;,</a>
+<a name="ln454">                           ticket_id, ticket_id);</a>
+<a name="ln455"> </a>
+<a name="ln456">        offset += snprintf(warning + offset, text_max - offset,</a>
+<a name="ln457">                           &quot;You can check that with:\ncrm_ticket --ticket %s --constraints\n\n&quot;,</a>
+<a name="ln458">                           ticket_id);</a>
+<a name="ln459"> </a>
+<a name="ln460">        offset += snprintf(warning + offset, text_max - offset,</a>
+<a name="ln461">                           &quot;Otherwise before revoking '%s', you may want to make '%s' standby with:\ncrm_ticket --ticket %s --standby\n\n&quot;,</a>
+<a name="ln462">                           ticket_id, ticket_id, ticket_id);</a>
+<a name="ln463">        word = &quot;from&quot;;</a>
+<a name="ln464">    }</a>
+<a name="ln465"> </a>
+<a name="ln466">    offset += snprintf(warning + offset, text_max - offset,</a>
+<a name="ln467">                       &quot;If you really want to %s '%s' %s this site now, and you know what you are doing,\n&quot;,</a>
+<a name="ln468">                       action, ticket_id, word);</a>
+<a name="ln469"> </a>
+<a name="ln470">    offset += snprintf(warning + offset, text_max - offset, </a>
+<a name="ln471">                       &quot;please specify --force.&quot;);</a>
+<a name="ln472"> </a>
+<a name="ln473">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln474">    fprintf(stdout, &quot;%s\n&quot;, warning);</a>
+<a name="ln475"> </a>
+<a name="ln476">    free(warning);</a>
+<a name="ln477">    return rc;</a>
+<a name="ln478">}</a>
+<a name="ln479"> </a>
+<a name="ln480">static gboolean</a>
+<a name="ln481">allow_modification(const char *ticket_id, GListPtr attr_delete,</a>
+<a name="ln482">                   GHashTable *attr_set)</a>
+<a name="ln483">{</a>
+<a name="ln484">    const char *value = NULL;</a>
+<a name="ln485">    GListPtr list_iter = NULL;</a>
+<a name="ln486"> </a>
+<a name="ln487">    if (do_force) {</a>
+<a name="ln488">        return TRUE;</a>
+<a name="ln489">    }</a>
+<a name="ln490"> </a>
+<a name="ln491">    if (g_hash_table_lookup_extended(attr_set, &quot;granted&quot;, NULL, (gpointer *) &amp; value)) {</a>
+<a name="ln492">        if (crm_is_true(value)) {</a>
+<a name="ln493">            ticket_warning(ticket_id, &quot;grant&quot;);</a>
+<a name="ln494">            return FALSE;</a>
+<a name="ln495"> </a>
+<a name="ln496">        } else {</a>
+<a name="ln497">            ticket_warning(ticket_id, &quot;revoke&quot;);</a>
+<a name="ln498">            return FALSE;</a>
+<a name="ln499">        }</a>
+<a name="ln500">    }</a>
+<a name="ln501"> </a>
+<a name="ln502">    for(list_iter = attr_delete; list_iter; list_iter = list_iter-&gt;next) {</a>
+<a name="ln503">        const char *key = (const char *)list_iter-&gt;data;</a>
+<a name="ln504"> </a>
+<a name="ln505">        if (safe_str_eq(key, &quot;granted&quot;)) {</a>
+<a name="ln506">            ticket_warning(ticket_id, &quot;revoke&quot;);</a>
+<a name="ln507">            return FALSE;</a>
+<a name="ln508">        }</a>
+<a name="ln509">    }</a>
+<a name="ln510"> </a>
+<a name="ln511">    return TRUE;</a>
+<a name="ln512">}</a>
+<a name="ln513"> </a>
+<a name="ln514">static int</a>
+<a name="ln515">modify_ticket_state(const char * ticket_id, GListPtr attr_delete, GHashTable * attr_set,</a>
+<a name="ln516">                    cib_t * cib, pe_working_set_t * data_set)</a>
+<a name="ln517">{</a>
+<a name="ln518">    int rc = pcmk_ok;</a>
+<a name="ln519">    xmlNode *xml_top = NULL;</a>
+<a name="ln520">    xmlNode *ticket_state_xml = NULL;</a>
+<a name="ln521">    gboolean found = FALSE;</a>
+<a name="ln522"> </a>
+<a name="ln523">    GListPtr list_iter = NULL;</a>
+<a name="ln524">    GHashTableIter hash_iter;</a>
+<a name="ln525"> </a>
+<a name="ln526">    char *key = NULL;</a>
+<a name="ln527">    char *value = NULL;</a>
+<a name="ln528"> </a>
+<a name="ln529">    ticket_t *ticket = NULL;</a>
+<a name="ln530">    gboolean is_granting = FALSE;</a>
+<a name="ln531"> </a>
+<a name="ln532">    for(list_iter = attr_delete; list_iter; list_iter = list_iter-&gt;next) {</a>
+<a name="ln533">        const char *key = (const char *)list_iter-&gt;data;</a>
+<a name="ln534">        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, key, cib);</a>
+<a name="ln535">    }</a>
+<a name="ln536"> </a>
+<a name="ln537">    rc = find_ticket_state(cib, ticket_id, &amp;ticket_state_xml);</a>
+<a name="ln538">    if (rc == pcmk_ok) {</a>
+<a name="ln539">        crm_debug(&quot;Found a match state for ticket: id=%s&quot;, ticket_id);</a>
+<a name="ln540">        xml_top = ticket_state_xml;</a>
+<a name="ln541">        found = TRUE;</a>
+<a name="ln542"> </a>
+<a name="ln543">    } else if (rc != -ENXIO) {</a>
+<a name="ln544">        return rc;</a>
+<a name="ln545"> </a>
+<a name="ln546">    } else if (g_hash_table_size(attr_set) == 0){</a>
+<a name="ln547">        return pcmk_ok;</a>
+<a name="ln548"> </a>
+<a name="ln549">    } else {</a>
+<a name="ln550">        xmlNode *xml_obj = NULL;</a>
+<a name="ln551"> </a>
+<a name="ln552">        xml_top = create_xml_node(NULL, XML_CIB_TAG_STATUS);</a>
+<a name="ln553">        xml_obj = create_xml_node(xml_top, XML_CIB_TAG_TICKETS);</a>
+<a name="ln554">        ticket_state_xml = create_xml_node(xml_obj, XML_CIB_TAG_TICKET_STATE);</a>
+<a name="ln555">        crm_xml_add(ticket_state_xml, XML_ATTR_ID, ticket_id);</a>
+<a name="ln556">    }</a>
+<a name="ln557"> </a>
+<a name="ln558">    for(list_iter = attr_delete; list_iter; list_iter = list_iter-&gt;next) {</a>
+<a name="ln559">        const char *key = (const char *)list_iter-&gt;data;</a>
+<a name="ln560">        xml_remove_prop(ticket_state_xml, key);</a>
+<a name="ln561">    }</a>
+<a name="ln562"> </a>
+<a name="ln563">    ticket = find_ticket(ticket_id, data_set);</a>
+<a name="ln564"> </a>
+<a name="ln565">    g_hash_table_iter_init(&amp;hash_iter, attr_set);</a>
+<a name="ln566">    while (g_hash_table_iter_next(&amp;hash_iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln567">        crm_xml_add(ticket_state_xml, key, value);</a>
+<a name="ln568"> </a>
+<a name="ln569">        if (safe_str_eq(key, &quot;granted&quot;)</a>
+<a name="ln570">            &amp;&amp; (ticket == NULL || ticket-&gt;granted == FALSE)</a>
+<a name="ln571">            &amp;&amp; crm_is_true(value)) {</a>
+<a name="ln572"> </a>
+<a name="ln573">            is_granting = TRUE;</a>
+<a name="ln574">            crm_xml_add(ticket_state_xml, &quot;last-granted&quot;, crm_itoa(time(NULL)));</a>
+<a name="ln575">        }</a>
+<a name="ln576">    }</a>
+<a name="ln577"> </a>
+<a name="ln578">    if (found &amp;&amp; g_list_length(attr_delete)) {</a>
+<a name="ln579">        crm_log_xml_debug(xml_top, &quot;Replace&quot;);</a>
+<a name="ln580">        rc = cib-&gt;cmds-&gt;replace(cib, XML_CIB_TAG_STATUS, ticket_state_xml, cib_options);</a>
+<a name="ln581"> </a>
+<a name="ln582">    } else {</a>
+<a name="ln583">        crm_log_xml_debug(xml_top, &quot;Update&quot;);</a>
+<a name="ln584">        rc = cib-&gt;cmds-&gt;modify(cib, XML_CIB_TAG_STATUS, xml_top, cib_options);</a>
+<a name="ln585">    }</a>
+<a name="ln586"> </a>
+<a name="ln587">    free_xml(xml_top);</a>
+<a name="ln588"> </a>
+<a name="ln589">    if (rc != pcmk_ok) {</a>
+<a name="ln590">        return rc;</a>
+<a name="ln591">    }</a>
+<a name="ln592"> </a>
+<a name="ln593">    g_hash_table_iter_init(&amp;hash_iter, attr_set);</a>
+<a name="ln594">    while (g_hash_table_iter_next(&amp;hash_iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln595">        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, key, cib);</a>
+<a name="ln596">    }</a>
+<a name="ln597"> </a>
+<a name="ln598">    if (is_granting == TRUE) {</a>
+<a name="ln599">        delete_ticket_state_attr_legacy(ticket_id, set_name, attr_id, &quot;last-granted&quot;, cib);</a>
+<a name="ln600">    }</a>
+<a name="ln601"> </a>
+<a name="ln602">    return rc;</a>
+<a name="ln603">}</a>
+<a name="ln604"> </a>
+<a name="ln605">static int</a>
+<a name="ln606">delete_ticket_state(const char *ticket_id, cib_t * cib)</a>
+<a name="ln607">{</a>
+<a name="ln608">    xmlNode *ticket_state_xml = NULL;</a>
+<a name="ln609"> </a>
+<a name="ln610">    int rc = pcmk_ok;</a>
+<a name="ln611"> </a>
+<a name="ln612">    rc = find_ticket_state(cib, ticket_id, &amp;ticket_state_xml);</a>
+<a name="ln613"> </a>
+<a name="ln614">    if (rc == -ENXIO) {</a>
+<a name="ln615">        return pcmk_ok;</a>
+<a name="ln616"> </a>
+<a name="ln617">    } else if (rc != pcmk_ok) {</a>
+<a name="ln618">        return rc;</a>
+<a name="ln619">    }</a>
+<a name="ln620"> </a>
+<a name="ln621">    crm_log_xml_debug(ticket_state_xml, &quot;Delete&quot;);</a>
+<a name="ln622"> </a>
+<a name="ln623">    rc = cib-&gt;cmds-&gt;delete(cib, XML_CIB_TAG_STATUS, ticket_state_xml, cib_options);</a>
+<a name="ln624"> </a>
+<a name="ln625">    if (rc == pcmk_ok) {</a>
+<a name="ln626">        fprintf(stdout, &quot;Cleaned up %s\n&quot;, ticket_id);</a>
+<a name="ln627">    }</a>
+<a name="ln628"> </a>
+<a name="ln629">    free_xml(ticket_state_xml);</a>
+<a name="ln630">    return rc;</a>
+<a name="ln631">}</a>
+<a name="ln632"> </a>
+<a name="ln633">/* *INDENT-OFF* */</a>
+<a name="ln634">static struct crm_option long_options[] = {</a>
+<a name="ln635">    /* Top-level Options */</a>
+<a name="ln636">    {&quot;help&quot;,    0, 0, '?', &quot;\t\tThis text&quot;},</a>
+<a name="ln637">    {&quot;version&quot;, 0, 0, '$', &quot;\t\tVersion information&quot;  },</a>
+<a name="ln638">    {&quot;verbose&quot;, 0, 0, 'V', &quot;\t\tIncrease debug output&quot;},</a>
+<a name="ln639">    {&quot;quiet&quot;,   0, 0, 'Q', &quot;\t\tPrint only the value on stdout\n&quot;},</a>
+<a name="ln640"> </a>
+<a name="ln641">    {&quot;ticket&quot;,  1, 0, 't', &quot;\tTicket ID&quot; },</a>
+<a name="ln642"> </a>
+<a name="ln643">    {&quot;-spacer-&quot;,   1, 0, '-', &quot;\nQueries:&quot;},</a>
+<a name="ln644">    {&quot;info&quot;,       0, 0, 'l', &quot;\t\tDisplay the information of ticket(s)&quot;},</a>
+<a name="ln645">    {&quot;details&quot;,    0, 0, 'L', &quot;\t\tDisplay the details of ticket(s)&quot;},</a>
+<a name="ln646">    {&quot;raw&quot;,        0, 0, 'w', &quot;\t\tDisplay the IDs of ticket(s)&quot;},</a>
+<a name="ln647">    {&quot;query-xml&quot;,  0, 0, 'q', &quot;\tQuery the XML of ticket(s)&quot;},</a>
+<a name="ln648">    {&quot;constraints&quot;,0, 0, 'c', &quot;\tDisplay the rsc_ticket constraints that apply to ticket(s)&quot;},</a>
+<a name="ln649"> </a>
+<a name="ln650">    {&quot;-spacer-&quot;,   1, 0, '-', &quot;\nCommands:&quot;},</a>
+<a name="ln651">    {&quot;grant&quot;,      0, 0, 'g', &quot;\t\tGrant a ticket to this cluster site&quot;},</a>
+<a name="ln652">    {&quot;revoke&quot;,     0, 0, 'r', &quot;\t\tRevoke a ticket from this cluster site&quot;},</a>
+<a name="ln653">    {&quot;standby&quot;,    0, 0, 's', &quot;\t\tTell this cluster site this ticket is standby&quot;},</a>
+<a name="ln654">    {&quot;activate&quot;,   0, 0, 'a', &quot;\tTell this cluster site this ticket is active&quot;},</a>
+<a name="ln655">    </a>
+<a name="ln656">    {&quot;-spacer-&quot;,   1, 0, '-', &quot;\nAdvanced Commands:&quot;},</a>
+<a name="ln657">    {&quot;get-attr&quot;,   1, 0, 'G', &quot;\tDisplay the named attribute for a ticket&quot;},</a>
+<a name="ln658">    {&quot;set-attr&quot;,   1, 0, 'S', &quot;\tSet the named attribtue for a ticket&quot;},</a>
+<a name="ln659">    {&quot;delete-attr&quot;,1, 0, 'D', &quot;\tDelete the named attribute for a ticket&quot;},</a>
+<a name="ln660">    {&quot;cleanup&quot;,    0, 0, 'C', &quot;\t\tDelete all state of a ticket at this cluster site&quot;},</a>
+<a name="ln661">    </a>
+<a name="ln662">    {&quot;-spacer-&quot;,   1, 0, '-', &quot;\nAdditional Options:&quot;},</a>
+<a name="ln663">    {&quot;attr-value&quot;, 1, 0, 'v', &quot;\tAttribute value to use with -S&quot;},</a>
+<a name="ln664">    {&quot;default&quot;,    1, 0, 'd', &quot;\t(Advanced) The default attribute value to display if none is found. For use with -G&quot;},</a>
+<a name="ln665">    {&quot;force&quot;,      0, 0, 'f', &quot;\t\t(Advanced) Force the action to be performed&quot;},</a>
+<a name="ln666">    {&quot;xml-file&quot;,   1, 0, 'x', NULL, 1},\</a>
+<a name="ln667"> </a>
+<a name="ln668">    /* legacy options */</a>
+<a name="ln669">    {&quot;set-name&quot;,   1, 0, 'n', &quot;\t(Advanced) ID of the instance_attributes object to change&quot;},</a>
+<a name="ln670">    {&quot;nvpair&quot;,     1, 0, 'i', &quot;\t(Advanced) ID of the nvpair object to change/delete&quot;},</a>
+<a name="ln671">    </a>
+<a name="ln672">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nExamples:&quot;, pcmk_option_paragraph},</a>
+<a name="ln673">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Display the info of tickets:&quot;, pcmk_option_paragraph},</a>
+<a name="ln674">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --info&quot;, pcmk_option_example},</a>
+<a name="ln675">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Display the detailed info of tickets:&quot;, pcmk_option_paragraph},</a>
+<a name="ln676">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --details&quot;, pcmk_option_example},</a>
+<a name="ln677">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Display the XML of 'ticketA':&quot;, pcmk_option_paragraph},</a>
+<a name="ln678">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --query-xml&quot;, pcmk_option_example},</a>
+<a name="ln679">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Display the rsc_ticket constraints that apply to 'ticketA':&quot;, pcmk_option_paragraph},</a>
+<a name="ln680">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --constraints&quot;, pcmk_option_example},</a>
+<a name="ln681"> </a>
+<a name="ln682">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Grant 'ticketA' to this cluster site:&quot;, pcmk_option_paragraph},</a>
+<a name="ln683">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --grant&quot;, pcmk_option_example},</a>
+<a name="ln684">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Revoke 'ticketA' from this cluster site:&quot;, pcmk_option_paragraph},</a>
+<a name="ln685">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --revoke&quot;, pcmk_option_example},</a>
+<a name="ln686">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Make 'ticketA' standby:&quot;, pcmk_option_paragraph},</a>
+<a name="ln687">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;The cluster site will treat a granted 'ticketA' as 'standby'.&quot;},</a>
+<a name="ln688">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;The dependent resources will be stopped or demoted gracefully without triggering loss-policies&quot;, pcmk_option_paragraph},</a>
+<a name="ln689">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --standby&quot;, pcmk_option_example},</a>
+<a name="ln690">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Activate 'ticketA' from being standby:&quot;, pcmk_option_paragraph},</a>
+<a name="ln691">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --activate&quot;, pcmk_option_example},</a>
+<a name="ln692"> </a>
+<a name="ln693">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Get the value of the 'granted' attribute for 'ticketA':&quot;, pcmk_option_paragraph},</a>
+<a name="ln694">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --get-attr granted&quot;, pcmk_option_example},</a>
+<a name="ln695">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Set the value of the 'standby' attribute for 'ticketA':&quot;, pcmk_option_paragraph},</a>
+<a name="ln696">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --set-attr standby --attr-value true&quot;, pcmk_option_example},</a>
+<a name="ln697">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Delete the 'granted' attribute for 'ticketA':&quot;, pcmk_option_paragraph},</a>
+<a name="ln698">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --delete-attr granted&quot;, pcmk_option_example},</a>
+<a name="ln699">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Erase the operation history of 'ticketA' at this cluster site:&quot;, pcmk_option_paragraph},</a>
+<a name="ln700">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;The cluster site will 'forget' the existing ticket state.&quot;, pcmk_option_paragraph},</a>
+<a name="ln701">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_ticket --ticket ticketA --cleanup&quot;, pcmk_option_example},</a>
+<a name="ln702">    </a>
+<a name="ln703">    {0, 0, 0, 0}</a>
+<a name="ln704">};</a>
+<a name="ln705">/* *INDENT-ON* */</a>
+<a name="ln706"> </a>
+<a name="ln707">int</a>
+<a name="ln708">main(int argc, char **argv)</a>
+<a name="ln709">{</a>
+<a name="ln710">    pe_working_set_t data_set;</a>
+<a name="ln711">    xmlNode *cib_xml_copy = NULL;</a>
+<a name="ln712">    xmlNode *cib_constraints = NULL;</a>
+<a name="ln713"> </a>
+<a name="ln714">    cib_t *cib_conn = NULL;</a>
+<a name="ln715">    int rc = pcmk_ok;</a>
+<a name="ln716"> </a>
+<a name="ln717">    int option_index = 0;</a>
+<a name="ln718">    int argerr = 0;</a>
+<a name="ln719">    int flag;</a>
+<a name="ln720">    guint modified = 0;</a>
+<a name="ln721"> </a>
+<a name="ln722">    GListPtr attr_delete = NULL;</a>
+<a name="ln723">    GHashTable *attr_set = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln724">                                                 g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln725"> </a>
+<a name="ln726">    crm_log_init(NULL, LOG_CRIT, FALSE, FALSE, argc, argv, FALSE);</a>
+<a name="ln727">    crm_set_options(NULL, &quot;(query|command) [options]&quot;, long_options,</a>
+<a name="ln728">                    &quot;Perform tasks related to cluster tickets.\nAllows ticket attributes to be queried, modified and deleted.\n&quot;);</a>
+<a name="ln729"> </a>
+<a name="ln730">    if (argc &lt; 2) {</a>
+<a name="ln731">        crm_help('?', EX_USAGE);</a>
+<a name="ln732">    }</a>
+<a name="ln733"> </a>
+<a name="ln734">    while (1) {</a>
+<a name="ln735">        flag = crm_get_option(argc, argv, &amp;option_index);</a>
+<a name="ln736">        if (flag == -1)</a>
+<a name="ln737">            break;</a>
+<a name="ln738"> </a>
+<a name="ln739">        switch (flag) {</a>
+<a name="ln740">            case 'V':</a>
+<a name="ln741">                crm_bump_log_level(argc, argv);</a>
+<a name="ln742">                break;</a>
+<a name="ln743">            case '$':</a>
+<a name="ln744">            case '?':</a>
+<a name="ln745">                crm_help(flag, EX_OK);</a>
+<a name="ln746">                break;</a>
+<a name="ln747">            case 'Q':</a>
+<a name="ln748">                BE_QUIET = TRUE;</a>
+<a name="ln749">                break;</a>
+<a name="ln750">            case 't':</a>
+<a name="ln751">                ticket_id = optarg;</a>
+<a name="ln752">                break;</a>
+<a name="ln753">            case 'l':</a>
+<a name="ln754">            case 'L':</a>
+<a name="ln755">            case 'w':</a>
+<a name="ln756">            case 'q':</a>
+<a name="ln757">            case 'c':</a>
+<a name="ln758">                ticket_cmd = flag;</a>
+<a name="ln759">                break;</a>
+<a name="ln760">            case 'g':</a>
+<a name="ln761">                g_hash_table_insert(attr_set, strdup(&quot;granted&quot;), strdup(&quot;true&quot;));</a>
+<a name="ln762">                modified++;</a>
+<a name="ln763">                break;</a>
+<a name="ln764">            case 'r':</a>
+<a name="ln765">                g_hash_table_insert(attr_set, strdup(&quot;granted&quot;), strdup(&quot;false&quot;));</a>
+<a name="ln766">                modified++;</a>
+<a name="ln767">                break;</a>
+<a name="ln768">            case 's':</a>
+<a name="ln769">                g_hash_table_insert(attr_set, strdup(&quot;standby&quot;), strdup(&quot;true&quot;));</a>
+<a name="ln770">                modified++;</a>
+<a name="ln771">                break;</a>
+<a name="ln772">            case 'a':</a>
+<a name="ln773">                g_hash_table_insert(attr_set, strdup(&quot;standby&quot;), strdup(&quot;false&quot;));</a>
+<a name="ln774">                modified++;</a>
+<a name="ln775">                break;</a>
+<a name="ln776">            case 'G':</a>
+<a name="ln777">                get_attr_name = optarg;</a>
+<a name="ln778">                ticket_cmd = flag;</a>
+<a name="ln779">                break;</a>
+<a name="ln780">            case 'S':</a>
+<a name="ln781">                attr_name = optarg;</a>
+<a name="ln782">                if (attr_name &amp;&amp; attr_value) {</a>
+<a name="ln783">                    g_hash_table_insert(attr_set, strdup(attr_name), strdup(attr_value));</a>
+<a name="ln784">                    attr_name = NULL;</a>
+<a name="ln785">                    attr_value = NULL;</a>
+<a name="ln786">                    modified++;</a>
+<a name="ln787">                }</a>
+<a name="ln788">                break;</a>
+<a name="ln789">            case 'D':</a>
+<a name="ln790">                attr_delete = g_list_append(attr_delete, optarg);</a>
+<a name="ln791">                modified++;</a>
+<a name="ln792">                break;</a>
+<a name="ln793">            case 'C':</a>
+<a name="ln794">                ticket_cmd = flag;</a>
+<a name="ln795">                break;</a>
+<a name="ln796">            case 'v':</a>
+<a name="ln797">                attr_value = optarg;</a>
+<a name="ln798">                if (attr_name &amp;&amp; attr_value) {</a>
+<a name="ln799">                    g_hash_table_insert(attr_set, strdup(attr_name), strdup(attr_value));</a>
+<a name="ln800">                    attr_name = NULL;</a>
+<a name="ln801">                    attr_value = NULL;</a>
+<a name="ln802">                    modified++;</a>
+<a name="ln803">                }</a>
+<a name="ln804">                break;</a>
+<a name="ln805">            case 'd':</a>
+<a name="ln806">                attr_default = optarg;</a>
+<a name="ln807">                break;</a>
+<a name="ln808">            case 'f':</a>
+<a name="ln809">                do_force = TRUE;</a>
+<a name="ln810">                break;</a>
+<a name="ln811">            case 'x':</a>
+<a name="ln812">                xml_file = strdup(optarg);</a>
+<a name="ln813">                break;</a>
+<a name="ln814">            case 'n':</a>
+<a name="ln815">                set_name = optarg;</a>
+<a name="ln816">                break;</a>
+<a name="ln817">            case 'i':</a>
+<a name="ln818">                attr_id = optarg;</a>
+<a name="ln819">                break;</a>
+<a name="ln820"> </a>
+<a name="ln821">            default:</a>
+<a name="ln822">                CMD_ERR(&quot;Argument code 0%o (%c) is not (?yet?) supported\n&quot;, flag, flag);</a>
+<a name="ln823">                ++argerr;</a>
+<a name="ln824">                break;</a>
+<a name="ln825">        }</a>
+<a name="ln826">    }</a>
+<a name="ln827"> </a>
+<a name="ln828">    if (optind &lt; argc &amp;&amp; argv[optind] != NULL) {</a>
+<a name="ln829">        CMD_ERR(&quot;non-option ARGV-elements: &quot;);</a>
+<a name="ln830">        while (optind &lt; argc &amp;&amp; argv[optind] != NULL) {</a>
+<a name="ln831">            CMD_ERR(&quot;%s &quot;, argv[optind++]);</a>
+<a name="ln832">            ++argerr;</a>
+<a name="ln833">        }</a>
+<a name="ln834">        CMD_ERR(&quot;\n&quot;);</a>
+<a name="ln835">    }</a>
+<a name="ln836"> </a>
+<a name="ln837">    if (optind &gt; argc) {</a>
+<a name="ln838">        ++argerr;</a>
+<a name="ln839">    }</a>
+<a name="ln840"> </a>
+<a name="ln841">    if (argerr) {</a>
+<a name="ln842">        crm_help('?', EX_USAGE);</a>
+<a name="ln843">    }</a>
+<a name="ln844"> </a>
+<a name="ln845">    set_working_set_defaults(&amp;data_set);</a>
+<a name="ln846"> </a>
+<a name="ln847">    cib_conn = cib_new();</a>
+<a name="ln848">    if (cib_conn == NULL) {</a>
+<a name="ln849">        rc = -ENOTCONN;</a>
+<a name="ln850">        CMD_ERR(&quot;Error initiating the connection to the CIB service: %s\n&quot;, pcmk_strerror(rc));</a>
+<a name="ln851">        return rc;</a>
+<a name="ln852">    }</a>
+<a name="ln853"> </a>
+<a name="ln854">    rc = cib_conn-&gt;cmds-&gt;signon(cib_conn, crm_system_name, cib_command);</a>
+<a name="ln855">    if (rc != pcmk_ok) {</a>
+<a name="ln856">        CMD_ERR(&quot;Error signing on to the CIB service: %s\n&quot;, pcmk_strerror(rc));</a>
+<a name="ln857">        return rc;</a>
+<a name="ln858">    }</a>
+<a name="ln859"> </a>
+<a name="ln860">    if (xml_file != NULL) {</a>
+<a name="ln861">        cib_xml_copy = filename2xml(xml_file);</a>
+<a name="ln862"> </a>
+<a name="ln863">    } else {</a>
+<a name="ln864">        rc = cib_conn-&gt;cmds-&gt;query(cib_conn, NULL, &amp;cib_xml_copy, cib_scope_local | cib_sync_call);</a>
+<a name="ln865">    }</a>
+<a name="ln866"> </a>
+<a name="ln867">    if (rc != pcmk_ok) {</a>
+<a name="ln868">        goto bail;</a>
+<a name="ln869"> </a>
+<a name="ln870">    } else if (cli_config_update(&amp;cib_xml_copy, NULL, FALSE) == FALSE) {</a>
+<a name="ln871">        rc = -ENOKEY;</a>
+<a name="ln872">        goto bail;</a>
+<a name="ln873">    }</a>
+<a name="ln874"> </a>
+<a name="ln875">    data_set.input = cib_xml_copy;</a>
+<a name="ln876">    data_set.now = crm_time_new(NULL);</a>
+<a name="ln877"> </a>
+<a name="ln878">    cluster_status(&amp;data_set);</a>
+<a name="ln879"> </a>
+<a name="ln880">    /* For recording the tickets that are referenced in rsc_ticket constraints</a>
+<a name="ln881">     * but have never been granted yet. */</a>
+<a name="ln882">    cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set.input);</a>
+<a name="ln883">    unpack_constraints(cib_constraints, &amp;data_set);</a>
+<a name="ln884"> </a>
+<a name="ln885">    if (ticket_cmd == 'l' || ticket_cmd == 'L' || ticket_cmd == 'w') {</a>
+<a name="ln886">        gboolean raw = FALSE;</a>
+<a name="ln887">        gboolean details = FALSE;</a>
+<a name="ln888"> </a>
+<a name="ln889">        if (ticket_cmd == 'L') {</a>
+<a name="ln890">            details = TRUE;</a>
+<a name="ln891">        } else if (ticket_cmd == 'w') {</a>
+<a name="ln892">            raw = TRUE;</a>
+<a name="ln893">        }</a>
+<a name="ln894"> </a>
+<a name="ln895">        if (ticket_id) {</a>
+<a name="ln896">            ticket_t *ticket = find_ticket(ticket_id, &amp;data_set);</a>
+<a name="ln897"> </a>
+<a name="ln898">            if (ticket == NULL) {</a>
+<a name="ln899">                rc = -ENXIO;</a>
+<a name="ln900">                goto bail;</a>
+<a name="ln901">            }</a>
+<a name="ln902">            rc = print_ticket(ticket, raw, details);</a>
+<a name="ln903"> </a>
+<a name="ln904">        } else {</a>
+<a name="ln905">            rc = print_ticket_list(&amp;data_set, raw, details);</a>
+<a name="ln906">        }</a>
+<a name="ln907"> </a>
+<a name="ln908">    } else if (ticket_cmd == 'q') {</a>
+<a name="ln909">        rc = dump_ticket_xml(cib_conn, ticket_id);</a>
+<a name="ln910"> </a>
+<a name="ln911">    } else if (ticket_cmd == 'c') {</a>
+<a name="ln912">        rc = dump_constraints(cib_conn, ticket_id);</a>
+<a name="ln913"> </a>
+<a name="ln914">    } else if (ticket_cmd == 'G') {</a>
+<a name="ln915">        const char *value = NULL;</a>
+<a name="ln916"> </a>
+<a name="ln917">        if (ticket_id == NULL) {</a>
+<a name="ln918">            CMD_ERR(&quot;Must supply a ticket id with -t\n&quot;);</a>
+<a name="ln919">            rc = -ENXIO;</a>
+<a name="ln920">            goto bail;</a>
+<a name="ln921">        }</a>
+<a name="ln922"> </a>
+<a name="ln923">        rc = get_ticket_state_attr(ticket_id, get_attr_name, &amp;value, &amp;data_set);</a>
+<a name="ln924">        if (rc == pcmk_ok) {</a>
+<a name="ln925">            fprintf(stdout, &quot;%s\n&quot;, value);</a>
+<a name="ln926">        } else if (rc == -ENXIO &amp;&amp; attr_default) {</a>
+<a name="ln927">            fprintf(stdout, &quot;%s\n&quot;, attr_default);</a>
+<a name="ln928">            rc = pcmk_ok;</a>
+<a name="ln929">        }</a>
+<a name="ln930"> </a>
+<a name="ln931">    } else if (ticket_cmd == 'C') {</a>
+<a name="ln932">        if (ticket_id == NULL) {</a>
+<a name="ln933">            CMD_ERR(&quot;Must supply a ticket id with -t\n&quot;);</a>
+<a name="ln934">            rc = -ENXIO;</a>
+<a name="ln935">            goto bail;</a>
+<a name="ln936">        }</a>
+<a name="ln937"> </a>
+<a name="ln938">        if (do_force == FALSE) {</a>
+<a name="ln939">            ticket_t *ticket = NULL;</a>
+<a name="ln940"> </a>
+<a name="ln941">            ticket = find_ticket(ticket_id, &amp;data_set);</a>
+<a name="ln942">            if (ticket == NULL) {</a>
+<a name="ln943">                rc = -ENXIO;</a>
+<a name="ln944">                goto bail;</a>
+<a name="ln945">            }</a>
+<a name="ln946"> </a>
+<a name="ln947">            if (ticket-&gt;granted) {</a>
+<a name="ln948">                ticket_warning(ticket_id, &quot;revoke&quot;);</a>
+<a name="ln949">                rc = -EPERM;</a>
+<a name="ln950">                goto bail;</a>
+<a name="ln951">            }</a>
+<a name="ln952">        }</a>
+<a name="ln953"> </a>
+<a name="ln954">        rc = delete_ticket_state(ticket_id, cib_conn);</a>
+<a name="ln955"> </a>
+<a name="ln956">    } else if (modified) {</a>
+<a name="ln957">        if (ticket_id == NULL) {</a>
+<a name="ln958">            CMD_ERR(&quot;Must supply a ticket id with -t\n&quot;);</a>
+<a name="ln959">            rc = -ENXIO;</a>
+<a name="ln960">            goto bail;</a>
+<a name="ln961">        }</a>
+<a name="ln962"> </a>
+<a name="ln963">        if (attr_value</a>
+<a name="ln964">            &amp;&amp; (attr_name == NULL || strlen(attr_name) == 0)) {</a>
+<a name="ln965">            CMD_ERR(&quot;You need to supply an attribute name with the -S command for -v %s\n&quot;, attr_value);</a>
+<a name="ln966">            rc = -EINVAL;</a>
+<a name="ln967">            goto bail;</a>
+<a name="ln968">        }</a>
+<a name="ln969"> </a>
+<a name="ln970">        if (attr_name</a>
+<a name="ln971">            &amp;&amp; (attr_value == NULL || strlen(attr_value) == 0)) {</a>
+<a name="ln972">            CMD_ERR(&quot;You need to supply a value with the -v option for -S %s\n&quot;, attr_name);</a>
+<a name="ln973">            rc = -EINVAL;</a>
+<a name="ln974">            goto bail;</a>
+<a name="ln975">        }</a>
+<a name="ln976"> </a>
+<a name="ln977">        if (allow_modification(ticket_id, attr_delete, attr_set) == FALSE) {</a>
+<a name="ln978">            rc = -EPERM;</a>
+<a name="ln979">            goto bail;</a>
+<a name="ln980">        }</a>
+<a name="ln981"> </a>
+<a name="ln982">        rc = modify_ticket_state(ticket_id, attr_delete, attr_set, cib_conn, &amp;data_set);</a>
+<a name="ln983">        </a>
+<a name="ln984">        if (rc != pcmk_ok) {</a>
+<a name="ln985">            goto bail;</a>
+<a name="ln986">        }</a>
+<a name="ln987"> </a>
+<a name="ln988">    } else if (ticket_cmd == 'S') {</a>
+<a name="ln989">        if (ticket_id == NULL) {</a>
+<a name="ln990">            CMD_ERR(&quot;Must supply a ticket id with -t\n&quot;);</a>
+<a name="ln991">            rc = -ENXIO;</a>
+<a name="ln992">            goto bail;</a>
+<a name="ln993">        }</a>
+<a name="ln994"> </a>
+<a name="ln995">        if (attr_name == NULL || strlen(attr_name) == 0) {</a>
+<a name="ln996">            CMD_ERR(&quot;You need to supply a command\n&quot;);</a>
+<a name="ln997">            rc = -EINVAL;</a>
+<a name="ln998">            goto bail;</a>
+<a name="ln999">        }</a>
+<a name="ln1000"> </a>
+<a name="ln1001">        if (attr_value == NULL || strlen(attr_value) == 0) {</a>
+<a name="ln1002">            CMD_ERR(&quot;You need to supply a value with the -v option for -S %s\n&quot;, attr_name);</a>
+<a name="ln1003">            rc = -EINVAL;</a>
+<a name="ln1004">            goto bail;</a>
+<a name="ln1005">        }</a>
+<a name="ln1006"> </a>
+<a name="ln1007">    } else {</a>
+<a name="ln1008">        CMD_ERR(&quot;Unknown command: %c\n&quot;, ticket_cmd);</a>
+<a name="ln1009">    }</a>
+<a name="ln1010"> </a>
+<a name="ln1011">  bail:</a>
+<a name="ln1012">    if (attr_set) {</a>
+<a name="ln1013">        g_hash_table_destroy(attr_set);</a>
+<a name="ln1014">    }</a>
+<a name="ln1015">    attr_set = NULL;</a>
+<a name="ln1016"> </a>
+<a name="ln1017">    if (attr_delete) {</a>
+<a name="ln1018">        g_list_free(attr_delete);</a>
+<a name="ln1019">    }</a>
+<a name="ln1020">    attr_delete = NULL;</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    if (cib_conn != NULL) {</a>
+<a name="ln1023">        cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln1024">        cib_conn-&gt;cmds-&gt;signoff(cib_conn);</a>
+<a name="ln1025">        cib_delete(cib_conn);</a>
+<a name="ln1026">    }</a>
+<a name="ln1027"> </a>
+<a name="ln1028">    if (rc == -pcmk_err_no_quorum) {</a>
+<a name="ln1029">        CMD_ERR(&quot;Error performing operation: %s\n&quot;, pcmk_strerror(rc));</a>
+<a name="ln1030">        CMD_ERR(&quot;Try using -f\n&quot;);</a>
+<a name="ln1031"> </a>
+<a name="ln1032">    } else if (rc != pcmk_ok) {</a>
+<a name="ln1033">        CMD_ERR(&quot;Error performing operation: %s\n&quot;, pcmk_strerror(rc));</a>
+<a name="ln1034">    }</a>
+<a name="ln1035"> </a>
+<a name="ln1036">    return crm_exit(rc);</a>
+<a name="ln1037">}</a>
+
+</code></pre>
+<div class="balloon" rel="171"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'xpath_string' pointer in the 'xpath_string + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 171, 170.</p></div>
+<div class="balloon" rel="178"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+<div class="balloon" rel="216"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'xpath_string' pointer in the 'xpath_string + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 216, 214.</p></div>
+<div class="balloon" rel="224"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+<div class="balloon" rel="253"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'state_xml' is always true.</p></div>
+<div class="balloon" rel="302"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'xpath_string' pointer in the 'xpath_string + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 302, 301.</p></div>
+<div class="balloon" rel="335"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+<div class="balloon" rel="446"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'warning' pointer in the 'warning + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 446, 444.</p></div>
+<div class="balloon" rel="473"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+<div class="balloon" rel="761"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 761, 761.</p></div>
+<div class="balloon" rel="765"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 765, 765.</p></div>
+<div class="balloon" rel="769"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 769, 769.</p></div>
+<div class="balloon" rel="773"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 773, 773.</p></div>
+<div class="balloon" rel="783"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 783, 783.</p></div>
+<div class="balloon" rel="799"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 799, 799.</p></div>
+<div class="balloon" rel="1022"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'cib_conn != NULL' is always true.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

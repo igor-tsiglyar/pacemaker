@@ -1,0 +1,637 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &lt;crm/crm.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;stdio.h&gt;</a>
+<a name="ln30">#include &lt;sys/types.h&gt;</a>
+<a name="ln31">#include &lt;unistd.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;stdlib.h&gt;</a>
+<a name="ln34">#include &lt;errno.h&gt;</a>
+<a name="ln35">#include &lt;fcntl.h&gt;</a>
+<a name="ln36">#include &lt;libgen.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln40">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">#define attr_msg(level, fmt, args...) do {	\</a>
+<a name="ln43">	if(to_console) {			\</a>
+<a name="ln44">	    printf(fmt&quot;\n&quot;, ##args);		\</a>
+<a name="ln45">	} else {				\</a>
+<a name="ln46">	    do_crm_log(level, fmt , ##args);	\</a>
+<a name="ln47">	}					\</a>
+<a name="ln48">    } while(0)</a>
+<a name="ln49"> </a>
+<a name="ln50">/* could also check for possible truncation */</a>
+<a name="ln51">#define attr_snprintf(_str, _offset, _limit, ...) do {              \</a>
+<a name="ln52">    _offset += snprintf(_str + _offset,                             \</a>
+<a name="ln53">                        (_limit &gt; _offset) ? _limit - _offset : 0,  \</a>
+<a name="ln54">                        __VA_ARGS__);                               \</a>
+<a name="ln55">    } while(0)</a>
+<a name="ln56"> </a>
+<a name="ln57">extern int</a>
+<a name="ln58">find_nvpair_attr_delegate(cib_t * the_cib, const char *attr, const char *section,</a>
+<a name="ln59">                          const char *node_uuid, const char *attr_set_type, const char *set_name,</a>
+<a name="ln60">                          const char *attr_id, const char *attr_name, gboolean to_console,</a>
+<a name="ln61">                          char **value, const char *user_name)</a>
+<a name="ln62">{</a>
+<a name="ln63">    int offset = 0;</a>
+<a name="ln64">    static int xpath_max = 1024;</a>
+<a name="ln65">    int rc = pcmk_ok;</a>
+<a name="ln66"> </a>
+<a name="ln67">    char *xpath_string = NULL;</a>
+<a name="ln68">    xmlNode *xml_search = NULL;</a>
+<a name="ln69">    const char *set_type = NULL;</a>
+<a name="ln70">    const char *node_type = NULL;</a>
+<a name="ln71"> </a>
+<a name="ln72">    if (attr_set_type) {</a>
+<a name="ln73">        set_type = attr_set_type;</a>
+<a name="ln74">    } else {</a>
+<a name="ln75">        set_type = XML_TAG_ATTR_SETS;</a>
+<a name="ln76">    }</a>
+<a name="ln77"> </a>
+<a name="ln78">    CRM_ASSERT(value != NULL);</a>
+<a name="ln79">    *value = NULL;</a>
+<a name="ln80"> </a>
+<a name="ln81">    if (safe_str_eq(section, XML_CIB_TAG_CRMCONFIG)) {</a>
+<a name="ln82">        node_uuid = NULL;</a>
+<a name="ln83">        set_type = XML_CIB_TAG_PROPSET;</a>
+<a name="ln84"> </a>
+<a name="ln85">    } else if (safe_str_eq(section, XML_CIB_TAG_OPCONFIG)</a>
+<a name="ln86">               || safe_str_eq(section, XML_CIB_TAG_RSCCONFIG)) {</a>
+<a name="ln87">        node_uuid = NULL;</a>
+<a name="ln88">        set_type = XML_TAG_META_SETS;</a>
+<a name="ln89"> </a>
+<a name="ln90">    } else if (safe_str_eq(section, XML_CIB_TAG_TICKETS)) {</a>
+<a name="ln91">        node_uuid = NULL;</a>
+<a name="ln92">        section = XML_CIB_TAG_STATUS;</a>
+<a name="ln93">        node_type = XML_CIB_TAG_TICKETS;</a>
+<a name="ln94"> </a>
+<a name="ln95">    } else if (node_uuid == NULL) {</a>
+<a name="ln96">        return -EINVAL;</a>
+<a name="ln97">    }</a>
+<a name="ln98"> </a>
+<a name="ln99">    xpath_string = calloc(1, xpath_max);</a>
+<a name="ln100">    if (xpath_string == NULL) {</a>
+<a name="ln101">        crm_perror(LOG_CRIT, &quot;Could not create xpath&quot;);</a>
+<a name="ln102">        return -ENOMEM;</a>
+<a name="ln103">    }</a>
+<a name="ln104"> </a>
+<a name="ln105">    attr_snprintf(xpath_string, offset, xpath_max, &quot;%.128s&quot;, get_object_path(section));</a>
+<a name="ln106"> </a>
+<a name="ln107">    if (safe_str_eq(node_type, XML_CIB_TAG_TICKETS)) {</a>
+<a name="ln108">        attr_snprintf(xpath_string, offset, xpath_max, &quot;//%s&quot;, node_type);</a>
+<a name="ln109"> </a>
+<a name="ln110">    } else if (node_uuid) {</a>
+<a name="ln111">        const char *node_type = XML_CIB_TAG_NODE;</a>
+<a name="ln112"> </a>
+<a name="ln113">        if (safe_str_eq(section, XML_CIB_TAG_STATUS)) {</a>
+<a name="ln114">            node_type = XML_CIB_TAG_STATE;</a>
+<a name="ln115">            set_type = XML_TAG_TRANSIENT_NODEATTRS;</a>
+<a name="ln116">        }</a>
+<a name="ln117">        attr_snprintf(xpath_string, offset, xpath_max, &quot;//%s[@id='%s']&quot;, node_type,</a>
+<a name="ln118">                      node_uuid);</a>
+<a name="ln119">    }</a>
+<a name="ln120"> </a>
+<a name="ln121">    if (set_name) {</a>
+<a name="ln122">        attr_snprintf(xpath_string, offset, xpath_max, &quot;//%s[@id='%.128s']&quot;, set_type,</a>
+<a name="ln123">                      set_name);</a>
+<a name="ln124">    } else {</a>
+<a name="ln125">        attr_snprintf(xpath_string, offset, xpath_max, &quot;//%s&quot;, set_type);</a>
+<a name="ln126">    }</a>
+<a name="ln127"> </a>
+<a name="ln128">    attr_snprintf(xpath_string, offset, xpath_max, &quot;//nvpair[&quot;);</a>
+<a name="ln129">    if (attr_id) {</a>
+<a name="ln130">        attr_snprintf(xpath_string, offset, xpath_max, &quot;@id='%s'&quot;, attr_id);</a>
+<a name="ln131">    }</a>
+<a name="ln132"> </a>
+<a name="ln133">    if (attr_name) {</a>
+<a name="ln134">        if (attr_id) {</a>
+<a name="ln135">            attr_snprintf(xpath_string, offset, xpath_max, &quot; and &quot;);</a>
+<a name="ln136">        }</a>
+<a name="ln137">        attr_snprintf(xpath_string, offset, xpath_max, &quot;@name='%.128s'&quot;, attr_name);</a>
+<a name="ln138">    }</a>
+<a name="ln139">    attr_snprintf(xpath_string, offset, xpath_max, &quot;]&quot;);</a>
+<a name="ln140">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln141"> </a>
+<a name="ln142">    rc = cib_internal_op(the_cib, CIB_OP_QUERY, NULL, xpath_string, NULL, &amp;xml_search,</a>
+<a name="ln143">                         cib_sync_call | cib_scope_local | cib_xpath, user_name);</a>
+<a name="ln144"> </a>
+<a name="ln145">    if (rc != pcmk_ok) {</a>
+<a name="ln146">        crm_trace(&quot;Query failed for attribute %s (section=%s, node=%s, set=%s, xpath=%s): %s&quot;,</a>
+<a name="ln147">                  attr_name, section, crm_str(node_uuid), crm_str(set_name), xpath_string,</a>
+<a name="ln148">                  pcmk_strerror(rc));</a>
+<a name="ln149">        goto done;</a>
+<a name="ln150">    }</a>
+<a name="ln151"> </a>
+<a name="ln152">    crm_log_xml_debug(xml_search, &quot;Match&quot;);</a>
+<a name="ln153">    if (xml_has_children(xml_search)) {</a>
+<a name="ln154">        xmlNode *child = NULL;</a>
+<a name="ln155"> </a>
+<a name="ln156">        rc = -ENOTUNIQ;</a>
+<a name="ln157">        attr_msg(LOG_WARNING, &quot;Multiple attributes match name=%s&quot;, attr_name);</a>
+<a name="ln158"> </a>
+<a name="ln159">        for (child = __xml_first_child(xml_search); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln160">            attr_msg(LOG_INFO, &quot;  Value: %s \t(id=%s)&quot;,</a>
+<a name="ln161">                     crm_element_value(child, XML_NVPAIR_ATTR_VALUE), ID(child));</a>
+<a name="ln162">        }</a>
+<a name="ln163"> </a>
+<a name="ln164">    } else {</a>
+<a name="ln165">        const char *tmp = crm_element_value(xml_search, attr);</a>
+<a name="ln166"> </a>
+<a name="ln167">        if (tmp) {</a>
+<a name="ln168">            *value = strdup(tmp);</a>
+<a name="ln169">        }</a>
+<a name="ln170">    }</a>
+<a name="ln171"> </a>
+<a name="ln172">  done:</a>
+<a name="ln173">    free(xpath_string);</a>
+<a name="ln174">    free_xml(xml_search);</a>
+<a name="ln175">    return rc;</a>
+<a name="ln176">}</a>
+<a name="ln177"> </a>
+<a name="ln178">int</a>
+<a name="ln179">update_attr_delegate(cib_t * the_cib, int call_options,</a>
+<a name="ln180">                     const char *section, const char *node_uuid, const char *set_type,</a>
+<a name="ln181">                     const char *set_name, const char *attr_id, const char *attr_name,</a>
+<a name="ln182">                     const char *attr_value, gboolean to_console, const char *user_name,</a>
+<a name="ln183">                     const char *node_type)</a>
+<a name="ln184">{</a>
+<a name="ln185">    const char *tag = NULL;</a>
+<a name="ln186">    int rc = pcmk_ok;</a>
+<a name="ln187">    xmlNode *xml_top = NULL;</a>
+<a name="ln188">    xmlNode *xml_obj = NULL;</a>
+<a name="ln189"> </a>
+<a name="ln190">    char *local_attr_id = NULL;</a>
+<a name="ln191">    char *local_set_name = NULL;</a>
+<a name="ln192"> </a>
+<a name="ln193">    CRM_CHECK(section != NULL, return -EINVAL);</a>
+<a name="ln194">    CRM_CHECK(attr_value != NULL, return -EINVAL);</a>
+<a name="ln195">    CRM_CHECK(attr_name != NULL || attr_id != NULL, return -EINVAL);</a>
+<a name="ln196"> </a>
+<a name="ln197">    rc = find_nvpair_attr_delegate(the_cib, XML_ATTR_ID, section, node_uuid, set_type, set_name,</a>
+<a name="ln198">                                   attr_id, attr_name, to_console, &amp;local_attr_id, user_name);</a>
+<a name="ln199">    if (rc == pcmk_ok) {</a>
+<a name="ln200">        attr_id = local_attr_id;</a>
+<a name="ln201">        goto do_modify;</a>
+<a name="ln202"> </a>
+<a name="ln203">    } else if (rc != -ENXIO) {</a>
+<a name="ln204">        return rc;</a>
+<a name="ln205"> </a>
+<a name="ln206">        /* } else if(attr_id == NULL) { */</a>
+<a name="ln207">        /*     return -EINVAL; */</a>
+<a name="ln208"> </a>
+<a name="ln209">    } else {</a>
+<a name="ln210">        crm_trace(&quot;%s does not exist, create it&quot;, attr_name);</a>
+<a name="ln211">        if (safe_str_eq(section, XML_CIB_TAG_TICKETS)) {</a>
+<a name="ln212">            node_uuid = NULL;</a>
+<a name="ln213">            section = XML_CIB_TAG_STATUS;</a>
+<a name="ln214">            node_type = XML_CIB_TAG_TICKETS;</a>
+<a name="ln215"> </a>
+<a name="ln216">            xml_top = create_xml_node(xml_obj, XML_CIB_TAG_STATUS);</a>
+<a name="ln217">            xml_obj = create_xml_node(xml_top, XML_CIB_TAG_TICKETS);</a>
+<a name="ln218"> </a>
+<a name="ln219">        } else if (safe_str_eq(section, XML_CIB_TAG_NODES)) {</a>
+<a name="ln220"> </a>
+<a name="ln221">            if (node_uuid == NULL) {</a>
+<a name="ln222">                return -EINVAL;</a>
+<a name="ln223">            }</a>
+<a name="ln224"> </a>
+<a name="ln225">            if (safe_str_eq(node_type, &quot;remote&quot;)) {</a>
+<a name="ln226">                xml_top = create_xml_node(xml_obj, XML_CIB_TAG_NODES);</a>
+<a name="ln227">                xml_obj = create_xml_node(xml_top, XML_CIB_TAG_NODE);</a>
+<a name="ln228">                crm_xml_add(xml_obj, XML_ATTR_TYPE, &quot;remote&quot;);</a>
+<a name="ln229">                crm_xml_add(xml_obj, XML_ATTR_ID, node_uuid);</a>
+<a name="ln230">                crm_xml_add(xml_obj, XML_ATTR_UNAME, node_uuid);</a>
+<a name="ln231">            } else {</a>
+<a name="ln232">                tag = XML_CIB_TAG_NODE;</a>
+<a name="ln233">            }</a>
+<a name="ln234"> </a>
+<a name="ln235">        } else if (safe_str_eq(section, XML_CIB_TAG_STATUS)) {</a>
+<a name="ln236">            tag = XML_TAG_TRANSIENT_NODEATTRS;</a>
+<a name="ln237">            if (node_uuid == NULL) {</a>
+<a name="ln238">                return -EINVAL;</a>
+<a name="ln239">            }</a>
+<a name="ln240"> </a>
+<a name="ln241">            xml_top = create_xml_node(xml_obj, XML_CIB_TAG_STATE);</a>
+<a name="ln242">            crm_xml_add(xml_top, XML_ATTR_ID, node_uuid);</a>
+<a name="ln243">            xml_obj = xml_top;</a>
+<a name="ln244"> </a>
+<a name="ln245">        } else {</a>
+<a name="ln246">            tag = section;</a>
+<a name="ln247">            node_uuid = NULL;</a>
+<a name="ln248">        }</a>
+<a name="ln249"> </a>
+<a name="ln250">        if (set_name == NULL) {</a>
+<a name="ln251">            if (safe_str_eq(section, XML_CIB_TAG_CRMCONFIG)) {</a>
+<a name="ln252">                local_set_name = strdup(CIB_OPTIONS_FIRST);</a>
+<a name="ln253"> </a>
+<a name="ln254">            } else if (safe_str_eq(node_type, XML_CIB_TAG_TICKETS)) {</a>
+<a name="ln255">                local_set_name = crm_concat(section, XML_CIB_TAG_TICKETS, '-');</a>
+<a name="ln256"> </a>
+<a name="ln257">            } else if (node_uuid) {</a>
+<a name="ln258">                local_set_name = crm_concat(section, node_uuid, '-');</a>
+<a name="ln259"> </a>
+<a name="ln260">                if (set_type) {</a>
+<a name="ln261">                    char *tmp_set_name = local_set_name;</a>
+<a name="ln262"> </a>
+<a name="ln263">                    local_set_name = crm_concat(tmp_set_name, set_type, '-');</a>
+<a name="ln264">                    free(tmp_set_name);</a>
+<a name="ln265">                }</a>
+<a name="ln266">            } else {</a>
+<a name="ln267">                local_set_name = crm_concat(section, &quot;options&quot;, '-');</a>
+<a name="ln268">            }</a>
+<a name="ln269">            set_name = local_set_name;</a>
+<a name="ln270">        }</a>
+<a name="ln271"> </a>
+<a name="ln272">        if (attr_id == NULL) {</a>
+<a name="ln273">            local_attr_id = crm_concat(set_name, attr_name, '-');</a>
+<a name="ln274">            crm_xml_sanitize_id(local_attr_id);</a>
+<a name="ln275">            attr_id = local_attr_id;</a>
+<a name="ln276"> </a>
+<a name="ln277">        } else if (attr_name == NULL) {</a>
+<a name="ln278">            attr_name = attr_id;</a>
+<a name="ln279">        }</a>
+<a name="ln280"> </a>
+<a name="ln281">        crm_trace(&quot;Creating %s/%s&quot;, section, tag);</a>
+<a name="ln282">        if (tag != NULL) {</a>
+<a name="ln283">            xml_obj = create_xml_node(xml_obj, tag);</a>
+<a name="ln284">            crm_xml_add(xml_obj, XML_ATTR_ID, node_uuid);</a>
+<a name="ln285">            if (xml_top == NULL) {</a>
+<a name="ln286">                xml_top = xml_obj;</a>
+<a name="ln287">            }</a>
+<a name="ln288">        }</a>
+<a name="ln289"> </a>
+<a name="ln290">        if (node_uuid == NULL &amp;&amp; safe_str_neq(node_type, XML_CIB_TAG_TICKETS)) {</a>
+<a name="ln291">            if (safe_str_eq(section, XML_CIB_TAG_CRMCONFIG)) {</a>
+<a name="ln292">                xml_obj = create_xml_node(xml_obj, XML_CIB_TAG_PROPSET);</a>
+<a name="ln293">            } else {</a>
+<a name="ln294">                xml_obj = create_xml_node(xml_obj, XML_TAG_META_SETS);</a>
+<a name="ln295">            }</a>
+<a name="ln296"> </a>
+<a name="ln297">        } else if (set_type) {</a>
+<a name="ln298">            xml_obj = create_xml_node(xml_obj, set_type);</a>
+<a name="ln299"> </a>
+<a name="ln300">        } else {</a>
+<a name="ln301">            xml_obj = create_xml_node(xml_obj, XML_TAG_ATTR_SETS);</a>
+<a name="ln302">        }</a>
+<a name="ln303">        crm_xml_add(xml_obj, XML_ATTR_ID, set_name);</a>
+<a name="ln304"> </a>
+<a name="ln305">        if (xml_top == NULL) {</a>
+<a name="ln306">            xml_top = xml_obj;</a>
+<a name="ln307">        }</a>
+<a name="ln308">    }</a>
+<a name="ln309"> </a>
+<a name="ln310">  do_modify:</a>
+<a name="ln311">    xml_obj = create_xml_node(xml_obj, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln312">    if (xml_top == NULL) {</a>
+<a name="ln313">        xml_top = xml_obj;</a>
+<a name="ln314">    }</a>
+<a name="ln315"> </a>
+<a name="ln316">    crm_xml_add(xml_obj, XML_ATTR_ID, attr_id);</a>
+<a name="ln317">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name);</a>
+<a name="ln318">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_VALUE, attr_value);</a>
+<a name="ln319"> </a>
+<a name="ln320">    crm_log_xml_trace(xml_top, &quot;update_attr&quot;);</a>
+<a name="ln321">    rc = cib_internal_op(the_cib, CIB_OP_MODIFY, NULL, section, xml_top, NULL,</a>
+<a name="ln322">                         call_options | cib_quorum_override, user_name);</a>
+<a name="ln323"> </a>
+<a name="ln324">    if (rc &lt; pcmk_ok) {</a>
+<a name="ln325">        attr_msg(LOG_ERR, &quot;Error setting %s=%s (section=%s, set=%s): %s&quot;,</a>
+<a name="ln326">                 attr_name, attr_value, section, crm_str(set_name), pcmk_strerror(rc));</a>
+<a name="ln327">        crm_log_xml_info(xml_top, &quot;Update&quot;);</a>
+<a name="ln328">    }</a>
+<a name="ln329"> </a>
+<a name="ln330">    free(local_set_name);</a>
+<a name="ln331">    free(local_attr_id);</a>
+<a name="ln332">    free_xml(xml_top);</a>
+<a name="ln333"> </a>
+<a name="ln334">    return rc;</a>
+<a name="ln335">}</a>
+<a name="ln336"> </a>
+<a name="ln337">int</a>
+<a name="ln338">read_attr_delegate(cib_t * the_cib,</a>
+<a name="ln339">                   const char *section, const char *node_uuid, const char *set_type,</a>
+<a name="ln340">                   const char *set_name, const char *attr_id, const char *attr_name,</a>
+<a name="ln341">                   char **attr_value, gboolean to_console, const char *user_name)</a>
+<a name="ln342">{</a>
+<a name="ln343">    int rc = pcmk_ok;</a>
+<a name="ln344"> </a>
+<a name="ln345">    CRM_ASSERT(attr_value != NULL);</a>
+<a name="ln346">    CRM_CHECK(section != NULL, return -EINVAL);</a>
+<a name="ln347">    CRM_CHECK(attr_name != NULL || attr_id != NULL, return -EINVAL);</a>
+<a name="ln348"> </a>
+<a name="ln349">    *attr_value = NULL;</a>
+<a name="ln350"> </a>
+<a name="ln351">    rc = find_nvpair_attr_delegate(the_cib, XML_NVPAIR_ATTR_VALUE, section, node_uuid, set_type,</a>
+<a name="ln352">                                   set_name, attr_id, attr_name, to_console, attr_value, user_name);</a>
+<a name="ln353">    if (rc != pcmk_ok) {</a>
+<a name="ln354">        crm_trace(&quot;Query failed for attribute %s (section=%s, node=%s, set=%s): %s&quot;,</a>
+<a name="ln355">                  attr_name, section, crm_str(set_name), crm_str(node_uuid), pcmk_strerror(rc));</a>
+<a name="ln356">    }</a>
+<a name="ln357">    return rc;</a>
+<a name="ln358">}</a>
+<a name="ln359"> </a>
+<a name="ln360">int</a>
+<a name="ln361">delete_attr_delegate(cib_t * the_cib, int options,</a>
+<a name="ln362">                     const char *section, const char *node_uuid, const char *set_type,</a>
+<a name="ln363">                     const char *set_name, const char *attr_id, const char *attr_name,</a>
+<a name="ln364">                     const char *attr_value, gboolean to_console, const char *user_name)</a>
+<a name="ln365">{</a>
+<a name="ln366">    int rc = pcmk_ok;</a>
+<a name="ln367">    xmlNode *xml_obj = NULL;</a>
+<a name="ln368">    char *local_attr_id = NULL;</a>
+<a name="ln369"> </a>
+<a name="ln370">    CRM_CHECK(section != NULL, return -EINVAL);</a>
+<a name="ln371">    CRM_CHECK(attr_name != NULL || attr_id != NULL, return -EINVAL);</a>
+<a name="ln372"> </a>
+<a name="ln373">    if (attr_id == NULL) {</a>
+<a name="ln374">        rc = find_nvpair_attr_delegate(the_cib, XML_ATTR_ID, section, node_uuid, set_type,</a>
+<a name="ln375">                                       set_name, attr_id, attr_name, to_console, &amp;local_attr_id,</a>
+<a name="ln376">                                       user_name);</a>
+<a name="ln377">        if (rc != pcmk_ok) {</a>
+<a name="ln378">            return rc;</a>
+<a name="ln379">        }</a>
+<a name="ln380">        attr_id = local_attr_id;</a>
+<a name="ln381">    }</a>
+<a name="ln382"> </a>
+<a name="ln383">    xml_obj = create_xml_node(NULL, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln384">    crm_xml_add(xml_obj, XML_ATTR_ID, attr_id);</a>
+<a name="ln385">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name);</a>
+<a name="ln386">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_VALUE, attr_value);</a>
+<a name="ln387"> </a>
+<a name="ln388">    rc = cib_internal_op(the_cib, CIB_OP_DELETE, NULL, section, xml_obj, NULL,</a>
+<a name="ln389">                         options | cib_quorum_override, user_name);</a>
+<a name="ln390"> </a>
+<a name="ln391">    if (rc == pcmk_ok) {</a>
+<a name="ln392">        attr_msg(LOG_DEBUG, &quot;Deleted %s %s: id=%s%s%s%s%s\n&quot;,</a>
+<a name="ln393">                 section, node_uuid ? &quot;attribute&quot; : &quot;option&quot;, local_attr_id,</a>
+<a name="ln394">                 set_name ? &quot; set=&quot; : &quot;&quot;, set_name ? set_name : &quot;&quot;,</a>
+<a name="ln395">                 attr_name ? &quot; name=&quot; : &quot;&quot;, attr_name ? attr_name : &quot;&quot;);</a>
+<a name="ln396">    }</a>
+<a name="ln397"> </a>
+<a name="ln398">    free(local_attr_id);</a>
+<a name="ln399">    free_xml(xml_obj);</a>
+<a name="ln400">    return rc;</a>
+<a name="ln401">}</a>
+<a name="ln402"> </a>
+<a name="ln403">/*!</a>
+<a name="ln404"> * \internal</a>
+<a name="ln405"> * \brief Parse node UUID from search result</a>
+<a name="ln406"> *</a>
+<a name="ln407"> * \param[in]  result     XML search result</a>
+<a name="ln408"> * \param[out] uuid       If non-NULL, where to store parsed UUID</a>
+<a name="ln409"> * \param[out] is_remote  If non-NULL, set TRUE if result is remote node</a>
+<a name="ln410"> *</a>
+<a name="ln411"> * \return pcmk_ok if UUID was successfully parsed, -ENXIO otherwise</a>
+<a name="ln412"> */</a>
+<a name="ln413">static int</a>
+<a name="ln414">get_uuid_from_result(xmlNode *result, char **uuid, int *is_remote)</a>
+<a name="ln415">{</a>
+<a name="ln416">    int rc = -ENXIO;</a>
+<a name="ln417">    const char *tag;</a>
+<a name="ln418">    const char *parsed_uuid = NULL;</a>
+<a name="ln419">    int parsed_is_remote = FALSE;</a>
+<a name="ln420"> </a>
+<a name="ln421">    if (result == NULL) {</a>
+<a name="ln422">        return rc;</a>
+<a name="ln423">    }</a>
+<a name="ln424"> </a>
+<a name="ln425">    /* If there are multiple results, the first is sufficient */</a>
+<a name="ln426">    tag = (const char *) (result-&gt;name);</a>
+<a name="ln427">    if (safe_str_eq(tag, &quot;xpath-query&quot;)) {</a>
+<a name="ln428">        result = __xml_first_child(result);</a>
+<a name="ln429">        tag = (const char *) (result-&gt;name);</a>
+<a name="ln430">    }</a>
+<a name="ln431"> </a>
+<a name="ln432">    if (safe_str_eq(tag, XML_CIB_TAG_NODE)) {</a>
+<a name="ln433">        /* Result is &lt;node&gt; tag from &lt;nodes&gt; section */</a>
+<a name="ln434"> </a>
+<a name="ln435">        if (safe_str_eq(crm_element_value(result, XML_ATTR_TYPE), &quot;remote&quot;)) {</a>
+<a name="ln436">            parsed_uuid = crm_element_value(result, XML_ATTR_UNAME);</a>
+<a name="ln437">            parsed_is_remote = TRUE;</a>
+<a name="ln438">        } else {</a>
+<a name="ln439">            parsed_uuid = ID(result);</a>
+<a name="ln440">            parsed_is_remote = FALSE;</a>
+<a name="ln441">        }</a>
+<a name="ln442"> </a>
+<a name="ln443">    } else if (safe_str_eq(tag, XML_CIB_TAG_RESOURCE)) {</a>
+<a name="ln444">        /* Result is &lt;primitive&gt; for ocf:pacemaker:remote resource */</a>
+<a name="ln445"> </a>
+<a name="ln446">        parsed_uuid = ID(result);</a>
+<a name="ln447">        parsed_is_remote = TRUE;</a>
+<a name="ln448"> </a>
+<a name="ln449">    } else if (safe_str_eq(tag, XML_CIB_TAG_NVPAIR)) {</a>
+<a name="ln450">        /* Result is remote-node parameter of &lt;primitive&gt; for guest node */</a>
+<a name="ln451"> </a>
+<a name="ln452">        parsed_uuid = crm_element_value(result, XML_NVPAIR_ATTR_VALUE);</a>
+<a name="ln453">        parsed_is_remote = TRUE;</a>
+<a name="ln454"> </a>
+<a name="ln455">    } else if (safe_str_eq(tag, XML_CIB_TAG_STATE)) {</a>
+<a name="ln456">        /* Result is &lt;node_state&gt; tag from &lt;status&gt; section */</a>
+<a name="ln457"> </a>
+<a name="ln458">        parsed_uuid = crm_element_value(result, XML_ATTR_UNAME);</a>
+<a name="ln459">        crm_element_value_int(result, F_ATTRD_IS_REMOTE, &amp;parsed_is_remote);</a>
+<a name="ln460">    }</a>
+<a name="ln461"> </a>
+<a name="ln462">    if (parsed_uuid) {</a>
+<a name="ln463">        if (uuid) {</a>
+<a name="ln464">            *uuid = strdup(parsed_uuid);</a>
+<a name="ln465">        }</a>
+<a name="ln466">        if (is_remote) {</a>
+<a name="ln467">            *is_remote = parsed_is_remote;</a>
+<a name="ln468">        }</a>
+<a name="ln469">        rc = pcmk_ok;</a>
+<a name="ln470">    }</a>
+<a name="ln471"> </a>
+<a name="ln472">    return rc;</a>
+<a name="ln473">}</a>
+<a name="ln474"> </a>
+<a name="ln475">/* Search string to find a node by name, as:</a>
+<a name="ln476"> * - cluster or remote node in nodes section</a>
+<a name="ln477"> * - remote node in resources section</a>
+<a name="ln478"> * - guest node in resources section</a>
+<a name="ln479"> * - orphaned remote node in status section</a>
+<a name="ln480"> */</a>
+<a name="ln481">#define XPATH_NODE \</a>
+<a name="ln482">    &quot;/&quot; XML_TAG_CIB &quot;/&quot; XML_CIB_TAG_CONFIGURATION &quot;/&quot; XML_CIB_TAG_NODES \</a>
+<a name="ln483">        &quot;/&quot; XML_CIB_TAG_NODE &quot;[@&quot; XML_ATTR_UNAME &quot;='%s']&quot; \</a>
+<a name="ln484">    &quot;|/&quot; XML_TAG_CIB &quot;/&quot; XML_CIB_TAG_CONFIGURATION &quot;/&quot; XML_CIB_TAG_RESOURCES \</a>
+<a name="ln485">        &quot;/&quot; XML_CIB_TAG_RESOURCE \</a>
+<a name="ln486">        &quot;[@class='ocf'][@provider='pacemaker'][@type='remote'][@id='%s']&quot; \</a>
+<a name="ln487">    &quot;|/&quot; XML_TAG_CIB &quot;/&quot; XML_CIB_TAG_CONFIGURATION &quot;/&quot; XML_CIB_TAG_RESOURCES \</a>
+<a name="ln488">        &quot;/&quot; XML_CIB_TAG_RESOURCE &quot;/&quot; XML_TAG_META_SETS &quot;/&quot; XML_CIB_TAG_NVPAIR \</a>
+<a name="ln489">        &quot;[@name='&quot; XML_RSC_ATTR_REMOTE_NODE &quot;'][@value='%s']&quot; \</a>
+<a name="ln490">    &quot;|/&quot; XML_TAG_CIB &quot;/&quot; XML_CIB_TAG_STATUS &quot;/&quot; XML_CIB_TAG_STATE \</a>
+<a name="ln491">        &quot;[@&quot; XML_NODE_IS_REMOTE &quot;='true'][@&quot; XML_ATTR_UUID &quot;='%s']&quot;</a>
+<a name="ln492"> </a>
+<a name="ln493">int</a>
+<a name="ln494">query_node_uuid(cib_t * the_cib, const char *uname, char **uuid, int *is_remote_node)</a>
+<a name="ln495">{</a>
+<a name="ln496">    int rc = pcmk_ok;</a>
+<a name="ln497">    char *xpath_string;</a>
+<a name="ln498">    xmlNode *xml_search = NULL;</a>
+<a name="ln499"> </a>
+<a name="ln500">    CRM_ASSERT(uname != NULL);</a>
+<a name="ln501"> </a>
+<a name="ln502">    if (uuid) {</a>
+<a name="ln503">        *uuid = NULL;</a>
+<a name="ln504">    }</a>
+<a name="ln505">    if (is_remote_node) {</a>
+<a name="ln506">        *is_remote_node = FALSE;</a>
+<a name="ln507">    }</a>
+<a name="ln508"> </a>
+<a name="ln509">    xpath_string = crm_strdup_printf(XPATH_NODE, uname, uname, uname, uname);</a>
+<a name="ln510">    if (cib_internal_op(the_cib, CIB_OP_QUERY, NULL, xpath_string, NULL,</a>
+<a name="ln511">                        &amp;xml_search, cib_sync_call|cib_scope_local|cib_xpath,</a>
+<a name="ln512">                        NULL) == pcmk_ok) {</a>
+<a name="ln513">        rc = get_uuid_from_result(xml_search, uuid, is_remote_node);</a>
+<a name="ln514">    } else {</a>
+<a name="ln515">        rc = -ENXIO;</a>
+<a name="ln516">    }</a>
+<a name="ln517">    free(xpath_string);</a>
+<a name="ln518">    free_xml(xml_search);</a>
+<a name="ln519"> </a>
+<a name="ln520">    if (rc != pcmk_ok) {</a>
+<a name="ln521">        crm_debug(&quot;Could not map node name '%s' to a UUID: %s&quot;,</a>
+<a name="ln522">                  uname, pcmk_strerror(rc));</a>
+<a name="ln523">    } else {</a>
+<a name="ln524">        crm_info(&quot;Mapped node name '%s' to UUID %s&quot;, uname, (uuid? *uuid : &quot;&quot;));</a>
+<a name="ln525">    }</a>
+<a name="ln526">    return rc;</a>
+<a name="ln527">}</a>
+<a name="ln528"> </a>
+<a name="ln529">int</a>
+<a name="ln530">query_node_uname(cib_t * the_cib, const char *uuid, char **uname)</a>
+<a name="ln531">{</a>
+<a name="ln532">    int rc = pcmk_ok;</a>
+<a name="ln533">    xmlNode *a_child = NULL;</a>
+<a name="ln534">    xmlNode *xml_obj = NULL;</a>
+<a name="ln535">    xmlNode *fragment = NULL;</a>
+<a name="ln536">    const char *child_name = NULL;</a>
+<a name="ln537"> </a>
+<a name="ln538">    CRM_ASSERT(uname != NULL);</a>
+<a name="ln539">    CRM_ASSERT(uuid != NULL);</a>
+<a name="ln540"> </a>
+<a name="ln541">    rc = the_cib-&gt;cmds-&gt;query(the_cib, XML_CIB_TAG_NODES, &amp;fragment,</a>
+<a name="ln542">                              cib_sync_call | cib_scope_local);</a>
+<a name="ln543">    if (rc != pcmk_ok) {</a>
+<a name="ln544">        return rc;</a>
+<a name="ln545">    }</a>
+<a name="ln546"> </a>
+<a name="ln547">    xml_obj = fragment;</a>
+<a name="ln548">    CRM_CHECK(safe_str_eq(crm_element_name(xml_obj), XML_CIB_TAG_NODES), return -ENOMSG);</a>
+<a name="ln549">    CRM_ASSERT(xml_obj != NULL);</a>
+<a name="ln550">    crm_log_xml_trace(xml_obj, &quot;Result section&quot;);</a>
+<a name="ln551"> </a>
+<a name="ln552">    rc = -ENXIO;</a>
+<a name="ln553">    *uname = NULL;</a>
+<a name="ln554"> </a>
+<a name="ln555">    for (a_child = __xml_first_child(xml_obj); a_child != NULL; a_child = __xml_next(a_child)) {</a>
+<a name="ln556">        if (crm_str_eq((const char *)a_child-&gt;name, XML_CIB_TAG_NODE, TRUE)) {</a>
+<a name="ln557">            child_name = ID(a_child);</a>
+<a name="ln558">            if (safe_str_eq(uuid, child_name)) {</a>
+<a name="ln559">                child_name = crm_element_value(a_child, XML_ATTR_UNAME);</a>
+<a name="ln560">                if (child_name != NULL) {</a>
+<a name="ln561">                    *uname = strdup(child_name);</a>
+<a name="ln562">                    rc = pcmk_ok;</a>
+<a name="ln563">                }</a>
+<a name="ln564">                break;</a>
+<a name="ln565">            }</a>
+<a name="ln566">        }</a>
+<a name="ln567">    }</a>
+<a name="ln568"> </a>
+<a name="ln569">    free_xml(fragment);</a>
+<a name="ln570">    return rc;</a>
+<a name="ln571">}</a>
+<a name="ln572"> </a>
+<a name="ln573">int</a>
+<a name="ln574">set_standby(cib_t * the_cib, const char *uuid, const char *scope, const char *standby_value)</a>
+<a name="ln575">{</a>
+<a name="ln576">    int rc = pcmk_ok;</a>
+<a name="ln577">    char *attr_id = NULL;</a>
+<a name="ln578"> </a>
+<a name="ln579">    CRM_CHECK(uuid != NULL, return -EINVAL);</a>
+<a name="ln580">    CRM_CHECK(standby_value != NULL, return -EINVAL);</a>
+<a name="ln581"> </a>
+<a name="ln582">    if (safe_str_eq(scope, &quot;reboot&quot;) || safe_str_eq(scope, XML_CIB_TAG_STATUS)) {</a>
+<a name="ln583">        scope = XML_CIB_TAG_STATUS;</a>
+<a name="ln584">        attr_id = crm_strdup_printf(&quot;transient-standby-%.256s&quot;, uuid);</a>
+<a name="ln585"> </a>
+<a name="ln586">    } else {</a>
+<a name="ln587">        scope = XML_CIB_TAG_NODES;</a>
+<a name="ln588">        attr_id = crm_strdup_printf(&quot;standby-%.256s&quot;, uuid);</a>
+<a name="ln589">    }</a>
+<a name="ln590"> </a>
+<a name="ln591">    rc = update_attr_delegate(the_cib, cib_sync_call, scope, uuid, NULL, NULL,</a>
+<a name="ln592">                              attr_id, &quot;standby&quot;, standby_value, TRUE, NULL, NULL);</a>
+<a name="ln593"> </a>
+<a name="ln594">    free(attr_id);</a>
+<a name="ln595">    return rc;</a>
+<a name="ln596">}</a>
+
+</code></pre>
+<div class="balloon" rel="140"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

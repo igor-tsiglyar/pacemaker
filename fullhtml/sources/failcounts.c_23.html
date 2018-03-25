@@ -1,0 +1,385 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2008-2017 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This source code is licensed under the GNU Lesser General Public License</a>
+<a name="ln9"> * version 2.1 or later (LGPLv2.1+) WITHOUT ANY WARRANTY.</a>
+<a name="ln10"> */</a>
+<a name="ln11"> </a>
+<a name="ln12">#include &lt;crm_internal.h&gt;</a>
+<a name="ln13"> </a>
+<a name="ln14">#include &lt;sys/types.h&gt;</a>
+<a name="ln15">#include &lt;regex.h&gt;</a>
+<a name="ln16">#include &lt;glib.h&gt;</a>
+<a name="ln17"> </a>
+<a name="ln18">#include &lt;crm/crm.h&gt;</a>
+<a name="ln19">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln20">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln21">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln22">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln23"> </a>
+<a name="ln24">int</a>
+<a name="ln25">get_failcount(node_t *node, resource_t *rsc, time_t *last_failure,</a>
+<a name="ln26">              pe_working_set_t *data_set)</a>
+<a name="ln27">{</a>
+<a name="ln28">    return get_failcount_full(node, rsc, last_failure, TRUE, NULL, data_set);</a>
+<a name="ln29">}</a>
+<a name="ln30"> </a>
+<a name="ln31">static gboolean</a>
+<a name="ln32">is_matched_failure(const char *rsc_id, xmlNode *conf_op_xml,</a>
+<a name="ln33">                   xmlNode *lrm_op_xml)</a>
+<a name="ln34">{</a>
+<a name="ln35">    gboolean matched = FALSE;</a>
+<a name="ln36">    const char *conf_op_name = NULL;</a>
+<a name="ln37">    int conf_op_interval = 0;</a>
+<a name="ln38">    const char *lrm_op_task = NULL;</a>
+<a name="ln39">    int lrm_op_interval = 0;</a>
+<a name="ln40">    const char *lrm_op_id = NULL;</a>
+<a name="ln41">    char *last_failure_key = NULL;</a>
+<a name="ln42"> </a>
+<a name="ln43">    if (rsc_id == NULL || conf_op_xml == NULL || lrm_op_xml == NULL) {</a>
+<a name="ln44">        return FALSE;</a>
+<a name="ln45">    }</a>
+<a name="ln46"> </a>
+<a name="ln47">    conf_op_name = crm_element_value(conf_op_xml, &quot;name&quot;);</a>
+<a name="ln48">    conf_op_interval = crm_get_msec(crm_element_value(conf_op_xml, &quot;interval&quot;));</a>
+<a name="ln49">    lrm_op_task = crm_element_value(lrm_op_xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln50">    crm_element_value_int(lrm_op_xml, XML_LRM_ATTR_INTERVAL, &amp;lrm_op_interval);</a>
+<a name="ln51"> </a>
+<a name="ln52">    if (safe_str_eq(conf_op_name, lrm_op_task) == FALSE</a>
+<a name="ln53">        || conf_op_interval != lrm_op_interval) {</a>
+<a name="ln54">        return FALSE;</a>
+<a name="ln55">    }</a>
+<a name="ln56"> </a>
+<a name="ln57">    lrm_op_id = ID(lrm_op_xml);</a>
+<a name="ln58">    last_failure_key = generate_op_key(rsc_id, &quot;last_failure&quot;, 0);</a>
+<a name="ln59"> </a>
+<a name="ln60">    if (safe_str_eq(last_failure_key, lrm_op_id)) {</a>
+<a name="ln61">        matched = TRUE;</a>
+<a name="ln62"> </a>
+<a name="ln63">    } else {</a>
+<a name="ln64">        char *expected_op_key = generate_op_key(rsc_id, conf_op_name,</a>
+<a name="ln65">                                                conf_op_interval);</a>
+<a name="ln66"> </a>
+<a name="ln67">        if (safe_str_eq(expected_op_key, lrm_op_id)) {</a>
+<a name="ln68">            int rc = 0;</a>
+<a name="ln69">            int target_rc = get_target_rc(lrm_op_xml);</a>
+<a name="ln70"> </a>
+<a name="ln71">            crm_element_value_int(lrm_op_xml, XML_LRM_ATTR_RC, &amp;rc);</a>
+<a name="ln72">            if (rc != target_rc) {</a>
+<a name="ln73">                matched = TRUE;</a>
+<a name="ln74">            }</a>
+<a name="ln75">        }</a>
+<a name="ln76">        free(expected_op_key);</a>
+<a name="ln77">    }</a>
+<a name="ln78"> </a>
+<a name="ln79">    free(last_failure_key);</a>
+<a name="ln80">    return matched;</a>
+<a name="ln81">}</a>
+<a name="ln82"> </a>
+<a name="ln83">static gboolean</a>
+<a name="ln84">block_failure(node_t *node, resource_t *rsc, xmlNode *xml_op,</a>
+<a name="ln85">              pe_working_set_t *data_set)</a>
+<a name="ln86">{</a>
+<a name="ln87">    char *xml_name = clone_strip(rsc-&gt;id);</a>
+<a name="ln88">    char *xpath = crm_strdup_printf(&quot;//primitive[@id='%s']//op[@on-fail='block']&quot;,</a>
+<a name="ln89">                                    xml_name);</a>
+<a name="ln90">    xmlXPathObject *xpathObj = xpath_search(rsc-&gt;xml, xpath);</a>
+<a name="ln91">    gboolean should_block = FALSE;</a>
+<a name="ln92"> </a>
+<a name="ln93">    free(xpath);</a>
+<a name="ln94"> </a>
+<a name="ln95">#if 0</a>
+<a name="ln96">    /* A good idea? */</a>
+<a name="ln97">    if (rsc-&gt;container == NULL &amp;&amp; is_not_set(data_set-&gt;flags, pe_flag_stonith_enabled)) {</a>
+<a name="ln98">        /* In this case, stop on-fail defaults to block in unpack_operation() */</a>
+<a name="ln99">        return TRUE;</a>
+<a name="ln100">    }</a>
+<a name="ln101">#endif</a>
+<a name="ln102"> </a>
+<a name="ln103">    if (xpathObj) {</a>
+<a name="ln104">        int max = numXpathResults(xpathObj);</a>
+<a name="ln105">        int lpc = 0;</a>
+<a name="ln106"> </a>
+<a name="ln107">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln108">            xmlNode *pref = getXpathResult(xpathObj, lpc);</a>
+<a name="ln109"> </a>
+<a name="ln110">            if (xml_op) {</a>
+<a name="ln111">                should_block = is_matched_failure(xml_name, pref, xml_op);</a>
+<a name="ln112">                if (should_block) {</a>
+<a name="ln113">                    break;</a>
+<a name="ln114">                }</a>
+<a name="ln115"> </a>
+<a name="ln116">            } else {</a>
+<a name="ln117">                const char *conf_op_name = NULL;</a>
+<a name="ln118">                int conf_op_interval = 0;</a>
+<a name="ln119">                char *lrm_op_xpath = NULL;</a>
+<a name="ln120">                xmlXPathObject *lrm_op_xpathObj = NULL;</a>
+<a name="ln121"> </a>
+<a name="ln122">                conf_op_name = crm_element_value(pref, &quot;name&quot;);</a>
+<a name="ln123">                conf_op_interval = crm_get_msec(crm_element_value(pref, &quot;interval&quot;));</a>
+<a name="ln124"> </a>
+<a name="ln125">                lrm_op_xpath = crm_strdup_printf(&quot;//node_state[@uname='%s']&quot;</a>
+<a name="ln126">                                               &quot;//lrm_resource[@id='%s']&quot;</a>
+<a name="ln127">                                               &quot;/lrm_rsc_op[@operation='%s'][@interval='%d']&quot;,</a>
+<a name="ln128">                                               node-&gt;details-&gt;uname, xml_name,</a>
+<a name="ln129">                                               conf_op_name, conf_op_interval);</a>
+<a name="ln130">                lrm_op_xpathObj = xpath_search(data_set-&gt;input, lrm_op_xpath);</a>
+<a name="ln131"> </a>
+<a name="ln132">                free(lrm_op_xpath);</a>
+<a name="ln133"> </a>
+<a name="ln134">                if (lrm_op_xpathObj) {</a>
+<a name="ln135">                    int max2 = numXpathResults(lrm_op_xpathObj);</a>
+<a name="ln136">                    int lpc2 = 0;</a>
+<a name="ln137"> </a>
+<a name="ln138">                    for (lpc2 = 0; lpc2 &lt; max2; lpc2++) {</a>
+<a name="ln139">                        xmlNode *lrm_op_xml = getXpathResult(lrm_op_xpathObj,</a>
+<a name="ln140">                                                             lpc2);</a>
+<a name="ln141"> </a>
+<a name="ln142">                        should_block = is_matched_failure(xml_name, pref,</a>
+<a name="ln143">                                                          lrm_op_xml);</a>
+<a name="ln144">                        if (should_block) {</a>
+<a name="ln145">                            break;</a>
+<a name="ln146">                        }</a>
+<a name="ln147">                    }</a>
+<a name="ln148">                }</a>
+<a name="ln149">                freeXpathObject(lrm_op_xpathObj);</a>
+<a name="ln150"> </a>
+<a name="ln151">                if (should_block) {</a>
+<a name="ln152">                    break;</a>
+<a name="ln153">                }</a>
+<a name="ln154">            }</a>
+<a name="ln155">        }</a>
+<a name="ln156">    }</a>
+<a name="ln157"> </a>
+<a name="ln158">    free(xml_name);</a>
+<a name="ln159">    freeXpathObject(xpathObj);</a>
+<a name="ln160"> </a>
+<a name="ln161">    return should_block;</a>
+<a name="ln162">}</a>
+<a name="ln163"> </a>
+<a name="ln164">/*!</a>
+<a name="ln165"> * \internal</a>
+<a name="ln166"> * \brief Get resource name as used in failure-related node attributes</a>
+<a name="ln167"> *</a>
+<a name="ln168"> * \param[in] rsc  Resource to check</a>
+<a name="ln169"> *</a>
+<a name="ln170"> * \return Newly allocated string containing resource's fail name</a>
+<a name="ln171"> * \note The caller is responsible for freeing the result.</a>
+<a name="ln172"> */</a>
+<a name="ln173">static inline char *</a>
+<a name="ln174">rsc_fail_name(resource_t *rsc)</a>
+<a name="ln175">{</a>
+<a name="ln176">    const char *name = (rsc-&gt;clone_name? rsc-&gt;clone_name : rsc-&gt;id);</a>
+<a name="ln177"> </a>
+<a name="ln178">    return is_set(rsc-&gt;flags, pe_rsc_unique)? strdup(name) : clone_strip(name);</a>
+<a name="ln179">}</a>
+<a name="ln180"> </a>
+<a name="ln181">/*!</a>
+<a name="ln182"> * \internal</a>
+<a name="ln183"> * \brief Compile regular expression to match a failure-related node attribute</a>
+<a name="ln184"> *</a>
+<a name="ln185"> * \param[in]  prefix    Attribute prefix to match</a>
+<a name="ln186"> * \param[in]  rsc_name  Resource name to match as used in failure attributes</a>
+<a name="ln187"> * \param[in]  is_legacy Whether DC uses per-resource fail counts</a>
+<a name="ln188"> * \param[in]  is_unique Whether the resource is a globally unique clone</a>
+<a name="ln189"> * \param[out] re        Where to store resulting regular expression</a>
+<a name="ln190"> *</a>
+<a name="ln191"> * \note Fail attributes are named like PREFIX-RESOURCE#OP_INTERVAL.</a>
+<a name="ln192"> *       The caller is responsible for freeing re with regfree().</a>
+<a name="ln193"> */</a>
+<a name="ln194">static void</a>
+<a name="ln195">generate_fail_regex(const char *prefix, const char *rsc_name,</a>
+<a name="ln196">                    gboolean is_legacy, gboolean is_unique, regex_t *re)</a>
+<a name="ln197">{</a>
+<a name="ln198">    char *pattern;</a>
+<a name="ln199"> </a>
+<a name="ln200">    /* @COMPAT DC &lt; 1.1.17: Fail counts used to be per-resource rather than</a>
+<a name="ln201">     * per-operation.</a>
+<a name="ln202">     */</a>
+<a name="ln203">    const char *op_pattern = (is_legacy? &quot;&quot; : &quot;#.+_[0-9]+&quot;);</a>
+<a name="ln204"> </a>
+<a name="ln205">    /* Ignore instance numbers for anything other than globally unique clones.</a>
+<a name="ln206">     * Anonymous clone fail counts could contain an instance number if the</a>
+<a name="ln207">     * clone was initially unique, failed, then was converted to anonymous.</a>
+<a name="ln208">     * @COMPAT Also, before 1.1.8, anonymous clone fail counts always contained</a>
+<a name="ln209">     * clone instance numbers.</a>
+<a name="ln210">     */</a>
+<a name="ln211">    const char *instance_pattern = (is_unique? &quot;&quot; : &quot;(:[0-9]+)?&quot;);</a>
+<a name="ln212"> </a>
+<a name="ln213">    pattern = crm_strdup_printf(&quot;^%s-%s%s%s$&quot;, prefix, rsc_name,</a>
+<a name="ln214">                                instance_pattern, op_pattern);</a>
+<a name="ln215">    CRM_LOG_ASSERT(regcomp(re, pattern, REG_EXTENDED|REG_NOSUB) == 0);</a>
+<a name="ln216">    free(pattern);</a>
+<a name="ln217">}</a>
+<a name="ln218"> </a>
+<a name="ln219">/*!</a>
+<a name="ln220"> * \internal</a>
+<a name="ln221"> * \brief Compile regular expressions to match failure-related node attributes</a>
+<a name="ln222"> *</a>
+<a name="ln223"> * \param[in]  rsc             Resource being checked for failures</a>
+<a name="ln224"> * \param[in]  data_set        Data set (for CRM feature set version)</a>
+<a name="ln225"> * \param[out] failcount_re    Storage for regular expression for fail count</a>
+<a name="ln226"> * \param[out] lastfailure_re  Storage for regular expression for last failure</a>
+<a name="ln227"> *</a>
+<a name="ln228"> * \note The caller is responsible for freeing the expressions with regfree().</a>
+<a name="ln229"> */</a>
+<a name="ln230">static void</a>
+<a name="ln231">generate_fail_regexes(resource_t *rsc, pe_working_set_t *data_set,</a>
+<a name="ln232">                      regex_t *failcount_re, regex_t *lastfailure_re)</a>
+<a name="ln233">{</a>
+<a name="ln234">    char *rsc_name = rsc_fail_name(rsc);</a>
+<a name="ln235">    const char *version = crm_element_value(data_set-&gt;input, XML_ATTR_CRM_VERSION);</a>
+<a name="ln236">    gboolean is_legacy = (compare_version(version, &quot;3.0.13&quot;) &lt; 0);</a>
+<a name="ln237"> </a>
+<a name="ln238">    generate_fail_regex(CRM_FAIL_COUNT_PREFIX, rsc_name, is_legacy,</a>
+<a name="ln239">                        is_set(rsc-&gt;flags, pe_rsc_unique), failcount_re);</a>
+<a name="ln240"> </a>
+<a name="ln241">    generate_fail_regex(CRM_LAST_FAILURE_PREFIX, rsc_name, is_legacy,</a>
+<a name="ln242">                        is_set(rsc-&gt;flags, pe_rsc_unique), lastfailure_re);</a>
+<a name="ln243"> </a>
+<a name="ln244">    free(rsc_name);</a>
+<a name="ln245">}</a>
+<a name="ln246"> </a>
+<a name="ln247">int</a>
+<a name="ln248">get_failcount_full(node_t *node, resource_t *rsc, time_t *last_failure,</a>
+<a name="ln249">                   bool effective, xmlNode *xml_op, pe_working_set_t *data_set)</a>
+<a name="ln250">{</a>
+<a name="ln251">    char *key = NULL;</a>
+<a name="ln252">    const char *value = NULL;</a>
+<a name="ln253">    regex_t failcount_re, lastfailure_re;</a>
+<a name="ln254">    int failcount = 0;</a>
+<a name="ln255">    time_t last = 0;</a>
+<a name="ln256">    GHashTableIter iter;</a>
+<a name="ln257"> </a>
+<a name="ln258">    generate_fail_regexes(rsc, data_set, &amp;failcount_re, &amp;lastfailure_re);</a>
+<a name="ln259"> </a>
+<a name="ln260">    /* Resource fail count is sum of all matching operation fail counts */</a>
+<a name="ln261">    g_hash_table_iter_init(&amp;iter, node-&gt;details-&gt;attrs);</a>
+<a name="ln262">    while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp;key, (gpointer *) &amp;value)) {</a>
+<a name="ln263">        if (regexec(&amp;failcount_re, key, 0, NULL, 0) == 0) {</a>
+<a name="ln264">            failcount = merge_weights(failcount, char2score(value));</a>
+<a name="ln265">        } else if (regexec(&amp;lastfailure_re, key, 0, NULL, 0) == 0) {</a>
+<a name="ln266">            last = QB_MAX(last, crm_int_helper(value, NULL));</a>
+<a name="ln267">        }</a>
+<a name="ln268">    }</a>
+<a name="ln269"> </a>
+<a name="ln270">    regfree(&amp;failcount_re);</a>
+<a name="ln271">    regfree(&amp;lastfailure_re);</a>
+<a name="ln272"> </a>
+<a name="ln273">    if ((failcount &gt; 0) &amp;&amp; (last &gt; 0) &amp;&amp; (last_failure != NULL)) {</a>
+<a name="ln274">        *last_failure = last;</a>
+<a name="ln275">    }</a>
+<a name="ln276"> </a>
+<a name="ln277">    /* If failure blocks the resource, disregard any failure timeout */</a>
+<a name="ln278">    if ((failcount &gt; 0) &amp;&amp; rsc-&gt;failure_timeout</a>
+<a name="ln279">        &amp;&amp; block_failure(node, rsc, xml_op, data_set)) {</a>
+<a name="ln280"> </a>
+<a name="ln281">        pe_warn(&quot;Ignoring failure timeout %d for %s because it conflicts with on-fail=block&quot;,</a>
+<a name="ln282">                rsc-&gt;id, rsc-&gt;failure_timeout);</a>
+<a name="ln283">        rsc-&gt;failure_timeout = 0;</a>
+<a name="ln284">    }</a>
+<a name="ln285"> </a>
+<a name="ln286">    /* If all failures have expired, ignore fail count */</a>
+<a name="ln287">    if (effective &amp;&amp; (failcount &gt; 0) &amp;&amp; (last &gt; 0) &amp;&amp; rsc-&gt;failure_timeout) {</a>
+<a name="ln288">        time_t now = get_effective_time(data_set);</a>
+<a name="ln289"> </a>
+<a name="ln290">        if (now &gt; (last + rsc-&gt;failure_timeout)) {</a>
+<a name="ln291">            crm_debug(&quot;Failcount for %s on %s expired after %ds&quot;,</a>
+<a name="ln292">                      rsc-&gt;id, node-&gt;details-&gt;uname, rsc-&gt;failure_timeout);</a>
+<a name="ln293">            failcount = 0;</a>
+<a name="ln294">        }</a>
+<a name="ln295">    }</a>
+<a name="ln296"> </a>
+<a name="ln297">    if (failcount &gt; 0) {</a>
+<a name="ln298">        char *score = score2char(failcount);</a>
+<a name="ln299"> </a>
+<a name="ln300">        crm_info(&quot;%s has failed %s times on %s&quot;,</a>
+<a name="ln301">                 rsc-&gt;id, score, node-&gt;details-&gt;uname);</a>
+<a name="ln302">        free(score);</a>
+<a name="ln303">    }</a>
+<a name="ln304"> </a>
+<a name="ln305">    return failcount;</a>
+<a name="ln306">}</a>
+<a name="ln307"> </a>
+<a name="ln308">/* If it's a resource container, get its failcount plus all the failcounts of</a>
+<a name="ln309"> * the resources within it</a>
+<a name="ln310"> */</a>
+<a name="ln311">int</a>
+<a name="ln312">get_failcount_all(node_t *node, resource_t *rsc, time_t *last_failure,</a>
+<a name="ln313">                  pe_working_set_t *data_set)</a>
+<a name="ln314">{</a>
+<a name="ln315">    int failcount_all = 0;</a>
+<a name="ln316"> </a>
+<a name="ln317">    failcount_all = get_failcount(node, rsc, last_failure, data_set);</a>
+<a name="ln318"> </a>
+<a name="ln319">    if (rsc-&gt;fillers) {</a>
+<a name="ln320">        GListPtr gIter = NULL;</a>
+<a name="ln321"> </a>
+<a name="ln322">        for (gIter = rsc-&gt;fillers; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln323">            resource_t *filler = (resource_t *) gIter-&gt;data;</a>
+<a name="ln324">            time_t filler_last_failure = 0;</a>
+<a name="ln325"> </a>
+<a name="ln326">            failcount_all += get_failcount(node, filler, &amp;filler_last_failure,</a>
+<a name="ln327">                                           data_set);</a>
+<a name="ln328"> </a>
+<a name="ln329">            if (last_failure &amp;&amp; filler_last_failure &gt; *last_failure) {</a>
+<a name="ln330">                *last_failure = filler_last_failure;</a>
+<a name="ln331">            }</a>
+<a name="ln332">        }</a>
+<a name="ln333"> </a>
+<a name="ln334">        if (failcount_all != 0) {</a>
+<a name="ln335">            char *score = score2char(failcount_all);</a>
+<a name="ln336"> </a>
+<a name="ln337">            crm_info(&quot;Container %s and the resources within it have failed %s times on %s&quot;,</a>
+<a name="ln338">                     rsc-&gt;id, score, node-&gt;details-&gt;uname);</a>
+<a name="ln339">            free(score);</a>
+<a name="ln340">        }</a>
+<a name="ln341">    }</a>
+<a name="ln342"> </a>
+<a name="ln343">    return failcount_all;</a>
+<a name="ln344">}</a>
+
+</code></pre>
+<div class="balloon" rel="215"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

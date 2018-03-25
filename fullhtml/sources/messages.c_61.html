@@ -1,0 +1,1113 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;crm/crm.h&gt;</a>
+<a name="ln27">#include &lt;string.h&gt;</a>
+<a name="ln28">#include &lt;time.h&gt;</a>
+<a name="ln29">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln32">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln35">#include &lt;crm/cib.h&gt;</a>
+<a name="ln36">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;crmd.h&gt;</a>
+<a name="ln39">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln40">#include &lt;crmd_lrm.h&gt;</a>
+<a name="ln41">#include &lt;tengine.h&gt;</a>
+<a name="ln42">#include &lt;throttle.h&gt;</a>
+<a name="ln43"> </a>
+<a name="ln44">GListPtr fsa_message_queue = NULL;</a>
+<a name="ln45">extern void crm_shutdown(int nsig);</a>
+<a name="ln46"> </a>
+<a name="ln47">extern crm_ipc_t *attrd_ipc;</a>
+<a name="ln48">void handle_response(xmlNode * stored_msg);</a>
+<a name="ln49">enum crmd_fsa_input handle_request(xmlNode * stored_msg, enum crmd_fsa_cause cause);</a>
+<a name="ln50">enum crmd_fsa_input handle_shutdown_request(xmlNode * stored_msg);</a>
+<a name="ln51"> </a>
+<a name="ln52">#define ROUTER_RESULT(x)	crm_trace(&quot;Router result: %s&quot;, x)</a>
+<a name="ln53"> </a>
+<a name="ln54">/* debug only, can wrap all it likes */</a>
+<a name="ln55">int last_data_id = 0;</a>
+<a name="ln56"> </a>
+<a name="ln57">void</a>
+<a name="ln58">register_fsa_error_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,</a>
+<a name="ln59">                       fsa_data_t * cur_data, void *new_data, const char *raised_from)</a>
+<a name="ln60">{</a>
+<a name="ln61">    /* save the current actions if any */</a>
+<a name="ln62">    if (fsa_actions != A_NOTHING) {</a>
+<a name="ln63">        register_fsa_input_adv(cur_data ? cur_data-&gt;fsa_cause : C_FSA_INTERNAL,</a>
+<a name="ln64">                               I_NULL, cur_data ? cur_data-&gt;data : NULL,</a>
+<a name="ln65">                               fsa_actions, TRUE, __FUNCTION__);</a>
+<a name="ln66">    }</a>
+<a name="ln67"> </a>
+<a name="ln68">    /* reset the action list */</a>
+<a name="ln69">    crm_info(&quot;Resetting the current action list&quot;);</a>
+<a name="ln70">    fsa_dump_actions(fsa_actions, &quot;Drop&quot;);</a>
+<a name="ln71">    fsa_actions = A_NOTHING;</a>
+<a name="ln72"> </a>
+<a name="ln73">    /* register the error */</a>
+<a name="ln74">    register_fsa_input_adv(cause, input, new_data, A_NOTHING, TRUE, raised_from);</a>
+<a name="ln75">}</a>
+<a name="ln76"> </a>
+<a name="ln77">int</a>
+<a name="ln78">register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,</a>
+<a name="ln79">                       void *data, long long with_actions,</a>
+<a name="ln80">                       gboolean prepend, const char *raised_from)</a>
+<a name="ln81">{</a>
+<a name="ln82">    unsigned old_len = g_list_length(fsa_message_queue);</a>
+<a name="ln83">    fsa_data_t *fsa_data = NULL;</a>
+<a name="ln84"> </a>
+<a name="ln85">    CRM_CHECK(raised_from != NULL, raised_from = &quot;&lt;unknown&gt;&quot;);</a>
+<a name="ln86"> </a>
+<a name="ln87">    if (input == I_NULL &amp;&amp; with_actions == A_NOTHING /* &amp;&amp; data == NULL */ ) {</a>
+<a name="ln88">        /* no point doing anything */</a>
+<a name="ln89">        crm_err(&quot;Cannot add entry to queue: no input and no action&quot;);</a>
+<a name="ln90">        return 0;</a>
+<a name="ln91">    }</a>
+<a name="ln92"> </a>
+<a name="ln93">    if (input == I_WAIT_FOR_EVENT) {</a>
+<a name="ln94">        do_fsa_stall = TRUE;</a>
+<a name="ln95">        crm_debug(&quot;Stalling the FSA pending further input: source=%s cause=%s data=%p queue=%d&quot;,</a>
+<a name="ln96">                  raised_from, fsa_cause2string(cause), data, old_len);</a>
+<a name="ln97"> </a>
+<a name="ln98">        if (old_len &gt; 0) {</a>
+<a name="ln99">            fsa_dump_queue(LOG_TRACE);</a>
+<a name="ln100">            prepend = FALSE;</a>
+<a name="ln101">        }</a>
+<a name="ln102"> </a>
+<a name="ln103">        if (data == NULL) {</a>
+<a name="ln104">            fsa_actions |= with_actions;</a>
+<a name="ln105">            fsa_dump_actions(with_actions, &quot;Restored&quot;);</a>
+<a name="ln106">            return 0;</a>
+<a name="ln107">        }</a>
+<a name="ln108"> </a>
+<a name="ln109">        /* Store everything in the new event and reset fsa_actions */</a>
+<a name="ln110">        with_actions |= fsa_actions;</a>
+<a name="ln111">        fsa_actions = A_NOTHING;</a>
+<a name="ln112">    }</a>
+<a name="ln113"> </a>
+<a name="ln114">    last_data_id++;</a>
+<a name="ln115">    crm_trace(&quot;%s %s FSA input %d (%s) (cause=%s) %s data&quot;,</a>
+<a name="ln116">              raised_from, prepend ? &quot;prepended&quot; : &quot;appended&quot;, last_data_id,</a>
+<a name="ln117">              fsa_input2string(input), fsa_cause2string(cause), data ? &quot;with&quot; : &quot;without&quot;);</a>
+<a name="ln118"> </a>
+<a name="ln119">    fsa_data = calloc(1, sizeof(fsa_data_t));</a>
+<a name="ln120">    fsa_data-&gt;id = last_data_id;</a>
+<a name="ln121">    fsa_data-&gt;fsa_input = input;</a>
+<a name="ln122">    fsa_data-&gt;fsa_cause = cause;</a>
+<a name="ln123">    fsa_data-&gt;origin = raised_from;</a>
+<a name="ln124">    fsa_data-&gt;data = NULL;</a>
+<a name="ln125">    fsa_data-&gt;data_type = fsa_dt_none;</a>
+<a name="ln126">    fsa_data-&gt;actions = with_actions;</a>
+<a name="ln127"> </a>
+<a name="ln128">    if (with_actions != A_NOTHING) {</a>
+<a name="ln129">        crm_trace(&quot;Adding actions %.16llx to input&quot;, with_actions);</a>
+<a name="ln130">    }</a>
+<a name="ln131"> </a>
+<a name="ln132">    if (data != NULL) {</a>
+<a name="ln133">        switch (cause) {</a>
+<a name="ln134">            case C_FSA_INTERNAL:</a>
+<a name="ln135">            case C_CRMD_STATUS_CALLBACK:</a>
+<a name="ln136">            case C_IPC_MESSAGE:</a>
+<a name="ln137">            case C_HA_MESSAGE:</a>
+<a name="ln138">                crm_trace(&quot;Copying %s data from %s as a HA msg&quot;,</a>
+<a name="ln139">                          fsa_cause2string(cause), raised_from);</a>
+<a name="ln140">                CRM_CHECK(((ha_msg_input_t *) data)-&gt;msg != NULL,</a>
+<a name="ln141">                          crm_err(&quot;Bogus data from %s&quot;, raised_from));</a>
+<a name="ln142">                fsa_data-&gt;data = copy_ha_msg_input(data);</a>
+<a name="ln143">                fsa_data-&gt;data_type = fsa_dt_ha_msg;</a>
+<a name="ln144">                break;</a>
+<a name="ln145"> </a>
+<a name="ln146">            case C_LRM_OP_CALLBACK:</a>
+<a name="ln147">                crm_trace(&quot;Copying %s data from %s as lrmd_event_data_t&quot;,</a>
+<a name="ln148">                          fsa_cause2string(cause), raised_from);</a>
+<a name="ln149">                fsa_data-&gt;data = lrmd_copy_event((lrmd_event_data_t *) data);</a>
+<a name="ln150">                fsa_data-&gt;data_type = fsa_dt_lrm;</a>
+<a name="ln151">                break;</a>
+<a name="ln152"> </a>
+<a name="ln153">            case C_CCM_CALLBACK:</a>
+<a name="ln154">            case C_SUBSYSTEM_CONNECT:</a>
+<a name="ln155">            case C_LRM_MONITOR_CALLBACK:</a>
+<a name="ln156">            case C_TIMER_POPPED:</a>
+<a name="ln157">            case C_SHUTDOWN:</a>
+<a name="ln158">            case C_HEARTBEAT_FAILED:</a>
+<a name="ln159">            case C_HA_DISCONNECT:</a>
+<a name="ln160">            case C_ILLEGAL:</a>
+<a name="ln161">            case C_UNKNOWN:</a>
+<a name="ln162">            case C_STARTUP:</a>
+<a name="ln163">                crm_err(&quot;Copying %s data (from %s)&quot;</a>
+<a name="ln164">                        &quot; not yet implemented&quot;, fsa_cause2string(cause), raised_from);</a>
+<a name="ln165">                crmd_exit(pcmk_err_generic);</a>
+<a name="ln166">                break;</a>
+<a name="ln167">        }</a>
+<a name="ln168">        crm_trace(&quot;%s data copied&quot;, fsa_cause2string(fsa_data-&gt;fsa_cause));</a>
+<a name="ln169">    }</a>
+<a name="ln170"> </a>
+<a name="ln171">    /* make sure to free it properly later */</a>
+<a name="ln172">    if (prepend) {</a>
+<a name="ln173">        crm_trace(&quot;Prepending input&quot;);</a>
+<a name="ln174">        fsa_message_queue = g_list_prepend(fsa_message_queue, fsa_data);</a>
+<a name="ln175">    } else {</a>
+<a name="ln176">        fsa_message_queue = g_list_append(fsa_message_queue, fsa_data);</a>
+<a name="ln177">    }</a>
+<a name="ln178"> </a>
+<a name="ln179">    crm_trace(&quot;Queue len: %d&quot;, g_list_length(fsa_message_queue));</a>
+<a name="ln180"> </a>
+<a name="ln181">    /* fsa_dump_queue(LOG_DEBUG_2); */</a>
+<a name="ln182"> </a>
+<a name="ln183">    if (old_len == g_list_length(fsa_message_queue)) {</a>
+<a name="ln184">        crm_err(&quot;Couldn't add message to the queue&quot;);</a>
+<a name="ln185">    }</a>
+<a name="ln186"> </a>
+<a name="ln187">    if (fsa_source &amp;&amp; input != I_WAIT_FOR_EVENT) {</a>
+<a name="ln188">        crm_trace(&quot;Triggering FSA: %s&quot;, __FUNCTION__);</a>
+<a name="ln189">        mainloop_set_trigger(fsa_source);</a>
+<a name="ln190">    }</a>
+<a name="ln191">    return last_data_id;</a>
+<a name="ln192">}</a>
+<a name="ln193"> </a>
+<a name="ln194">void</a>
+<a name="ln195">fsa_dump_queue(int log_level)</a>
+<a name="ln196">{</a>
+<a name="ln197">    int offset = 0;</a>
+<a name="ln198">    GListPtr lpc = NULL;</a>
+<a name="ln199"> </a>
+<a name="ln200">    for (lpc = fsa_message_queue; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln201">        fsa_data_t *data = (fsa_data_t *) lpc-&gt;data;</a>
+<a name="ln202"> </a>
+<a name="ln203">        do_crm_log_unlikely(log_level,</a>
+<a name="ln204">                            &quot;queue[%d.%d]: input %s raised by %s(%p.%d)\t(cause=%s)&quot;,</a>
+<a name="ln205">                            offset++, data-&gt;id, fsa_input2string(data-&gt;fsa_input),</a>
+<a name="ln206">                            data-&gt;origin, data-&gt;data, data-&gt;data_type,</a>
+<a name="ln207">                            fsa_cause2string(data-&gt;fsa_cause));</a>
+<a name="ln208">    }</a>
+<a name="ln209">}</a>
+<a name="ln210"> </a>
+<a name="ln211">ha_msg_input_t *</a>
+<a name="ln212">copy_ha_msg_input(ha_msg_input_t * orig)</a>
+<a name="ln213">{</a>
+<a name="ln214">    ha_msg_input_t *copy = NULL;</a>
+<a name="ln215">    xmlNodePtr data = NULL;</a>
+<a name="ln216"> </a>
+<a name="ln217">    if (orig != NULL) {</a>
+<a name="ln218">        crm_trace(&quot;Copy msg&quot;);</a>
+<a name="ln219">        data = copy_xml(orig-&gt;msg);</a>
+<a name="ln220"> </a>
+<a name="ln221">    } else {</a>
+<a name="ln222">        crm_trace(&quot;No message to copy&quot;);</a>
+<a name="ln223">    }</a>
+<a name="ln224">    copy = new_ha_msg_input(data);</a>
+<a name="ln225">    if (orig &amp;&amp; orig-&gt;msg != NULL) {</a>
+<a name="ln226">        CRM_CHECK(copy-&gt;msg != NULL, crm_err(&quot;copy failed&quot;));</a>
+<a name="ln227">    }</a>
+<a name="ln228">    return copy;</a>
+<a name="ln229">}</a>
+<a name="ln230"> </a>
+<a name="ln231">void</a>
+<a name="ln232">delete_fsa_input(fsa_data_t * fsa_data)</a>
+<a name="ln233">{</a>
+<a name="ln234">    lrmd_event_data_t *op = NULL;</a>
+<a name="ln235">    xmlNode *foo = NULL;</a>
+<a name="ln236"> </a>
+<a name="ln237">    if (fsa_data == NULL) {</a>
+<a name="ln238">        return;</a>
+<a name="ln239">    }</a>
+<a name="ln240">    crm_trace(&quot;About to free %s data&quot;, fsa_cause2string(fsa_data-&gt;fsa_cause));</a>
+<a name="ln241"> </a>
+<a name="ln242">    if (fsa_data-&gt;data != NULL) {</a>
+<a name="ln243">        switch (fsa_data-&gt;data_type) {</a>
+<a name="ln244">            case fsa_dt_ha_msg:</a>
+<a name="ln245">                delete_ha_msg_input(fsa_data-&gt;data);</a>
+<a name="ln246">                break;</a>
+<a name="ln247"> </a>
+<a name="ln248">            case fsa_dt_xml:</a>
+<a name="ln249">                foo = fsa_data-&gt;data;</a>
+<a name="ln250">                free_xml(foo);</a>
+<a name="ln251">                break;</a>
+<a name="ln252"> </a>
+<a name="ln253">            case fsa_dt_lrm:</a>
+<a name="ln254">                op = (lrmd_event_data_t *) fsa_data-&gt;data;</a>
+<a name="ln255">                lrmd_free_event(op);</a>
+<a name="ln256">                break;</a>
+<a name="ln257"> </a>
+<a name="ln258">            case fsa_dt_none:</a>
+<a name="ln259">                if (fsa_data-&gt;data != NULL) {</a>
+<a name="ln260">                    crm_err(&quot;Don't know how to free %s data from %s&quot;,</a>
+<a name="ln261">                            fsa_cause2string(fsa_data-&gt;fsa_cause), fsa_data-&gt;origin);</a>
+<a name="ln262">                    crmd_exit(pcmk_err_generic);</a>
+<a name="ln263">                }</a>
+<a name="ln264">                break;</a>
+<a name="ln265">        }</a>
+<a name="ln266">        crm_trace(&quot;%s data freed&quot;, fsa_cause2string(fsa_data-&gt;fsa_cause));</a>
+<a name="ln267">    }</a>
+<a name="ln268"> </a>
+<a name="ln269">    free(fsa_data);</a>
+<a name="ln270">}</a>
+<a name="ln271"> </a>
+<a name="ln272">/* returns the next message */</a>
+<a name="ln273">fsa_data_t *</a>
+<a name="ln274">get_message(void)</a>
+<a name="ln275">{</a>
+<a name="ln276">    fsa_data_t *message = g_list_nth_data(fsa_message_queue, 0);</a>
+<a name="ln277"> </a>
+<a name="ln278">    fsa_message_queue = g_list_remove(fsa_message_queue, message);</a>
+<a name="ln279">    crm_trace(&quot;Processing input %d&quot;, message-&gt;id);</a>
+<a name="ln280">    return message;</a>
+<a name="ln281">}</a>
+<a name="ln282"> </a>
+<a name="ln283">/* returns the current head of the FIFO queue */</a>
+<a name="ln284">gboolean</a>
+<a name="ln285">is_message(void)</a>
+<a name="ln286">{</a>
+<a name="ln287">    return (g_list_length(fsa_message_queue) &gt; 0);</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">void *</a>
+<a name="ln291">fsa_typed_data_adv(fsa_data_t * fsa_data, enum fsa_data_type a_type, const char *caller)</a>
+<a name="ln292">{</a>
+<a name="ln293">    void *ret_val = NULL;</a>
+<a name="ln294"> </a>
+<a name="ln295">    if (fsa_data == NULL) {</a>
+<a name="ln296">        crm_err(&quot;%s: No FSA data available&quot;, caller);</a>
+<a name="ln297"> </a>
+<a name="ln298">    } else if (fsa_data-&gt;data == NULL) {</a>
+<a name="ln299">        crm_err(&quot;%s: No message data available. Origin: %s&quot;, caller, fsa_data-&gt;origin);</a>
+<a name="ln300"> </a>
+<a name="ln301">    } else if (fsa_data-&gt;data_type != a_type) {</a>
+<a name="ln302">        crm_crit(&quot;%s: Message data was the wrong type! %d vs. requested=%d.  Origin: %s&quot;,</a>
+<a name="ln303">                 caller, fsa_data-&gt;data_type, a_type, fsa_data-&gt;origin);</a>
+<a name="ln304">        CRM_ASSERT(fsa_data-&gt;data_type == a_type);</a>
+<a name="ln305">    } else {</a>
+<a name="ln306">        ret_val = fsa_data-&gt;data;</a>
+<a name="ln307">    }</a>
+<a name="ln308"> </a>
+<a name="ln309">    return ret_val;</a>
+<a name="ln310">}</a>
+<a name="ln311"> </a>
+<a name="ln312">/*	A_MSG_ROUTE	*/</a>
+<a name="ln313">void</a>
+<a name="ln314">do_msg_route(long long action,</a>
+<a name="ln315">             enum crmd_fsa_cause cause,</a>
+<a name="ln316">             enum crmd_fsa_state cur_state,</a>
+<a name="ln317">             enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln318">{</a>
+<a name="ln319">    ha_msg_input_t *input = fsa_typed_data(fsa_dt_ha_msg);</a>
+<a name="ln320"> </a>
+<a name="ln321">    route_message(msg_data-&gt;fsa_cause, input-&gt;msg);</a>
+<a name="ln322">}</a>
+<a name="ln323"> </a>
+<a name="ln324">void</a>
+<a name="ln325">route_message(enum crmd_fsa_cause cause, xmlNode * input)</a>
+<a name="ln326">{</a>
+<a name="ln327">    ha_msg_input_t fsa_input;</a>
+<a name="ln328">    enum crmd_fsa_input result = I_NULL;</a>
+<a name="ln329"> </a>
+<a name="ln330">    fsa_input.msg = input;</a>
+<a name="ln331">    CRM_CHECK(cause == C_IPC_MESSAGE || cause == C_HA_MESSAGE, return);</a>
+<a name="ln332"> </a>
+<a name="ln333">    /* try passing the buck first */</a>
+<a name="ln334">    if (relay_message(input, cause == C_IPC_MESSAGE)) {</a>
+<a name="ln335">        return;</a>
+<a name="ln336">    }</a>
+<a name="ln337"> </a>
+<a name="ln338">    /* handle locally */</a>
+<a name="ln339">    result = handle_message(input, cause);</a>
+<a name="ln340"> </a>
+<a name="ln341">    /* done or process later? */</a>
+<a name="ln342">    switch (result) {</a>
+<a name="ln343">        case I_NULL:</a>
+<a name="ln344">        case I_CIB_OP:</a>
+<a name="ln345">        case I_ROUTER:</a>
+<a name="ln346">        case I_NODE_JOIN:</a>
+<a name="ln347">        case I_JOIN_REQUEST:</a>
+<a name="ln348">        case I_JOIN_RESULT:</a>
+<a name="ln349">            break;</a>
+<a name="ln350">        default:</a>
+<a name="ln351">            /* Defering local processing of message */</a>
+<a name="ln352">            register_fsa_input_later(cause, result, &amp;fsa_input);</a>
+<a name="ln353">            return;</a>
+<a name="ln354">    }</a>
+<a name="ln355"> </a>
+<a name="ln356">    if (result != I_NULL) {</a>
+<a name="ln357">        /* add to the front of the queue */</a>
+<a name="ln358">        register_fsa_input(cause, result, &amp;fsa_input);</a>
+<a name="ln359">    }</a>
+<a name="ln360">}</a>
+<a name="ln361"> </a>
+<a name="ln362">gboolean</a>
+<a name="ln363">relay_message(xmlNode * msg, gboolean originated_locally)</a>
+<a name="ln364">{</a>
+<a name="ln365">    int dest = 1;</a>
+<a name="ln366">    int is_for_dc = 0;</a>
+<a name="ln367">    int is_for_dcib = 0;</a>
+<a name="ln368">    int is_for_te = 0;</a>
+<a name="ln369">    int is_for_crm = 0;</a>
+<a name="ln370">    int is_for_cib = 0;</a>
+<a name="ln371">    int is_local = 0;</a>
+<a name="ln372">    gboolean processing_complete = FALSE;</a>
+<a name="ln373">    const char *host_to = crm_element_value(msg, F_CRM_HOST_TO);</a>
+<a name="ln374">    const char *sys_to = crm_element_value(msg, F_CRM_SYS_TO);</a>
+<a name="ln375">    const char *sys_from = crm_element_value(msg, F_CRM_SYS_FROM);</a>
+<a name="ln376">    const char *type = crm_element_value(msg, F_TYPE);</a>
+<a name="ln377">    const char *msg_error = NULL;</a>
+<a name="ln378"> </a>
+<a name="ln379">    crm_trace(&quot;Routing message %s&quot;, crm_element_value(msg, XML_ATTR_REFERENCE));</a>
+<a name="ln380"> </a>
+<a name="ln381">    if (msg == NULL) {</a>
+<a name="ln382">        msg_error = &quot;Cannot route empty message&quot;;</a>
+<a name="ln383"> </a>
+<a name="ln384">    } else if (safe_str_eq(CRM_OP_HELLO, crm_element_value(msg, F_CRM_TASK))) {</a>
+<a name="ln385">        /* quietly ignore */</a>
+<a name="ln386">        processing_complete = TRUE;</a>
+<a name="ln387"> </a>
+<a name="ln388">    } else if (safe_str_neq(type, T_CRM)) {</a>
+<a name="ln389">        msg_error = &quot;Bad message type&quot;;</a>
+<a name="ln390"> </a>
+<a name="ln391">    } else if (sys_to == NULL) {</a>
+<a name="ln392">        msg_error = &quot;Bad message destination: no subsystem&quot;;</a>
+<a name="ln393">    }</a>
+<a name="ln394"> </a>
+<a name="ln395">    if (msg_error != NULL) {</a>
+<a name="ln396">        processing_complete = TRUE;</a>
+<a name="ln397">        crm_err(&quot;%s&quot;, msg_error);</a>
+<a name="ln398">        crm_log_xml_warn(msg, &quot;bad msg&quot;);</a>
+<a name="ln399">    }</a>
+<a name="ln400"> </a>
+<a name="ln401">    if (processing_complete) {</a>
+<a name="ln402">        return TRUE;</a>
+<a name="ln403">    }</a>
+<a name="ln404"> </a>
+<a name="ln405">    processing_complete = TRUE;</a>
+<a name="ln406"> </a>
+<a name="ln407">    is_for_dc = (strcasecmp(CRM_SYSTEM_DC, sys_to) == 0);</a>
+<a name="ln408">    is_for_dcib = (strcasecmp(CRM_SYSTEM_DCIB, sys_to) == 0);</a>
+<a name="ln409">    is_for_te = (strcasecmp(CRM_SYSTEM_TENGINE, sys_to) == 0);</a>
+<a name="ln410">    is_for_cib = (strcasecmp(CRM_SYSTEM_CIB, sys_to) == 0);</a>
+<a name="ln411">    is_for_crm = (strcasecmp(CRM_SYSTEM_CRMD, sys_to) == 0);</a>
+<a name="ln412"> </a>
+<a name="ln413">    is_local = 0;</a>
+<a name="ln414">    if (host_to == NULL || strlen(host_to) == 0) {</a>
+<a name="ln415">        if (is_for_dc || is_for_te) {</a>
+<a name="ln416">            is_local = 0;</a>
+<a name="ln417"> </a>
+<a name="ln418">        } else if (is_for_crm &amp;&amp; originated_locally) {</a>
+<a name="ln419">            is_local = 0;</a>
+<a name="ln420"> </a>
+<a name="ln421">        } else {</a>
+<a name="ln422">            is_local = 1;</a>
+<a name="ln423">        }</a>
+<a name="ln424"> </a>
+<a name="ln425">    } else if (safe_str_eq(fsa_our_uname, host_to)) {</a>
+<a name="ln426">        is_local = 1;</a>
+<a name="ln427">    }</a>
+<a name="ln428"> </a>
+<a name="ln429">    if (is_for_dc || is_for_dcib || is_for_te) {</a>
+<a name="ln430">        if (AM_I_DC &amp;&amp; is_for_te) {</a>
+<a name="ln431">            ROUTER_RESULT(&quot;Message result: Local relay&quot;);</a>
+<a name="ln432">            send_msg_via_ipc(msg, sys_to);</a>
+<a name="ln433"> </a>
+<a name="ln434">        } else if (AM_I_DC) {</a>
+<a name="ln435">            ROUTER_RESULT(&quot;Message result: DC/CRMd process&quot;);</a>
+<a name="ln436">            processing_complete = FALSE;        /* more to be done by caller */</a>
+<a name="ln437">        } else if (originated_locally &amp;&amp; safe_str_neq(sys_from, CRM_SYSTEM_PENGINE)</a>
+<a name="ln438">                   &amp;&amp; safe_str_neq(sys_from, CRM_SYSTEM_TENGINE)) {</a>
+<a name="ln439"> </a>
+<a name="ln440">            /* Neither the TE or PE should be sending messages</a>
+<a name="ln441">             *   to DC's on other nodes</a>
+<a name="ln442">             *</a>
+<a name="ln443">             * By definition, if we are no longer the DC, then</a>
+<a name="ln444">             *   the PE or TE's data should be discarded</a>
+<a name="ln445">             */</a>
+<a name="ln446"> </a>
+<a name="ln447">#if SUPPORT_COROSYNC</a>
+<a name="ln448">            if (is_openais_cluster()) {</a>
+<a name="ln449">                dest = text2msg_type(sys_to);</a>
+<a name="ln450">            }</a>
+<a name="ln451">#endif</a>
+<a name="ln452">            ROUTER_RESULT(&quot;Message result: External relay to DC&quot;);</a>
+<a name="ln453">            send_cluster_message(host_to ? crm_get_peer(0, host_to) : NULL, dest, msg, TRUE);</a>
+<a name="ln454"> </a>
+<a name="ln455">        } else {</a>
+<a name="ln456">            /* discard */</a>
+<a name="ln457">            ROUTER_RESULT(&quot;Message result: Discard, not DC&quot;);</a>
+<a name="ln458">        }</a>
+<a name="ln459"> </a>
+<a name="ln460">    } else if (is_local &amp;&amp; (is_for_crm || is_for_cib)) {</a>
+<a name="ln461">        ROUTER_RESULT(&quot;Message result: CRMd process&quot;);</a>
+<a name="ln462">        processing_complete = FALSE;    /* more to be done by caller */</a>
+<a name="ln463"> </a>
+<a name="ln464">    } else if (is_local) {</a>
+<a name="ln465">        ROUTER_RESULT(&quot;Message result: Local relay&quot;);</a>
+<a name="ln466">        send_msg_via_ipc(msg, sys_to);</a>
+<a name="ln467"> </a>
+<a name="ln468">    } else {</a>
+<a name="ln469">        crm_node_t *node_to = NULL;</a>
+<a name="ln470"> </a>
+<a name="ln471">#if SUPPORT_COROSYNC</a>
+<a name="ln472">        if (is_openais_cluster()) {</a>
+<a name="ln473">            dest = text2msg_type(sys_to);</a>
+<a name="ln474"> </a>
+<a name="ln475">            if (dest == crm_msg_none || dest &gt; crm_msg_stonith_ng) {</a>
+<a name="ln476">                dest = crm_msg_crmd;</a>
+<a name="ln477">            }</a>
+<a name="ln478">        }</a>
+<a name="ln479">#endif</a>
+<a name="ln480"> </a>
+<a name="ln481">        if (host_to) {</a>
+<a name="ln482">            node_to = crm_find_peer(0, host_to);</a>
+<a name="ln483">            if (node_to == NULL) {</a>
+<a name="ln484">               crm_err(&quot;Cannot route message to unknown node %s&quot;, host_to);</a>
+<a name="ln485">               return TRUE;</a>
+<a name="ln486">            }</a>
+<a name="ln487">        }</a>
+<a name="ln488"> </a>
+<a name="ln489">        ROUTER_RESULT(&quot;Message result: External relay&quot;);</a>
+<a name="ln490">        send_cluster_message(host_to ? node_to : NULL, dest, msg, TRUE);</a>
+<a name="ln491">    }</a>
+<a name="ln492"> </a>
+<a name="ln493">    return processing_complete;</a>
+<a name="ln494">}</a>
+<a name="ln495"> </a>
+<a name="ln496">static gboolean</a>
+<a name="ln497">process_hello_message(xmlNode * hello,</a>
+<a name="ln498">                      char **client_name, char **major_version, char **minor_version)</a>
+<a name="ln499">{</a>
+<a name="ln500">    const char *local_client_name;</a>
+<a name="ln501">    const char *local_major_version;</a>
+<a name="ln502">    const char *local_minor_version;</a>
+<a name="ln503"> </a>
+<a name="ln504">    *client_name = NULL;</a>
+<a name="ln505">    *major_version = NULL;</a>
+<a name="ln506">    *minor_version = NULL;</a>
+<a name="ln507"> </a>
+<a name="ln508">    if (hello == NULL) {</a>
+<a name="ln509">        return FALSE;</a>
+<a name="ln510">    }</a>
+<a name="ln511"> </a>
+<a name="ln512">    local_client_name = crm_element_value(hello, &quot;client_name&quot;);</a>
+<a name="ln513">    local_major_version = crm_element_value(hello, &quot;major_version&quot;);</a>
+<a name="ln514">    local_minor_version = crm_element_value(hello, &quot;minor_version&quot;);</a>
+<a name="ln515"> </a>
+<a name="ln516">    if (local_client_name == NULL || strlen(local_client_name) == 0) {</a>
+<a name="ln517">        crm_err(&quot;Hello message was not valid (field %s not found)&quot;, &quot;client name&quot;);</a>
+<a name="ln518">        return FALSE;</a>
+<a name="ln519"> </a>
+<a name="ln520">    } else if (local_major_version == NULL || strlen(local_major_version) == 0) {</a>
+<a name="ln521">        crm_err(&quot;Hello message was not valid (field %s not found)&quot;, &quot;major version&quot;);</a>
+<a name="ln522">        return FALSE;</a>
+<a name="ln523"> </a>
+<a name="ln524">    } else if (local_minor_version == NULL || strlen(local_minor_version) == 0) {</a>
+<a name="ln525">        crm_err(&quot;Hello message was not valid (field %s not found)&quot;, &quot;minor version&quot;);</a>
+<a name="ln526">        return FALSE;</a>
+<a name="ln527">    }</a>
+<a name="ln528"> </a>
+<a name="ln529">    *client_name = strdup(local_client_name);</a>
+<a name="ln530">    *major_version = strdup(local_major_version);</a>
+<a name="ln531">    *minor_version = strdup(local_minor_version);</a>
+<a name="ln532"> </a>
+<a name="ln533">    crm_trace(&quot;Hello message ok&quot;);</a>
+<a name="ln534">    return TRUE;</a>
+<a name="ln535">}</a>
+<a name="ln536"> </a>
+<a name="ln537">gboolean</a>
+<a name="ln538">crmd_authorize_message(xmlNode * client_msg, crm_client_t * curr_client, const char *proxy_session)</a>
+<a name="ln539">{</a>
+<a name="ln540">    char *client_name = NULL;</a>
+<a name="ln541">    char *major_version = NULL;</a>
+<a name="ln542">    char *minor_version = NULL;</a>
+<a name="ln543">    gboolean auth_result = FALSE;</a>
+<a name="ln544"> </a>
+<a name="ln545">    xmlNode *xml = NULL;</a>
+<a name="ln546">    const char *op = crm_element_value(client_msg, F_CRM_TASK);</a>
+<a name="ln547">    const char *uuid = curr_client ? curr_client-&gt;id : proxy_session;</a>
+<a name="ln548"> </a>
+<a name="ln549">    if (uuid == NULL) {</a>
+<a name="ln550">        crm_warn(&quot;Message [%s] not authorized&quot;, crm_element_value(client_msg, XML_ATTR_REFERENCE));</a>
+<a name="ln551">        return FALSE;</a>
+<a name="ln552"> </a>
+<a name="ln553">    } else if (safe_str_neq(CRM_OP_HELLO, op)) {</a>
+<a name="ln554">        return TRUE;</a>
+<a name="ln555">    }</a>
+<a name="ln556"> </a>
+<a name="ln557">    xml = get_message_xml(client_msg, F_CRM_DATA);</a>
+<a name="ln558">    auth_result = process_hello_message(xml, &amp;client_name, &amp;major_version, &amp;minor_version);</a>
+<a name="ln559"> </a>
+<a name="ln560">    if (auth_result == TRUE) {</a>
+<a name="ln561">        if (client_name == NULL) {</a>
+<a name="ln562">            crm_err(&quot;Bad client details (client_name=%s, uuid=%s)&quot;,</a>
+<a name="ln563">                    crm_str(client_name), uuid);</a>
+<a name="ln564">            auth_result = FALSE;</a>
+<a name="ln565">        }</a>
+<a name="ln566">    }</a>
+<a name="ln567"> </a>
+<a name="ln568">    if (auth_result == TRUE) {</a>
+<a name="ln569">        /* check version */</a>
+<a name="ln570">        int mav = atoi(major_version);</a>
+<a name="ln571">        int miv = atoi(minor_version);</a>
+<a name="ln572"> </a>
+<a name="ln573">        crm_trace(&quot;Checking client version number&quot;);</a>
+<a name="ln574">        if (mav &lt; 0 || miv &lt; 0) {</a>
+<a name="ln575">            crm_err(&quot;Client version (%d:%d) is not acceptable&quot;, mav, miv);</a>
+<a name="ln576">            auth_result = FALSE;</a>
+<a name="ln577">        }</a>
+<a name="ln578">    }</a>
+<a name="ln579"> </a>
+<a name="ln580">    if (auth_result == TRUE) {</a>
+<a name="ln581">        crm_trace(&quot;Accepted client %s&quot;, client_name);</a>
+<a name="ln582">        if (curr_client) {</a>
+<a name="ln583">            curr_client-&gt;userdata = strdup(client_name);</a>
+<a name="ln584">        }</a>
+<a name="ln585"> </a>
+<a name="ln586">        crm_trace(&quot;Triggering FSA: %s&quot;, __FUNCTION__);</a>
+<a name="ln587">        mainloop_set_trigger(fsa_source);</a>
+<a name="ln588"> </a>
+<a name="ln589">    } else {</a>
+<a name="ln590">        crm_warn(&quot;Rejected client logon request&quot;);</a>
+<a name="ln591">        if (curr_client) {</a>
+<a name="ln592">            qb_ipcs_disconnect(curr_client-&gt;ipcs);</a>
+<a name="ln593">        }</a>
+<a name="ln594">    }</a>
+<a name="ln595"> </a>
+<a name="ln596">    free(minor_version);</a>
+<a name="ln597">    free(major_version);</a>
+<a name="ln598">    free(client_name);</a>
+<a name="ln599"> </a>
+<a name="ln600">    /* hello messages should never be processed further */</a>
+<a name="ln601">    return FALSE;</a>
+<a name="ln602">}</a>
+<a name="ln603"> </a>
+<a name="ln604">enum crmd_fsa_input</a>
+<a name="ln605">handle_message(xmlNode * msg, enum crmd_fsa_cause cause)</a>
+<a name="ln606">{</a>
+<a name="ln607">    const char *type = NULL;</a>
+<a name="ln608"> </a>
+<a name="ln609">    CRM_CHECK(msg != NULL, return I_NULL);</a>
+<a name="ln610"> </a>
+<a name="ln611">    type = crm_element_value(msg, F_CRM_MSG_TYPE);</a>
+<a name="ln612">    if (crm_str_eq(type, XML_ATTR_REQUEST, TRUE)) {</a>
+<a name="ln613">        return handle_request(msg, cause);</a>
+<a name="ln614"> </a>
+<a name="ln615">    } else if (crm_str_eq(type, XML_ATTR_RESPONSE, TRUE)) {</a>
+<a name="ln616">        handle_response(msg);</a>
+<a name="ln617">        return I_NULL;</a>
+<a name="ln618">    }</a>
+<a name="ln619"> </a>
+<a name="ln620">    crm_err(&quot;Unknown message type: %s&quot;, type);</a>
+<a name="ln621">    return I_NULL;</a>
+<a name="ln622">}</a>
+<a name="ln623"> </a>
+<a name="ln624">static enum crmd_fsa_input</a>
+<a name="ln625">handle_failcount_op(xmlNode * stored_msg)</a>
+<a name="ln626">{</a>
+<a name="ln627">    const char *rsc = NULL;</a>
+<a name="ln628">    const char *uname = NULL;</a>
+<a name="ln629">    const char *op = NULL;</a>
+<a name="ln630">    const char *interval = NULL;</a>
+<a name="ln631">    int interval_ms = 0;</a>
+<a name="ln632">    gboolean is_remote_node = FALSE;</a>
+<a name="ln633">    xmlNode *xml_op = get_message_xml(stored_msg, F_CRM_DATA);</a>
+<a name="ln634"> </a>
+<a name="ln635">    if (xml_op) {</a>
+<a name="ln636">        xmlNode *xml_rsc = first_named_child(xml_op, XML_CIB_TAG_RESOURCE);</a>
+<a name="ln637">        xmlNode *xml_attrs = first_named_child(xml_op, XML_TAG_ATTRS);</a>
+<a name="ln638"> </a>
+<a name="ln639">        if (xml_rsc) {</a>
+<a name="ln640">            rsc = ID(xml_rsc);</a>
+<a name="ln641">        }</a>
+<a name="ln642">        if (xml_attrs) {</a>
+<a name="ln643">            op = crm_element_value(xml_attrs,</a>
+<a name="ln644">                                   CRM_META &quot;_&quot; XML_RSC_ATTR_CLEAR_OP);</a>
+<a name="ln645">            interval = crm_element_value(xml_attrs,</a>
+<a name="ln646">                                         CRM_META &quot;_&quot; XML_RSC_ATTR_CLEAR_INTERVAL);</a>
+<a name="ln647">            interval_ms = crm_parse_int(interval, &quot;0&quot;);</a>
+<a name="ln648">        }</a>
+<a name="ln649">    }</a>
+<a name="ln650">    uname = crm_element_value(xml_op, XML_LRM_ATTR_TARGET);</a>
+<a name="ln651"> </a>
+<a name="ln652">    if ((rsc == NULL) || (uname == NULL)) {</a>
+<a name="ln653">        crm_log_xml_warn(stored_msg, &quot;invalid failcount op&quot;);</a>
+<a name="ln654">        return I_NULL;</a>
+<a name="ln655">    }</a>
+<a name="ln656"> </a>
+<a name="ln657">    if (crm_element_value(xml_op, XML_LRM_ATTR_ROUTER_NODE)) {</a>
+<a name="ln658">        is_remote_node = TRUE;</a>
+<a name="ln659">    }</a>
+<a name="ln660">    update_attrd_clear_failures(uname, rsc, op, interval, is_remote_node);</a>
+<a name="ln661">    lrm_clear_last_failure(rsc, uname, op, interval_ms);</a>
+<a name="ln662"> </a>
+<a name="ln663">    return I_NULL;</a>
+<a name="ln664">}</a>
+<a name="ln665"> </a>
+<a name="ln666">/*!</a>
+<a name="ln667"> * \brief Handle a CRM_OP_REMOTE_STATE message by updating remote peer cache</a>
+<a name="ln668"> *</a>
+<a name="ln669"> * \param[in] msg  Message XML</a>
+<a name="ln670"> *</a>
+<a name="ln671"> * \return Next FSA input</a>
+<a name="ln672"> */</a>
+<a name="ln673">static enum crmd_fsa_input</a>
+<a name="ln674">handle_remote_state(xmlNode *msg)</a>
+<a name="ln675">{</a>
+<a name="ln676">    const char *remote_uname = ID(msg);</a>
+<a name="ln677">    const char *remote_is_up = crm_element_value(msg, XML_NODE_IN_CLUSTER);</a>
+<a name="ln678">    crm_node_t *remote_peer;</a>
+<a name="ln679"> </a>
+<a name="ln680">    CRM_CHECK(remote_uname &amp;&amp; remote_is_up, return I_NULL);</a>
+<a name="ln681"> </a>
+<a name="ln682">    remote_peer = crm_remote_peer_get(remote_uname);</a>
+<a name="ln683">    CRM_CHECK(remote_peer, return I_NULL);</a>
+<a name="ln684"> </a>
+<a name="ln685">    crm_update_peer_state(__FUNCTION__, remote_peer,</a>
+<a name="ln686">                          crm_is_true(remote_is_up)?</a>
+<a name="ln687">                          CRM_NODE_MEMBER : CRM_NODE_LOST, 0);</a>
+<a name="ln688">    return I_NULL;</a>
+<a name="ln689">}</a>
+<a name="ln690"> </a>
+<a name="ln691">enum crmd_fsa_input</a>
+<a name="ln692">handle_request(xmlNode * stored_msg, enum crmd_fsa_cause cause)</a>
+<a name="ln693">{</a>
+<a name="ln694">    xmlNode *msg = NULL;</a>
+<a name="ln695">    const char *op = crm_element_value(stored_msg, F_CRM_TASK);</a>
+<a name="ln696"> </a>
+<a name="ln697">    /* Optimize this for the DC - it has the most to do */</a>
+<a name="ln698"> </a>
+<a name="ln699">    if (op == NULL) {</a>
+<a name="ln700">        crm_log_xml_err(stored_msg, &quot;Bad message&quot;);</a>
+<a name="ln701">        return I_NULL;</a>
+<a name="ln702">    }</a>
+<a name="ln703"> </a>
+<a name="ln704">    if (strcmp(op, CRM_OP_SHUTDOWN_REQ) == 0) {</a>
+<a name="ln705">        const char *from = crm_element_value(stored_msg, F_CRM_HOST_FROM);</a>
+<a name="ln706">        crm_node_t *node = crm_find_peer(0, from);</a>
+<a name="ln707"> </a>
+<a name="ln708">        crm_update_peer_expected(__FUNCTION__, node, CRMD_JOINSTATE_DOWN);</a>
+<a name="ln709">        if(AM_I_DC == FALSE) {</a>
+<a name="ln710">            return I_NULL; /* Done */</a>
+<a name="ln711">        }</a>
+<a name="ln712">    }</a>
+<a name="ln713"> </a>
+<a name="ln714">    /*========== DC-Only Actions ==========*/</a>
+<a name="ln715">    if (AM_I_DC) {</a>
+<a name="ln716">        if (strcmp(op, CRM_OP_JOIN_ANNOUNCE) == 0) {</a>
+<a name="ln717">            return I_NODE_JOIN;</a>
+<a name="ln718"> </a>
+<a name="ln719">        } else if (strcmp(op, CRM_OP_JOIN_REQUEST) == 0) {</a>
+<a name="ln720">            return I_JOIN_REQUEST;</a>
+<a name="ln721"> </a>
+<a name="ln722">        } else if (strcmp(op, CRM_OP_JOIN_CONFIRM) == 0) {</a>
+<a name="ln723">            return I_JOIN_RESULT;</a>
+<a name="ln724"> </a>
+<a name="ln725">        } else if (strcmp(op, CRM_OP_SHUTDOWN) == 0) {</a>
+<a name="ln726">            const char *host_from = crm_element_value(stored_msg, F_CRM_HOST_FROM);</a>
+<a name="ln727">            gboolean dc_match = safe_str_eq(host_from, fsa_our_dc);</a>
+<a name="ln728"> </a>
+<a name="ln729">            if (is_set(fsa_input_register, R_SHUTDOWN)) {</a>
+<a name="ln730">                crm_info(&quot;Shutting ourselves down (DC)&quot;);</a>
+<a name="ln731">                return I_STOP;</a>
+<a name="ln732"> </a>
+<a name="ln733">            } else if (dc_match) {</a>
+<a name="ln734">                crm_err(&quot;We didn't ask to be shut down, yet our&quot;</a>
+<a name="ln735">                        &quot; TE is telling us to. Better get out now!&quot;);</a>
+<a name="ln736">                return I_TERMINATE;</a>
+<a name="ln737"> </a>
+<a name="ln738">            } else if (fsa_state != S_STOPPING) {</a>
+<a name="ln739">                crm_err(&quot;Another node is asking us to shutdown&quot; &quot; but we think we're ok.&quot;);</a>
+<a name="ln740">                return I_ELECTION;</a>
+<a name="ln741">            }</a>
+<a name="ln742"> </a>
+<a name="ln743">        } else if (strcmp(op, CRM_OP_SHUTDOWN_REQ) == 0) {</a>
+<a name="ln744">            /* a slave wants to shut down */</a>
+<a name="ln745">            /* create cib fragment and add to message */</a>
+<a name="ln746">            return handle_shutdown_request(stored_msg);</a>
+<a name="ln747"> </a>
+<a name="ln748">        } else if (strcmp(op, CRM_OP_REMOTE_STATE) == 0) {</a>
+<a name="ln749">            /* a remote connection host is letting us know the node state */</a>
+<a name="ln750">            return handle_remote_state(stored_msg);</a>
+<a name="ln751">        }</a>
+<a name="ln752">    }</a>
+<a name="ln753"> </a>
+<a name="ln754">    /*========== common actions ==========*/</a>
+<a name="ln755">    if (strcmp(op, CRM_OP_NOVOTE) == 0) {</a>
+<a name="ln756">        ha_msg_input_t fsa_input;</a>
+<a name="ln757"> </a>
+<a name="ln758">        fsa_input.msg = stored_msg;</a>
+<a name="ln759">        register_fsa_input_adv(C_HA_MESSAGE, I_NULL, &amp;fsa_input,</a>
+<a name="ln760">                               A_ELECTION_COUNT | A_ELECTION_CHECK, FALSE, __FUNCTION__);</a>
+<a name="ln761"> </a>
+<a name="ln762">    } else if (strcmp(op, CRM_OP_THROTTLE) == 0) {</a>
+<a name="ln763">        throttle_update(stored_msg);</a>
+<a name="ln764">        if (AM_I_DC &amp;&amp; transition_graph != NULL) {</a>
+<a name="ln765">            if (transition_graph-&gt;complete == FALSE) {</a>
+<a name="ln766">                crm_debug(&quot;The throttle changed. Trigger a graph.&quot;);</a>
+<a name="ln767">                trigger_graph();</a>
+<a name="ln768">            }</a>
+<a name="ln769">        }</a>
+<a name="ln770">        return I_NULL;</a>
+<a name="ln771"> </a>
+<a name="ln772">    } else if (strcmp(op, CRM_OP_CLEAR_FAILCOUNT) == 0) {</a>
+<a name="ln773">        return handle_failcount_op(stored_msg);</a>
+<a name="ln774"> </a>
+<a name="ln775">    } else if (strcmp(op, CRM_OP_VOTE) == 0) {</a>
+<a name="ln776">        /* count the vote and decide what to do after that */</a>
+<a name="ln777">        ha_msg_input_t fsa_input;</a>
+<a name="ln778"> </a>
+<a name="ln779">        fsa_input.msg = stored_msg;</a>
+<a name="ln780">        register_fsa_input_adv(C_HA_MESSAGE, I_NULL, &amp;fsa_input,</a>
+<a name="ln781">                               A_ELECTION_COUNT | A_ELECTION_CHECK, FALSE, __FUNCTION__);</a>
+<a name="ln782"> </a>
+<a name="ln783">        /* Sometimes we _must_ go into S_ELECTION */</a>
+<a name="ln784">        if (fsa_state == S_HALT) {</a>
+<a name="ln785">            crm_debug(&quot;Forcing an election from S_HALT&quot;);</a>
+<a name="ln786">            return I_ELECTION;</a>
+<a name="ln787">#if 0</a>
+<a name="ln788">        } else if (AM_I_DC) {</a>
+<a name="ln789">            /* This is the old way of doing things but what is gained? */</a>
+<a name="ln790">            return I_ELECTION;</a>
+<a name="ln791">#endif</a>
+<a name="ln792">        }</a>
+<a name="ln793"> </a>
+<a name="ln794">    } else if (strcmp(op, CRM_OP_JOIN_OFFER) == 0) {</a>
+<a name="ln795">        crm_debug(&quot;Raising I_JOIN_OFFER: join-%s&quot;, crm_element_value(stored_msg, F_CRM_JOIN_ID));</a>
+<a name="ln796">        return I_JOIN_OFFER;</a>
+<a name="ln797"> </a>
+<a name="ln798">    } else if (strcmp(op, CRM_OP_JOIN_ACKNAK) == 0) {</a>
+<a name="ln799">        crm_debug(&quot;Raising I_JOIN_RESULT: join-%s&quot;, crm_element_value(stored_msg, F_CRM_JOIN_ID));</a>
+<a name="ln800">        return I_JOIN_RESULT;</a>
+<a name="ln801"> </a>
+<a name="ln802">    } else if (strcmp(op, CRM_OP_LRM_DELETE) == 0</a>
+<a name="ln803">               || strcmp(op, CRM_OP_LRM_FAIL) == 0</a>
+<a name="ln804">               || strcmp(op, CRM_OP_LRM_REFRESH) == 0 || strcmp(op, CRM_OP_REPROBE) == 0) {</a>
+<a name="ln805"> </a>
+<a name="ln806">        crm_xml_add(stored_msg, F_CRM_SYS_TO, CRM_SYSTEM_LRMD);</a>
+<a name="ln807">        return I_ROUTER;</a>
+<a name="ln808"> </a>
+<a name="ln809">    } else if (strcmp(op, CRM_OP_NOOP) == 0) {</a>
+<a name="ln810">        return I_NULL;</a>
+<a name="ln811"> </a>
+<a name="ln812">    } else if (strcmp(op, CRM_OP_LOCAL_SHUTDOWN) == 0) {</a>
+<a name="ln813"> </a>
+<a name="ln814">        crm_shutdown(SIGTERM);</a>
+<a name="ln815">        /*return I_SHUTDOWN; */</a>
+<a name="ln816">        return I_NULL;</a>
+<a name="ln817"> </a>
+<a name="ln818">        /*========== (NOT_DC)-Only Actions ==========*/</a>
+<a name="ln819">    } else if (AM_I_DC == FALSE &amp;&amp; strcmp(op, CRM_OP_SHUTDOWN) == 0) {</a>
+<a name="ln820"> </a>
+<a name="ln821">        const char *host_from = crm_element_value(stored_msg, F_CRM_HOST_FROM);</a>
+<a name="ln822">        gboolean dc_match = safe_str_eq(host_from, fsa_our_dc);</a>
+<a name="ln823"> </a>
+<a name="ln824">        if (dc_match || fsa_our_dc == NULL) {</a>
+<a name="ln825">            if (is_set(fsa_input_register, R_SHUTDOWN) == FALSE) {</a>
+<a name="ln826">                crm_err(&quot;We didn't ask to be shut down, yet our DC is telling us to.&quot;);</a>
+<a name="ln827">                set_bit(fsa_input_register, R_STAYDOWN);</a>
+<a name="ln828">                return I_STOP;</a>
+<a name="ln829">            }</a>
+<a name="ln830">            crm_info(&quot;Shutting down&quot;);</a>
+<a name="ln831">            return I_STOP;</a>
+<a name="ln832"> </a>
+<a name="ln833">        } else {</a>
+<a name="ln834">            crm_warn(&quot;Discarding %s op from %s&quot;, op, host_from);</a>
+<a name="ln835">        }</a>
+<a name="ln836"> </a>
+<a name="ln837">    } else if (strcmp(op, CRM_OP_PING) == 0) {</a>
+<a name="ln838">        /* eventually do some stuff to figure out</a>
+<a name="ln839">         * if we /are/ ok</a>
+<a name="ln840">         */</a>
+<a name="ln841">        const char *sys_to = crm_element_value(stored_msg, F_CRM_SYS_TO);</a>
+<a name="ln842">        xmlNode *ping = create_xml_node(NULL, XML_CRM_TAG_PING);</a>
+<a name="ln843"> </a>
+<a name="ln844">        crm_xml_add(ping, XML_PING_ATTR_STATUS, &quot;ok&quot;);</a>
+<a name="ln845">        crm_xml_add(ping, XML_PING_ATTR_SYSFROM, sys_to);</a>
+<a name="ln846">        crm_xml_add(ping, &quot;crmd_state&quot;, fsa_state2string(fsa_state));</a>
+<a name="ln847"> </a>
+<a name="ln848">        /* Ok, so technically not so interesting, but CTS needs to see this */</a>
+<a name="ln849">        crm_notice(&quot;Current ping state: %s&quot;, fsa_state2string(fsa_state));</a>
+<a name="ln850"> </a>
+<a name="ln851">        msg = create_reply(stored_msg, ping);</a>
+<a name="ln852">        if (msg) {</a>
+<a name="ln853">            (void)relay_message(msg, TRUE);</a>
+<a name="ln854">        }</a>
+<a name="ln855"> </a>
+<a name="ln856">        free_xml(ping);</a>
+<a name="ln857">        free_xml(msg);</a>
+<a name="ln858"> </a>
+<a name="ln859">    } else if (strcmp(op, CRM_OP_RM_NODE_CACHE) == 0) {</a>
+<a name="ln860">        int id = 0;</a>
+<a name="ln861">        const char *name = NULL;</a>
+<a name="ln862"> </a>
+<a name="ln863">        crm_element_value_int(stored_msg, XML_ATTR_ID, &amp;id);</a>
+<a name="ln864">        name = crm_element_value(stored_msg, XML_ATTR_UNAME);</a>
+<a name="ln865"> </a>
+<a name="ln866">        if(cause == C_IPC_MESSAGE) {</a>
+<a name="ln867">            msg = create_request(CRM_OP_RM_NODE_CACHE, NULL, NULL, CRM_SYSTEM_CRMD, CRM_SYSTEM_CRMD, NULL);</a>
+<a name="ln868">            if (send_cluster_message(NULL, crm_msg_crmd, msg, TRUE) == FALSE) {</a>
+<a name="ln869">                crm_err(&quot;Could not instruct peers to remove references to node %s/%u&quot;, name, id);</a>
+<a name="ln870">            } else {</a>
+<a name="ln871">                crm_notice(&quot;Instructing peers to remove references to node %s/%u&quot;, name, id);</a>
+<a name="ln872">            }</a>
+<a name="ln873">            free_xml(msg);</a>
+<a name="ln874"> </a>
+<a name="ln875">        } else {</a>
+<a name="ln876">            reap_crm_member(id, name);</a>
+<a name="ln877"> </a>
+<a name="ln878">            /* If we're forgetting this node, also forget any failures to fence</a>
+<a name="ln879">             * it, so we don't carry that over to any node added later with the</a>
+<a name="ln880">             * same name.</a>
+<a name="ln881">             */</a>
+<a name="ln882">            st_fail_count_reset(name);</a>
+<a name="ln883">        }</a>
+<a name="ln884"> </a>
+<a name="ln885">    } else if (strcmp(op, CRM_OP_MAINTENANCE_NODES) == 0) {</a>
+<a name="ln886">        xmlNode *xml = get_message_xml(stored_msg, F_CRM_DATA);</a>
+<a name="ln887"> </a>
+<a name="ln888">        remote_ra_process_maintenance_nodes(xml);</a>
+<a name="ln889"> </a>
+<a name="ln890">    } else {</a>
+<a name="ln891">        crm_err(&quot;Unexpected request (%s) sent to %s&quot;, op, AM_I_DC ? &quot;the DC&quot; : &quot;non-DC node&quot;);</a>
+<a name="ln892">        crm_log_xml_err(stored_msg, &quot;Unexpected&quot;);</a>
+<a name="ln893">    }</a>
+<a name="ln894"> </a>
+<a name="ln895">    return I_NULL;</a>
+<a name="ln896">}</a>
+<a name="ln897"> </a>
+<a name="ln898">void</a>
+<a name="ln899">handle_response(xmlNode * stored_msg)</a>
+<a name="ln900">{</a>
+<a name="ln901">    const char *op = crm_element_value(stored_msg, F_CRM_TASK);</a>
+<a name="ln902"> </a>
+<a name="ln903">    if (op == NULL) {</a>
+<a name="ln904">        crm_log_xml_err(stored_msg, &quot;Bad message&quot;);</a>
+<a name="ln905"> </a>
+<a name="ln906">    } else if (AM_I_DC &amp;&amp; strcmp(op, CRM_OP_PECALC) == 0) {</a>
+<a name="ln907">        /* Check if the PE answer been superseded by a subsequent request? */</a>
+<a name="ln908">        const char *msg_ref = crm_element_value(stored_msg, XML_ATTR_REFERENCE);</a>
+<a name="ln909"> </a>
+<a name="ln910">        if (msg_ref == NULL) {</a>
+<a name="ln911">            crm_err(&quot;%s - Ignoring calculation with no reference&quot;, op);</a>
+<a name="ln912"> </a>
+<a name="ln913">        } else if (safe_str_eq(msg_ref, fsa_pe_ref)) {</a>
+<a name="ln914">            ha_msg_input_t fsa_input;</a>
+<a name="ln915"> </a>
+<a name="ln916">            fsa_input.msg = stored_msg;</a>
+<a name="ln917">            register_fsa_input_later(C_IPC_MESSAGE, I_PE_SUCCESS, &amp;fsa_input);</a>
+<a name="ln918">            crm_trace(&quot;Completed: %s...&quot;, fsa_pe_ref);</a>
+<a name="ln919"> </a>
+<a name="ln920">        } else {</a>
+<a name="ln921">            crm_info(&quot;%s calculation %s is obsolete&quot;, op, msg_ref);</a>
+<a name="ln922">        }</a>
+<a name="ln923"> </a>
+<a name="ln924">    } else if (strcmp(op, CRM_OP_VOTE) == 0</a>
+<a name="ln925">               || strcmp(op, CRM_OP_SHUTDOWN_REQ) == 0 || strcmp(op, CRM_OP_SHUTDOWN) == 0) {</a>
+<a name="ln926"> </a>
+<a name="ln927">    } else {</a>
+<a name="ln928">        const char *host_from = crm_element_value(stored_msg, F_CRM_HOST_FROM);</a>
+<a name="ln929"> </a>
+<a name="ln930">        crm_err(&quot;Unexpected response (op=%s, src=%s) sent to the %s&quot;,</a>
+<a name="ln931">                op, host_from, AM_I_DC ? &quot;DC&quot; : &quot;CRMd&quot;);</a>
+<a name="ln932">    }</a>
+<a name="ln933">}</a>
+<a name="ln934"> </a>
+<a name="ln935">enum crmd_fsa_input</a>
+<a name="ln936">handle_shutdown_request(xmlNode * stored_msg)</a>
+<a name="ln937">{</a>
+<a name="ln938">    /* handle here to avoid potential version issues</a>
+<a name="ln939">     *   where the shutdown message/procedure may have</a>
+<a name="ln940">     *   been changed in later versions.</a>
+<a name="ln941">     *</a>
+<a name="ln942">     * This way the DC is always in control of the shutdown</a>
+<a name="ln943">     */</a>
+<a name="ln944"> </a>
+<a name="ln945">    char *now_s = NULL;</a>
+<a name="ln946">    time_t now = time(NULL);</a>
+<a name="ln947">    const char *host_from = crm_element_value(stored_msg, F_CRM_HOST_FROM);</a>
+<a name="ln948"> </a>
+<a name="ln949">    if (host_from == NULL) {</a>
+<a name="ln950">        /* we're shutting down and the DC */</a>
+<a name="ln951">        host_from = fsa_our_uname;</a>
+<a name="ln952">    }</a>
+<a name="ln953"> </a>
+<a name="ln954">    crm_info(&quot;Creating shutdown request for %s (state=%s)&quot;, host_from, fsa_state2string(fsa_state));</a>
+<a name="ln955">    crm_log_xml_trace(stored_msg, &quot;message&quot;);</a>
+<a name="ln956"> </a>
+<a name="ln957">    now_s = crm_itoa(now);</a>
+<a name="ln958">    update_attrd(host_from, XML_CIB_ATTR_SHUTDOWN, now_s, NULL, FALSE);</a>
+<a name="ln959">    free(now_s);</a>
+<a name="ln960"> </a>
+<a name="ln961">    /* will be picked up by the TE as long as its running */</a>
+<a name="ln962">    return I_NULL;</a>
+<a name="ln963">}</a>
+<a name="ln964"> </a>
+<a name="ln965">/* msg is deleted by the time this returns */</a>
+<a name="ln966">extern gboolean process_te_message(xmlNode * msg, xmlNode * xml_data);</a>
+<a name="ln967"> </a>
+<a name="ln968">gboolean</a>
+<a name="ln969">send_msg_via_ipc(xmlNode * msg, const char *sys)</a>
+<a name="ln970">{</a>
+<a name="ln971">    gboolean send_ok = TRUE;</a>
+<a name="ln972">    crm_client_t *client_channel = crm_client_get_by_id(sys);</a>
+<a name="ln973"> </a>
+<a name="ln974">    if (crm_element_value(msg, F_CRM_HOST_FROM) == NULL) {</a>
+<a name="ln975">        crm_xml_add(msg, F_CRM_HOST_FROM, fsa_our_uname);</a>
+<a name="ln976">    }</a>
+<a name="ln977"> </a>
+<a name="ln978">    if (client_channel != NULL) {</a>
+<a name="ln979">        /* Transient clients such as crmadmin */</a>
+<a name="ln980">        send_ok = crm_ipcs_send(client_channel, 0, msg, crm_ipc_server_event);</a>
+<a name="ln981"> </a>
+<a name="ln982">    } else if (sys != NULL &amp;&amp; strcmp(sys, CRM_SYSTEM_TENGINE) == 0) {</a>
+<a name="ln983">        xmlNode *data = get_message_xml(msg, F_CRM_DATA);</a>
+<a name="ln984"> </a>
+<a name="ln985">        process_te_message(msg, data);</a>
+<a name="ln986"> </a>
+<a name="ln987">    } else if (sys != NULL &amp;&amp; strcmp(sys, CRM_SYSTEM_LRMD) == 0) {</a>
+<a name="ln988">        fsa_data_t fsa_data;</a>
+<a name="ln989">        ha_msg_input_t fsa_input;</a>
+<a name="ln990"> </a>
+<a name="ln991">        fsa_input.msg = msg;</a>
+<a name="ln992">        fsa_input.xml = get_message_xml(msg, F_CRM_DATA);</a>
+<a name="ln993"> </a>
+<a name="ln994">        fsa_data.id = 0;</a>
+<a name="ln995">        fsa_data.actions = 0;</a>
+<a name="ln996">        fsa_data.data = &amp;fsa_input;</a>
+<a name="ln997">        fsa_data.fsa_input = I_MESSAGE;</a>
+<a name="ln998">        fsa_data.fsa_cause = C_IPC_MESSAGE;</a>
+<a name="ln999">        fsa_data.origin = __FUNCTION__;</a>
+<a name="ln1000">        fsa_data.data_type = fsa_dt_ha_msg;</a>
+<a name="ln1001"> </a>
+<a name="ln1002">#ifdef FSA_TRACE</a>
+<a name="ln1003">        crm_trace(&quot;Invoking action A_LRM_INVOKE (%.16llx)&quot;, A_LRM_INVOKE);</a>
+<a name="ln1004">#endif</a>
+<a name="ln1005">        do_lrm_invoke(A_LRM_INVOKE, C_IPC_MESSAGE, fsa_state, I_MESSAGE, &amp;fsa_data);</a>
+<a name="ln1006"> </a>
+<a name="ln1007">    } else if (sys != NULL &amp;&amp; crmd_is_proxy_session(sys)) {</a>
+<a name="ln1008">        crmd_proxy_send(sys, msg);</a>
+<a name="ln1009"> </a>
+<a name="ln1010">    } else {</a>
+<a name="ln1011">        crm_debug(&quot;Unknown Sub-system (%s)... discarding message.&quot;, crm_str(sys));</a>
+<a name="ln1012">        send_ok = FALSE;</a>
+<a name="ln1013">    }</a>
+<a name="ln1014"> </a>
+<a name="ln1015">    return send_ok;</a>
+<a name="ln1016">}</a>
+<a name="ln1017"> </a>
+<a name="ln1018">ha_msg_input_t *</a>
+<a name="ln1019">new_ha_msg_input(xmlNode * orig)</a>
+<a name="ln1020">{</a>
+<a name="ln1021">    ha_msg_input_t *input_copy = NULL;</a>
+<a name="ln1022"> </a>
+<a name="ln1023">    input_copy = calloc(1, sizeof(ha_msg_input_t));</a>
+<a name="ln1024">    input_copy-&gt;msg = orig;</a>
+<a name="ln1025">    input_copy-&gt;xml = get_message_xml(input_copy-&gt;msg, F_CRM_DATA);</a>
+<a name="ln1026">    return input_copy;</a>
+<a name="ln1027">}</a>
+<a name="ln1028"> </a>
+<a name="ln1029">void</a>
+<a name="ln1030">delete_ha_msg_input(ha_msg_input_t * orig)</a>
+<a name="ln1031">{</a>
+<a name="ln1032">    if (orig == NULL) {</a>
+<a name="ln1033">        return;</a>
+<a name="ln1034">    }</a>
+<a name="ln1035">    free_xml(orig-&gt;msg);</a>
+<a name="ln1036">    free(orig);</a>
+<a name="ln1037">}</a>
+<a name="ln1038"> </a>
+<a name="ln1039">/*!</a>
+<a name="ln1040"> * \internal</a>
+<a name="ln1041"> * \brief Notify the DC of a remote node state change</a>
+<a name="ln1042"> *</a>
+<a name="ln1043"> * \param[in] node_name  Node's name</a>
+<a name="ln1044"> * \param[in] node_up    TRUE if node is up, FALSE if down</a>
+<a name="ln1045"> */</a>
+<a name="ln1046">void</a>
+<a name="ln1047">send_remote_state_message(const char *node_name, gboolean node_up)</a>
+<a name="ln1048">{</a>
+<a name="ln1049">    /* If we don't have a DC, or the message fails, we have a failsafe:</a>
+<a name="ln1050">     * the DC will eventually pick up the change via the CIB node state.</a>
+<a name="ln1051">     * The message allows it to happen sooner if possible.</a>
+<a name="ln1052">     */</a>
+<a name="ln1053">    if (fsa_our_dc) {</a>
+<a name="ln1054">        xmlNode *msg = create_request(CRM_OP_REMOTE_STATE, NULL, fsa_our_dc,</a>
+<a name="ln1055">                                      CRM_SYSTEM_DC, CRM_SYSTEM_CRMD, NULL);</a>
+<a name="ln1056"> </a>
+<a name="ln1057">        crm_info(&quot;Notifying DC %s of pacemaker_remote node %s %s&quot;,</a>
+<a name="ln1058">                 fsa_our_dc, node_name, (node_up? &quot;coming up&quot; : &quot;going down&quot;));</a>
+<a name="ln1059">        crm_xml_add(msg, XML_ATTR_ID, node_name);</a>
+<a name="ln1060">        crm_xml_add_boolean(msg, XML_NODE_IN_CLUSTER, node_up);</a>
+<a name="ln1061">        send_cluster_message(crm_get_peer(0, fsa_our_dc), crm_msg_crmd, msg,</a>
+<a name="ln1062">                             TRUE);</a>
+<a name="ln1063">        free_xml(msg);</a>
+<a name="ln1064">    } else {</a>
+<a name="ln1065">        crm_debug(&quot;No DC to notify of pacemaker_remote node %s %s&quot;,</a>
+<a name="ln1066">                  node_name, (node_up? &quot;coming up&quot; : &quot;going down&quot;));</a>
+<a name="ln1067">    }</a>
+<a name="ln1068">}</a>
+<a name="ln1069"> </a>
+
+</code></pre>
+<div class="balloon" rel="120"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'fsa_data'. Check lines: 120, 119.</p></div>
+<div class="balloon" rel="259"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'fsa_data->data != NULL' is always true.</p></div>
+<div class="balloon" rel="980"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V724/" target="_blank">V724</a> Converting type 'ptrdiff_t' to type 'gboolean' can lead to a loss of high-order bits. Non-zero value can become 'FALSE'.</p></div>
+<div class="balloon" rel="1024"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'input_copy'. Check lines: 1024, 1023.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

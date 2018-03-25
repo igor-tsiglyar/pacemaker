@@ -1,0 +1,1125 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln26">#include &lt;allocate.h&gt;</a>
+<a name="ln27">#include &lt;notif.h&gt;</a>
+<a name="ln28">#include &lt;utils.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#define VARIANT_CLONE 1</a>
+<a name="ln31">#include &lt;lib/pengine/variant.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">extern gint sort_clone_instance(gconstpointer a, gconstpointer b, gpointer data_set);</a>
+<a name="ln34"> </a>
+<a name="ln35">static int master_score(resource_t * rsc, node_t * node, int not_set_value);</a>
+<a name="ln36"> </a>
+<a name="ln37">static void</a>
+<a name="ln38">child_promoting_constraints(clone_variant_data_t * clone_data, enum pe_ordering type,</a>
+<a name="ln39">                            resource_t * rsc, resource_t * child, resource_t * last,</a>
+<a name="ln40">                            pe_working_set_t * data_set)</a>
+<a name="ln41">{</a>
+<a name="ln42">    if (child == NULL) {</a>
+<a name="ln43">        if (clone_data-&gt;ordered &amp;&amp; last != NULL) {</a>
+<a name="ln44">            pe_rsc_trace(rsc, &quot;Ordered version (last node)&quot;);</a>
+<a name="ln45">            /* last child promote before promoted started */</a>
+<a name="ln46">            new_rsc_order(last, RSC_PROMOTE, rsc, RSC_PROMOTED, type, data_set);</a>
+<a name="ln47">        }</a>
+<a name="ln48">        return;</a>
+<a name="ln49">    }</a>
+<a name="ln50"> </a>
+<a name="ln51">    /* child promote before global promoted */</a>
+<a name="ln52">    new_rsc_order(child, RSC_PROMOTE, rsc, RSC_PROMOTED, type, data_set);</a>
+<a name="ln53"> </a>
+<a name="ln54">    /* global promote before child promote */</a>
+<a name="ln55">    new_rsc_order(rsc, RSC_PROMOTE, child, RSC_PROMOTE, type, data_set);</a>
+<a name="ln56"> </a>
+<a name="ln57">    if (clone_data-&gt;ordered) {</a>
+<a name="ln58">        pe_rsc_trace(rsc, &quot;Ordered version&quot;);</a>
+<a name="ln59">        if (last == NULL) {</a>
+<a name="ln60">            /* global promote before first child promote */</a>
+<a name="ln61">            last = rsc;</a>
+<a name="ln62"> </a>
+<a name="ln63">        }</a>
+<a name="ln64">        /* else: child/child relative promote */</a>
+<a name="ln65">        order_start_start(last, child, type);</a>
+<a name="ln66">        new_rsc_order(last, RSC_PROMOTE, child, RSC_PROMOTE, type, data_set);</a>
+<a name="ln67"> </a>
+<a name="ln68">    } else {</a>
+<a name="ln69">        pe_rsc_trace(rsc, &quot;Un-ordered version&quot;);</a>
+<a name="ln70">    }</a>
+<a name="ln71">}</a>
+<a name="ln72"> </a>
+<a name="ln73">static void</a>
+<a name="ln74">child_demoting_constraints(clone_variant_data_t * clone_data, enum pe_ordering type,</a>
+<a name="ln75">                           resource_t * rsc, resource_t * child, resource_t * last,</a>
+<a name="ln76">                           pe_working_set_t * data_set)</a>
+<a name="ln77">{</a>
+<a name="ln78">    if (child == NULL) {</a>
+<a name="ln79">        if (clone_data-&gt;ordered &amp;&amp; last != NULL) {</a>
+<a name="ln80">            pe_rsc_trace(rsc, &quot;Ordered version (last node)&quot;);</a>
+<a name="ln81">            /* global demote before first child demote */</a>
+<a name="ln82">            new_rsc_order(rsc, RSC_DEMOTE, last, RSC_DEMOTE, pe_order_optional, data_set);</a>
+<a name="ln83">        }</a>
+<a name="ln84">        return;</a>
+<a name="ln85">    }</a>
+<a name="ln86"> </a>
+<a name="ln87">    /* child demote before global demoted */</a>
+<a name="ln88">    new_rsc_order(child, RSC_DEMOTE, rsc, RSC_DEMOTED, pe_order_implies_then_printed, data_set);</a>
+<a name="ln89"> </a>
+<a name="ln90">    /* global demote before child demote */</a>
+<a name="ln91">    new_rsc_order(rsc, RSC_DEMOTE, child, RSC_DEMOTE, pe_order_implies_first_printed, data_set);</a>
+<a name="ln92"> </a>
+<a name="ln93">    if (clone_data-&gt;ordered &amp;&amp; last != NULL) {</a>
+<a name="ln94">        pe_rsc_trace(rsc, &quot;Ordered version&quot;);</a>
+<a name="ln95"> </a>
+<a name="ln96">        /* child/child relative demote */</a>
+<a name="ln97">        new_rsc_order(child, RSC_DEMOTE, last, RSC_DEMOTE, type, data_set);</a>
+<a name="ln98"> </a>
+<a name="ln99">    } else if (clone_data-&gt;ordered) {</a>
+<a name="ln100">        pe_rsc_trace(rsc, &quot;Ordered version (1st node)&quot;);</a>
+<a name="ln101">        /* first child stop before global stopped */</a>
+<a name="ln102">        new_rsc_order(child, RSC_DEMOTE, rsc, RSC_DEMOTED, type, data_set);</a>
+<a name="ln103"> </a>
+<a name="ln104">    } else {</a>
+<a name="ln105">        pe_rsc_trace(rsc, &quot;Un-ordered version&quot;);</a>
+<a name="ln106">    }</a>
+<a name="ln107">}</a>
+<a name="ln108"> </a>
+<a name="ln109">static void</a>
+<a name="ln110">master_update_pseudo_status(resource_t * rsc, gboolean * demoting, gboolean * promoting)</a>
+<a name="ln111">{</a>
+<a name="ln112">    GListPtr gIter = NULL;</a>
+<a name="ln113"> </a>
+<a name="ln114">    if (rsc-&gt;children) {</a>
+<a name="ln115">        gIter = rsc-&gt;children;</a>
+<a name="ln116">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln117">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln118"> </a>
+<a name="ln119">            master_update_pseudo_status(child, demoting, promoting);</a>
+<a name="ln120">        }</a>
+<a name="ln121">        return;</a>
+<a name="ln122">    }</a>
+<a name="ln123"> </a>
+<a name="ln124">    CRM_ASSERT(demoting != NULL);</a>
+<a name="ln125">    CRM_ASSERT(promoting != NULL);</a>
+<a name="ln126"> </a>
+<a name="ln127">    gIter = rsc-&gt;actions;</a>
+<a name="ln128">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln129">        action_t *action = (action_t *) gIter-&gt;data;</a>
+<a name="ln130"> </a>
+<a name="ln131">        if (*promoting &amp;&amp; *demoting) {</a>
+<a name="ln132">            return;</a>
+<a name="ln133"> </a>
+<a name="ln134">        } else if (is_set(action-&gt;flags, pe_action_optional)) {</a>
+<a name="ln135">            continue;</a>
+<a name="ln136"> </a>
+<a name="ln137">        } else if (safe_str_eq(RSC_DEMOTE, action-&gt;task)) {</a>
+<a name="ln138">            *demoting = TRUE;</a>
+<a name="ln139"> </a>
+<a name="ln140">        } else if (safe_str_eq(RSC_PROMOTE, action-&gt;task)) {</a>
+<a name="ln141">            *promoting = TRUE;</a>
+<a name="ln142">        }</a>
+<a name="ln143">    }</a>
+<a name="ln144">}</a>
+<a name="ln145"> </a>
+<a name="ln146">#define apply_master_location(list) do {				\</a>
+<a name="ln147">    gIter2 = list;							\</a>
+<a name="ln148">    for(; gIter2 != NULL; gIter2 = gIter2-&gt;next) {			\</a>
+<a name="ln149">	rsc_to_node_t *cons = (rsc_to_node_t*)gIter2-&gt;data;		\</a>
+<a name="ln150">									\</a>
+<a name="ln151">	cons_node = NULL;						\</a>
+<a name="ln152">	if(cons-&gt;role_filter == RSC_ROLE_MASTER) {			\</a>
+<a name="ln153">	    pe_rsc_trace(rsc, &quot;Applying %s to %s&quot;,				\</a>
+<a name="ln154">			cons-&gt;id, child_rsc-&gt;id);			\</a>
+<a name="ln155">	    cons_node = pe_find_node_id(				\</a>
+<a name="ln156">		cons-&gt;node_list_rh, chosen-&gt;details-&gt;id);		\</a>
+<a name="ln157">	}								\</a>
+<a name="ln158">	if(cons_node != NULL) {						\</a>
+<a name="ln159">	    int new_priority = merge_weights(				\</a>
+<a name="ln160">		child_rsc-&gt;priority, cons_node-&gt;weight);		\</a>
+<a name="ln161">	    pe_rsc_trace(rsc, &quot;\t%s: %d-&gt;%d (%d)&quot;, child_rsc-&gt;id,		\</a>
+<a name="ln162">			child_rsc-&gt;priority, new_priority, cons_node-&gt;weight); \</a>
+<a name="ln163">	    child_rsc-&gt;priority = new_priority;				\</a>
+<a name="ln164">	}								\</a>
+<a name="ln165">    }									\</a>
+<a name="ln166">    } while(0)</a>
+<a name="ln167"> </a>
+<a name="ln168">static node_t *</a>
+<a name="ln169">can_be_master(resource_t * rsc)</a>
+<a name="ln170">{</a>
+<a name="ln171">    node_t *node = NULL;</a>
+<a name="ln172">    node_t *local_node = NULL;</a>
+<a name="ln173">    resource_t *parent = uber_parent(rsc);</a>
+<a name="ln174">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln175"> </a>
+<a name="ln176">#if 0</a>
+<a name="ln177">    enum rsc_role_e role = RSC_ROLE_UNKNOWN;</a>
+<a name="ln178"> </a>
+<a name="ln179">    role = rsc-&gt;fns-&gt;state(rsc, FALSE);</a>
+<a name="ln180">    crm_info(&quot;%s role: %s&quot;, rsc-&gt;id, role2text(role));</a>
+<a name="ln181">#endif</a>
+<a name="ln182"> </a>
+<a name="ln183">    if (rsc-&gt;children) {</a>
+<a name="ln184">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln185"> </a>
+<a name="ln186">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln187">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln188"> </a>
+<a name="ln189">            if (can_be_master(child) == NULL) {</a>
+<a name="ln190">                pe_rsc_trace(rsc, &quot;Child %s of %s can't be promoted&quot;, child-&gt;id, rsc-&gt;id);</a>
+<a name="ln191">                return NULL;</a>
+<a name="ln192">            }</a>
+<a name="ln193">        }</a>
+<a name="ln194">    }</a>
+<a name="ln195"> </a>
+<a name="ln196">    node = rsc-&gt;fns-&gt;location(rsc, NULL, FALSE);</a>
+<a name="ln197">    if (node == NULL) {</a>
+<a name="ln198">        pe_rsc_trace(rsc, &quot;%s cannot be master: not allocated&quot;, rsc-&gt;id);</a>
+<a name="ln199">        return NULL;</a>
+<a name="ln200"> </a>
+<a name="ln201">    } else if (is_not_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln202">        if (rsc-&gt;fns-&gt;state(rsc, TRUE) == RSC_ROLE_MASTER) {</a>
+<a name="ln203">            crm_notice(&quot;Forcing unmanaged master %s to remain promoted on %s&quot;,</a>
+<a name="ln204">                       rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln205"> </a>
+<a name="ln206">        } else {</a>
+<a name="ln207">            return NULL;</a>
+<a name="ln208">        }</a>
+<a name="ln209"> </a>
+<a name="ln210">    } else if (rsc-&gt;priority &lt; 0) {</a>
+<a name="ln211">        pe_rsc_trace(rsc, &quot;%s cannot be master: preference: %d&quot;, rsc-&gt;id, rsc-&gt;priority);</a>
+<a name="ln212">        return NULL;</a>
+<a name="ln213"> </a>
+<a name="ln214">    } else if (can_run_resources(node) == FALSE) {</a>
+<a name="ln215">        crm_trace(&quot;Node can't run any resources: %s&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln216">        return NULL;</a>
+<a name="ln217">    }</a>
+<a name="ln218"> </a>
+<a name="ln219">    get_clone_variant_data(clone_data, parent);</a>
+<a name="ln220">    local_node = pe_hash_table_lookup(parent-&gt;allowed_nodes, node-&gt;details-&gt;id);</a>
+<a name="ln221"> </a>
+<a name="ln222">    if (local_node == NULL) {</a>
+<a name="ln223">        crm_err(&quot;%s cannot run on %s: node not allowed&quot;, rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln224">        return NULL;</a>
+<a name="ln225"> </a>
+<a name="ln226">    } else if (local_node-&gt;count &lt; clone_data-&gt;master_node_max</a>
+<a name="ln227">               || is_not_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln228">        return local_node;</a>
+<a name="ln229"> </a>
+<a name="ln230">    } else {</a>
+<a name="ln231">        pe_rsc_trace(rsc, &quot;%s cannot be master on %s: node full&quot;, rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln232">    }</a>
+<a name="ln233"> </a>
+<a name="ln234">    return NULL;</a>
+<a name="ln235">}</a>
+<a name="ln236"> </a>
+<a name="ln237">static gint</a>
+<a name="ln238">sort_master_instance(gconstpointer a, gconstpointer b, gpointer data_set)</a>
+<a name="ln239">{</a>
+<a name="ln240">    int rc;</a>
+<a name="ln241">    enum rsc_role_e role1 = RSC_ROLE_UNKNOWN;</a>
+<a name="ln242">    enum rsc_role_e role2 = RSC_ROLE_UNKNOWN;</a>
+<a name="ln243"> </a>
+<a name="ln244">    const resource_t *resource1 = (const resource_t *)a;</a>
+<a name="ln245">    const resource_t *resource2 = (const resource_t *)b;</a>
+<a name="ln246"> </a>
+<a name="ln247">    CRM_ASSERT(resource1 != NULL);</a>
+<a name="ln248">    CRM_ASSERT(resource2 != NULL);</a>
+<a name="ln249"> </a>
+<a name="ln250">    role1 = resource1-&gt;fns-&gt;state(resource1, TRUE);</a>
+<a name="ln251">    role2 = resource2-&gt;fns-&gt;state(resource2, TRUE);</a>
+<a name="ln252"> </a>
+<a name="ln253">    rc = sort_rsc_index(a, b);</a>
+<a name="ln254">    if (rc != 0) {</a>
+<a name="ln255">        crm_trace(&quot;%s %c %s (index)&quot;, resource1-&gt;id, rc &lt; 0 ? '&lt;' : '&gt;', resource2-&gt;id);</a>
+<a name="ln256">        return rc;</a>
+<a name="ln257">    }</a>
+<a name="ln258"> </a>
+<a name="ln259">    if (role1 &gt; role2) {</a>
+<a name="ln260">        crm_trace(&quot;%s %c %s (role)&quot;, resource1-&gt;id, '&lt;', resource2-&gt;id);</a>
+<a name="ln261">        return -1;</a>
+<a name="ln262"> </a>
+<a name="ln263">    } else if (role1 &lt; role2) {</a>
+<a name="ln264">        crm_trace(&quot;%s %c %s (role)&quot;, resource1-&gt;id, '&gt;', resource2-&gt;id);</a>
+<a name="ln265">        return 1;</a>
+<a name="ln266">    }</a>
+<a name="ln267"> </a>
+<a name="ln268">    return sort_clone_instance(a, b, data_set);</a>
+<a name="ln269">}</a>
+<a name="ln270"> </a>
+<a name="ln271">GHashTable *</a>
+<a name="ln272">master_merge_weights(resource_t * rsc, const char *rhs, GHashTable * nodes, const char *attr,</a>
+<a name="ln273">                     float factor, enum pe_weights flags)</a>
+<a name="ln274">{</a>
+<a name="ln275">    return rsc_merge_weights(rsc, rhs, nodes, attr, factor, flags);</a>
+<a name="ln276">}</a>
+<a name="ln277"> </a>
+<a name="ln278">static void</a>
+<a name="ln279">master_promotion_order(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln280">{</a>
+<a name="ln281">    GListPtr gIter = NULL;</a>
+<a name="ln282">    node_t *node = NULL;</a>
+<a name="ln283">    node_t *chosen = NULL;</a>
+<a name="ln284">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln285">    char score[33];</a>
+<a name="ln286">    size_t len = sizeof(score);</a>
+<a name="ln287"> </a>
+<a name="ln288">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln289"> </a>
+<a name="ln290">    if (clone_data-&gt;merged_master_weights) {</a>
+<a name="ln291">        return;</a>
+<a name="ln292">    }</a>
+<a name="ln293">    clone_data-&gt;merged_master_weights = TRUE;</a>
+<a name="ln294">    pe_rsc_trace(rsc, &quot;Merging weights for %s&quot;, rsc-&gt;id);</a>
+<a name="ln295">    set_bit(rsc-&gt;flags, pe_rsc_merging);</a>
+<a name="ln296"> </a>
+<a name="ln297">    gIter = rsc-&gt;children;</a>
+<a name="ln298">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln299">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln300"> </a>
+<a name="ln301">        pe_rsc_trace(rsc, &quot;Sort index: %s = %d&quot;, child-&gt;id, child-&gt;sort_index);</a>
+<a name="ln302">    }</a>
+<a name="ln303">    dump_node_scores(LOG_DEBUG_3, rsc, &quot;Before&quot;, rsc-&gt;allowed_nodes);</a>
+<a name="ln304"> </a>
+<a name="ln305">    gIter = rsc-&gt;children;</a>
+<a name="ln306">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln307">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln308"> </a>
+<a name="ln309">        chosen = child-&gt;fns-&gt;location(child, NULL, FALSE);</a>
+<a name="ln310">        if (chosen == NULL || child-&gt;sort_index &lt; 0) {</a>
+<a name="ln311">            pe_rsc_trace(rsc, &quot;Skipping %s&quot;, child-&gt;id);</a>
+<a name="ln312">            continue;</a>
+<a name="ln313">        }</a>
+<a name="ln314"> </a>
+<a name="ln315">        node = (node_t *) pe_hash_table_lookup(rsc-&gt;allowed_nodes, chosen-&gt;details-&gt;id);</a>
+<a name="ln316">        CRM_ASSERT(node != NULL);</a>
+<a name="ln317">        /* adds in master preferences and rsc_location.role=Master */</a>
+<a name="ln318">        score2char_stack(child-&gt;sort_index, score, len);</a>
+<a name="ln319">        pe_rsc_trace(rsc, &quot;Adding %s to %s from %s&quot;, score,</a>
+<a name="ln320">                     node-&gt;details-&gt;uname, child-&gt;id);</a>
+<a name="ln321">        node-&gt;weight = merge_weights(child-&gt;sort_index, node-&gt;weight);</a>
+<a name="ln322">    }</a>
+<a name="ln323"> </a>
+<a name="ln324">    dump_node_scores(LOG_DEBUG_3, rsc, &quot;Middle&quot;, rsc-&gt;allowed_nodes);</a>
+<a name="ln325"> </a>
+<a name="ln326">    gIter = rsc-&gt;rsc_cons;</a>
+<a name="ln327">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln328">        rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln329"> </a>
+<a name="ln330">        /* (re-)adds location preferences of resources that the</a>
+<a name="ln331">         * master instance should/must be colocated with</a>
+<a name="ln332">         */</a>
+<a name="ln333">        if (constraint-&gt;role_lh == RSC_ROLE_MASTER) {</a>
+<a name="ln334">            enum pe_weights flags = constraint-&gt;score == INFINITY ? 0 : pe_weights_rollback;</a>
+<a name="ln335"> </a>
+<a name="ln336">            pe_rsc_trace(rsc, &quot;RHS: %s with %s: %d&quot;, constraint-&gt;rsc_lh-&gt;id, constraint-&gt;rsc_rh-&gt;id,</a>
+<a name="ln337">                         constraint-&gt;score);</a>
+<a name="ln338">            rsc-&gt;allowed_nodes =</a>
+<a name="ln339">                constraint-&gt;rsc_rh-&gt;cmds-&gt;merge_weights(constraint-&gt;rsc_rh, rsc-&gt;id,</a>
+<a name="ln340">                                                        rsc-&gt;allowed_nodes,</a>
+<a name="ln341">                                                        constraint-&gt;node_attribute,</a>
+<a name="ln342">                                                        (float)constraint-&gt;score / INFINITY, flags);</a>
+<a name="ln343">        }</a>
+<a name="ln344">    }</a>
+<a name="ln345"> </a>
+<a name="ln346">    gIter = rsc-&gt;rsc_cons_lhs;</a>
+<a name="ln347">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln348">        rsc_colocation_t *constraint = (rsc_colocation_t *) gIter-&gt;data;</a>
+<a name="ln349"> </a>
+<a name="ln350">        /* (re-)adds location preferences of resource that wish to be</a>
+<a name="ln351">         * colocated with the master instance</a>
+<a name="ln352">         */</a>
+<a name="ln353">        if (constraint-&gt;role_rh == RSC_ROLE_MASTER) {</a>
+<a name="ln354">            pe_rsc_trace(rsc, &quot;LHS: %s with %s: %d&quot;, constraint-&gt;rsc_lh-&gt;id, constraint-&gt;rsc_rh-&gt;id,</a>
+<a name="ln355">                         constraint-&gt;score);</a>
+<a name="ln356">            rsc-&gt;allowed_nodes =</a>
+<a name="ln357">                constraint-&gt;rsc_lh-&gt;cmds-&gt;merge_weights(constraint-&gt;rsc_lh, rsc-&gt;id,</a>
+<a name="ln358">                                                        rsc-&gt;allowed_nodes,</a>
+<a name="ln359">                                                        constraint-&gt;node_attribute,</a>
+<a name="ln360">                                                        (float)constraint-&gt;score / INFINITY,</a>
+<a name="ln361">                                                        (pe_weights_rollback |</a>
+<a name="ln362">                                                         pe_weights_positive));</a>
+<a name="ln363">        }</a>
+<a name="ln364">    }</a>
+<a name="ln365"> </a>
+<a name="ln366">    gIter = rsc-&gt;rsc_tickets;</a>
+<a name="ln367">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln368">        rsc_ticket_t *rsc_ticket = (rsc_ticket_t *) gIter-&gt;data;</a>
+<a name="ln369"> </a>
+<a name="ln370">        if (rsc_ticket-&gt;role_lh == RSC_ROLE_MASTER</a>
+<a name="ln371">            &amp;&amp; (rsc_ticket-&gt;ticket-&gt;granted == FALSE || rsc_ticket-&gt;ticket-&gt;standby)) {</a>
+<a name="ln372">            resource_location(rsc, NULL, -INFINITY, &quot;__stateful_without_ticket__&quot;, data_set);</a>
+<a name="ln373">        }</a>
+<a name="ln374">    }</a>
+<a name="ln375"> </a>
+<a name="ln376">    dump_node_scores(LOG_DEBUG_3, rsc, &quot;After&quot;, rsc-&gt;allowed_nodes);</a>
+<a name="ln377"> </a>
+<a name="ln378">    /* write them back and sort */</a>
+<a name="ln379"> </a>
+<a name="ln380">    gIter = rsc-&gt;children;</a>
+<a name="ln381">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln382">        resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln383"> </a>
+<a name="ln384">        chosen = child-&gt;fns-&gt;location(child, NULL, FALSE);</a>
+<a name="ln385">        if (is_not_set(child-&gt;flags, pe_rsc_managed) &amp;&amp; child-&gt;next_role == RSC_ROLE_MASTER) {</a>
+<a name="ln386">            child-&gt;sort_index = INFINITY;</a>
+<a name="ln387"> </a>
+<a name="ln388">        } else if (chosen == NULL || child-&gt;sort_index &lt; 0) {</a>
+<a name="ln389">            pe_rsc_trace(rsc, &quot;%s: %d&quot;, child-&gt;id, child-&gt;sort_index);</a>
+<a name="ln390"> </a>
+<a name="ln391">        } else {</a>
+<a name="ln392">            node = (node_t *) pe_hash_table_lookup(rsc-&gt;allowed_nodes, chosen-&gt;details-&gt;id);</a>
+<a name="ln393">            CRM_ASSERT(node != NULL);</a>
+<a name="ln394"> </a>
+<a name="ln395">            child-&gt;sort_index = node-&gt;weight;</a>
+<a name="ln396">        }</a>
+<a name="ln397">        pe_rsc_trace(rsc, &quot;Set sort index: %s = %d&quot;, child-&gt;id, child-&gt;sort_index);</a>
+<a name="ln398">    }</a>
+<a name="ln399"> </a>
+<a name="ln400">    rsc-&gt;children = g_list_sort_with_data(rsc-&gt;children, sort_master_instance, data_set);</a>
+<a name="ln401">    clear_bit(rsc-&gt;flags, pe_rsc_merging);</a>
+<a name="ln402">}</a>
+<a name="ln403"> </a>
+<a name="ln404">static gboolean</a>
+<a name="ln405">filter_anonymous_instance(resource_t * rsc, node_t * node)</a>
+<a name="ln406">{</a>
+<a name="ln407">    GListPtr rIter = NULL;</a>
+<a name="ln408">    char *key = clone_strip(rsc-&gt;id);</a>
+<a name="ln409">    resource_t *parent = uber_parent(rsc);</a>
+<a name="ln410"> </a>
+<a name="ln411">    for (rIter = parent-&gt;children; rIter; rIter = rIter-&gt;next) {</a>
+<a name="ln412">        resource_t *child = rIter-&gt;data;</a>
+<a name="ln413">        resource_t *active = parent-&gt;fns-&gt;find_rsc(child, key, node, pe_find_clone|pe_find_current);</a>
+<a name="ln414"> </a>
+<a name="ln415">        /*</a>
+<a name="ln416">         * Look for an active instance on $node, if there is one, only it receives the master score</a>
+<a name="ln417">         * Use -&gt;find_rsc() because we might be a cloned group</a>
+<a name="ln418">         */</a>
+<a name="ln419">        if(rsc == active) {</a>
+<a name="ln420">            pe_rsc_trace(rsc, &quot;Found %s for %s active on %s: done&quot;, active-&gt;id, key, node-&gt;details-&gt;uname);</a>
+<a name="ln421">            free(key);</a>
+<a name="ln422">            return TRUE;</a>
+<a name="ln423">        } else if(active) {</a>
+<a name="ln424">            pe_rsc_trace(rsc, &quot;Found %s for %s on %s: not %s&quot;, active-&gt;id, key, node-&gt;details-&gt;uname, rsc-&gt;id);</a>
+<a name="ln425">            free(key);</a>
+<a name="ln426">            return FALSE;</a>
+<a name="ln427">        } else {</a>
+<a name="ln428">            pe_rsc_trace(rsc, &quot;%s on %s: not active&quot;, key, node-&gt;details-&gt;uname);</a>
+<a name="ln429">        }</a>
+<a name="ln430">    }</a>
+<a name="ln431"> </a>
+<a name="ln432">    for (rIter = parent-&gt;children; rIter; rIter = rIter-&gt;next) {</a>
+<a name="ln433">        resource_t *child = rIter-&gt;data;</a>
+<a name="ln434"> </a>
+<a name="ln435">        /*</a>
+<a name="ln436">         * We know it's not running, but any score will still count if</a>
+<a name="ln437">         * the instance has been probed on $node</a>
+<a name="ln438">         *</a>
+<a name="ln439">         * Again use -&gt;find_rsc() because we might be a cloned group</a>
+<a name="ln440">         * and knowing that other members of the group are known here</a>
+<a name="ln441">         * implies nothing</a>
+<a name="ln442">         */</a>
+<a name="ln443">        rsc = parent-&gt;fns-&gt;find_rsc(child, key, NULL, pe_find_clone);</a>
+<a name="ln444">        CRM_LOG_ASSERT(rsc);</a>
+<a name="ln445">        if(rsc) {</a>
+<a name="ln446">            pe_rsc_trace(rsc, &quot;Checking %s for %s on %s&quot;, rsc-&gt;id, key, node-&gt;details-&gt;uname);</a>
+<a name="ln447">            if (g_hash_table_lookup(rsc-&gt;known_on, node-&gt;details-&gt;id)) {</a>
+<a name="ln448">                free(key);</a>
+<a name="ln449">                return TRUE;</a>
+<a name="ln450">            }</a>
+<a name="ln451">        }</a>
+<a name="ln452">    }</a>
+<a name="ln453">    free(key);</a>
+<a name="ln454">    return FALSE;</a>
+<a name="ln455">}</a>
+<a name="ln456"> </a>
+<a name="ln457">static int</a>
+<a name="ln458">master_score(resource_t * rsc, node_t * node, int not_set_value)</a>
+<a name="ln459">{</a>
+<a name="ln460">    char *attr_name;</a>
+<a name="ln461">    char *name = rsc-&gt;id;</a>
+<a name="ln462">    const char *attr_value = NULL;</a>
+<a name="ln463">    int score = not_set_value, len = 0;</a>
+<a name="ln464"> </a>
+<a name="ln465">    if (rsc-&gt;children) {</a>
+<a name="ln466">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln467"> </a>
+<a name="ln468">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln469">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln470">            int c_score = master_score(child, node, not_set_value);</a>
+<a name="ln471"> </a>
+<a name="ln472">            if (score == not_set_value) {</a>
+<a name="ln473">                score = c_score;</a>
+<a name="ln474">            } else {</a>
+<a name="ln475">                score += c_score;</a>
+<a name="ln476">            }</a>
+<a name="ln477">        }</a>
+<a name="ln478">        return score;</a>
+<a name="ln479">    }</a>
+<a name="ln480"> </a>
+<a name="ln481">    if (node == NULL) {</a>
+<a name="ln482">        if (rsc-&gt;fns-&gt;state(rsc, TRUE) &lt; RSC_ROLE_STARTED) {</a>
+<a name="ln483">            pe_rsc_trace(rsc, &quot;Ignoring master score for %s: unknown state&quot;, rsc-&gt;id);</a>
+<a name="ln484">            return score;</a>
+<a name="ln485">        }</a>
+<a name="ln486"> </a>
+<a name="ln487">    } else {</a>
+<a name="ln488">        node_t *match = pe_find_node_id(rsc-&gt;running_on, node-&gt;details-&gt;id);</a>
+<a name="ln489">        node_t *known = pe_hash_table_lookup(rsc-&gt;known_on, node-&gt;details-&gt;id);</a>
+<a name="ln490"> </a>
+<a name="ln491">        if (is_not_set(rsc-&gt;flags, pe_rsc_unique) &amp;&amp; filter_anonymous_instance(rsc, node)) {</a>
+<a name="ln492">            pe_rsc_trace(rsc, &quot;Anonymous clone %s is allowed on %s&quot;, rsc-&gt;id, node-&gt;details-&gt;uname);</a>
+<a name="ln493"> </a>
+<a name="ln494">        } else if (match == NULL &amp;&amp; known == NULL) {</a>
+<a name="ln495">            pe_rsc_trace(rsc, &quot;%s (aka. %s) has been filtered on %s - ignoring&quot;, rsc-&gt;id,</a>
+<a name="ln496">                         rsc-&gt;clone_name, node-&gt;details-&gt;uname);</a>
+<a name="ln497">            return score;</a>
+<a name="ln498">        }</a>
+<a name="ln499"> </a>
+<a name="ln500">        match = pe_hash_table_lookup(rsc-&gt;allowed_nodes, node-&gt;details-&gt;id);</a>
+<a name="ln501">        if (match == NULL) {</a>
+<a name="ln502">            return score;</a>
+<a name="ln503"> </a>
+<a name="ln504">        } else if (match-&gt;weight &lt; 0) {</a>
+<a name="ln505">            pe_rsc_trace(rsc, &quot;%s on %s has score: %d - ignoring&quot;,</a>
+<a name="ln506">                         rsc-&gt;id, match-&gt;details-&gt;uname, match-&gt;weight);</a>
+<a name="ln507">            return score;</a>
+<a name="ln508">        }</a>
+<a name="ln509">    }</a>
+<a name="ln510"> </a>
+<a name="ln511">    if (rsc-&gt;clone_name) {</a>
+<a name="ln512">        /* Use the name the lrm knows this resource as,</a>
+<a name="ln513">         * since that's what crm_master would have used too</a>
+<a name="ln514">         */</a>
+<a name="ln515">        name = rsc-&gt;clone_name;</a>
+<a name="ln516">    }</a>
+<a name="ln517"> </a>
+<a name="ln518">    len = 8 + strlen(name);</a>
+<a name="ln519">    attr_name = calloc(1, len);</a>
+<a name="ln520">    sprintf(attr_name, &quot;master-%s&quot;, name);</a>
+<a name="ln521"> </a>
+<a name="ln522">    if (node) {</a>
+<a name="ln523">        attr_value = g_hash_table_lookup(node-&gt;details-&gt;attrs, attr_name);</a>
+<a name="ln524">        pe_rsc_trace(rsc, &quot;%s: %s[%s] = %s&quot;, rsc-&gt;id, attr_name, node-&gt;details-&gt;uname,</a>
+<a name="ln525">                     crm_str(attr_value));</a>
+<a name="ln526">    }</a>
+<a name="ln527"> </a>
+<a name="ln528">    if (attr_value != NULL) {</a>
+<a name="ln529">        score = char2score(attr_value);</a>
+<a name="ln530">    }</a>
+<a name="ln531"> </a>
+<a name="ln532">    free(attr_name);</a>
+<a name="ln533">    return score;</a>
+<a name="ln534">}</a>
+<a name="ln535"> </a>
+<a name="ln536">#define max(a, b) a&lt;b?b:a</a>
+<a name="ln537"> </a>
+<a name="ln538">static void</a>
+<a name="ln539">apply_master_prefs(resource_t * rsc)</a>
+<a name="ln540">{</a>
+<a name="ln541">    int score, new_score;</a>
+<a name="ln542">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln543">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln544"> </a>
+<a name="ln545">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln546"> </a>
+<a name="ln547">    if (clone_data-&gt;applied_master_prefs) {</a>
+<a name="ln548">        /* Make sure we only do this once */</a>
+<a name="ln549">        return;</a>
+<a name="ln550">    }</a>
+<a name="ln551"> </a>
+<a name="ln552">    clone_data-&gt;applied_master_prefs = TRUE;</a>
+<a name="ln553"> </a>
+<a name="ln554">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln555">        GHashTableIter iter;</a>
+<a name="ln556">        node_t *node = NULL;</a>
+<a name="ln557">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln558"> </a>
+<a name="ln559">        g_hash_table_iter_init(&amp;iter, child_rsc-&gt;allowed_nodes);</a>
+<a name="ln560">        while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln561">            if (can_run_resources(node) == FALSE) {</a>
+<a name="ln562">                /* This node will never be promoted to master,</a>
+<a name="ln563">                 *  so don't apply the master score as that may</a>
+<a name="ln564">                 *  lead to clone shuffling</a>
+<a name="ln565">                 */</a>
+<a name="ln566">                continue;</a>
+<a name="ln567">            }</a>
+<a name="ln568"> </a>
+<a name="ln569">            score = master_score(child_rsc, node, 0);</a>
+<a name="ln570">            if (score &gt; 0) {</a>
+<a name="ln571">                new_score = merge_weights(node-&gt;weight, score);</a>
+<a name="ln572">                if (new_score != node-&gt;weight) {</a>
+<a name="ln573">                    pe_rsc_trace(rsc, &quot;\t%s: Updating preference for %s (%d-&gt;%d)&quot;,</a>
+<a name="ln574">                                 child_rsc-&gt;id, node-&gt;details-&gt;uname, node-&gt;weight, new_score);</a>
+<a name="ln575">                    node-&gt;weight = new_score;</a>
+<a name="ln576">                }</a>
+<a name="ln577">            }</a>
+<a name="ln578"> </a>
+<a name="ln579">            new_score = max(child_rsc-&gt;priority, score);</a>
+<a name="ln580">            if (new_score != child_rsc-&gt;priority) {</a>
+<a name="ln581">                pe_rsc_trace(rsc, &quot;\t%s: Updating priority (%d-&gt;%d)&quot;,</a>
+<a name="ln582">                             child_rsc-&gt;id, child_rsc-&gt;priority, new_score);</a>
+<a name="ln583">                child_rsc-&gt;priority = new_score;</a>
+<a name="ln584">            }</a>
+<a name="ln585">        }</a>
+<a name="ln586">    }</a>
+<a name="ln587">}</a>
+<a name="ln588"> </a>
+<a name="ln589">static void</a>
+<a name="ln590">set_role_slave(resource_t * rsc, gboolean current)</a>
+<a name="ln591">{</a>
+<a name="ln592">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln593"> </a>
+<a name="ln594">    if (current) {</a>
+<a name="ln595">        if (rsc-&gt;role == RSC_ROLE_STARTED) {</a>
+<a name="ln596">            rsc-&gt;role = RSC_ROLE_SLAVE;</a>
+<a name="ln597">        }</a>
+<a name="ln598"> </a>
+<a name="ln599">    } else {</a>
+<a name="ln600">        GListPtr allocated = NULL;</a>
+<a name="ln601"> </a>
+<a name="ln602">        rsc-&gt;fns-&gt;location(rsc, &amp;allocated, FALSE);</a>
+<a name="ln603"> </a>
+<a name="ln604">        if (allocated) {</a>
+<a name="ln605">            rsc-&gt;next_role = RSC_ROLE_SLAVE;</a>
+<a name="ln606"> </a>
+<a name="ln607">        } else {</a>
+<a name="ln608">            rsc-&gt;next_role = RSC_ROLE_STOPPED;</a>
+<a name="ln609">        }</a>
+<a name="ln610">        g_list_free(allocated);</a>
+<a name="ln611">    }</a>
+<a name="ln612"> </a>
+<a name="ln613">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln614">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln615"> </a>
+<a name="ln616">        set_role_slave(child_rsc, current);</a>
+<a name="ln617">    }</a>
+<a name="ln618">}</a>
+<a name="ln619"> </a>
+<a name="ln620">static void</a>
+<a name="ln621">set_role_master(resource_t * rsc)</a>
+<a name="ln622">{</a>
+<a name="ln623">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln624"> </a>
+<a name="ln625">    if (rsc-&gt;next_role == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln626">        rsc-&gt;next_role = RSC_ROLE_MASTER;</a>
+<a name="ln627">    }</a>
+<a name="ln628"> </a>
+<a name="ln629">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln630">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln631"> </a>
+<a name="ln632">        set_role_master(child_rsc);</a>
+<a name="ln633">    }</a>
+<a name="ln634">}</a>
+<a name="ln635"> </a>
+<a name="ln636">node_t *</a>
+<a name="ln637">master_color(resource_t * rsc, node_t * prefer, pe_working_set_t * data_set)</a>
+<a name="ln638">{</a>
+<a name="ln639">    int promoted = 0;</a>
+<a name="ln640">    GListPtr gIter = NULL;</a>
+<a name="ln641">    GListPtr gIter2 = NULL;</a>
+<a name="ln642"> </a>
+<a name="ln643">    GHashTableIter iter;</a>
+<a name="ln644">    node_t *node = NULL;</a>
+<a name="ln645">    node_t *chosen = NULL;</a>
+<a name="ln646">    node_t *cons_node = NULL;</a>
+<a name="ln647">    enum rsc_role_e next_role = RSC_ROLE_UNKNOWN;</a>
+<a name="ln648"> </a>
+<a name="ln649">    char score[33];</a>
+<a name="ln650">    size_t len = sizeof(score);</a>
+<a name="ln651"> </a>
+<a name="ln652">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln653"> </a>
+<a name="ln654">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln655"> </a>
+<a name="ln656">    if (is_not_set(rsc-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln657">        return NULL;</a>
+<a name="ln658"> </a>
+<a name="ln659">    } else if (is_set(rsc-&gt;flags, pe_rsc_allocating)) {</a>
+<a name="ln660">        pe_rsc_debug(rsc, &quot;Dependency loop detected involving %s&quot;, rsc-&gt;id);</a>
+<a name="ln661">        return NULL;</a>
+<a name="ln662">    }</a>
+<a name="ln663"> </a>
+<a name="ln664">    apply_master_prefs(rsc);</a>
+<a name="ln665"> </a>
+<a name="ln666">    clone_color(rsc, prefer, data_set);</a>
+<a name="ln667"> </a>
+<a name="ln668">    set_bit(rsc-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln669"> </a>
+<a name="ln670">    /* count now tracks the number of masters allocated */</a>
+<a name="ln671">    g_hash_table_iter_init(&amp;iter, rsc-&gt;allowed_nodes);</a>
+<a name="ln672">    while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln673">        node-&gt;count = 0;</a>
+<a name="ln674">    }</a>
+<a name="ln675"> </a>
+<a name="ln676">    /*</a>
+<a name="ln677">     * assign priority</a>
+<a name="ln678">     */</a>
+<a name="ln679">    gIter = rsc-&gt;children;</a>
+<a name="ln680">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln681">        GListPtr list = NULL;</a>
+<a name="ln682">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln683"> </a>
+<a name="ln684">        pe_rsc_trace(rsc, &quot;Assigning priority for %s: %s&quot;, child_rsc-&gt;id,</a>
+<a name="ln685">                     role2text(child_rsc-&gt;next_role));</a>
+<a name="ln686"> </a>
+<a name="ln687">        if (child_rsc-&gt;fns-&gt;state(child_rsc, TRUE) == RSC_ROLE_STARTED) {</a>
+<a name="ln688">            set_role_slave(child_rsc, TRUE);</a>
+<a name="ln689">        }</a>
+<a name="ln690"> </a>
+<a name="ln691">        chosen = child_rsc-&gt;fns-&gt;location(child_rsc, &amp;list, FALSE);</a>
+<a name="ln692">        if (g_list_length(list) &gt; 1) {</a>
+<a name="ln693">            crm_config_err(&quot;Cannot promote non-colocated child %s&quot;, child_rsc-&gt;id);</a>
+<a name="ln694">        }</a>
+<a name="ln695"> </a>
+<a name="ln696">        g_list_free(list);</a>
+<a name="ln697">        if (chosen == NULL) {</a>
+<a name="ln698">            continue;</a>
+<a name="ln699">        }</a>
+<a name="ln700"> </a>
+<a name="ln701">        next_role = child_rsc-&gt;fns-&gt;state(child_rsc, FALSE);</a>
+<a name="ln702">        switch (next_role) {</a>
+<a name="ln703">            case RSC_ROLE_STARTED:</a>
+<a name="ln704">            case RSC_ROLE_UNKNOWN:</a>
+<a name="ln705">                CRM_CHECK(chosen != NULL, break);</a>
+<a name="ln706">                /*</a>
+<a name="ln707">                 * Default to -1 if no value is set</a>
+<a name="ln708">                 *</a>
+<a name="ln709">                 * This allows master locations to be specified</a>
+<a name="ln710">                 * based solely on rsc_location constraints,</a>
+<a name="ln711">                 * but prevents anyone from being promoted if</a>
+<a name="ln712">                 * neither a constraint nor a master-score is present</a>
+<a name="ln713">                 */</a>
+<a name="ln714">                child_rsc-&gt;priority = master_score(child_rsc, chosen, -1);</a>
+<a name="ln715">                break;</a>
+<a name="ln716"> </a>
+<a name="ln717">            case RSC_ROLE_SLAVE:</a>
+<a name="ln718">            case RSC_ROLE_STOPPED:</a>
+<a name="ln719">                child_rsc-&gt;priority = -INFINITY;</a>
+<a name="ln720">                break;</a>
+<a name="ln721">            case RSC_ROLE_MASTER:</a>
+<a name="ln722">                /* We will arrive here if we're re-creating actions after a stonith</a>
+<a name="ln723">                 */</a>
+<a name="ln724">                break;</a>
+<a name="ln725">            default:</a>
+<a name="ln726">                CRM_CHECK(FALSE /* unhandled */ ,</a>
+<a name="ln727">                          crm_err(&quot;Unknown resource role: %d for %s&quot;, next_role, child_rsc-&gt;id));</a>
+<a name="ln728">        }</a>
+<a name="ln729"> </a>
+<a name="ln730">        apply_master_location(child_rsc-&gt;rsc_location);</a>
+<a name="ln731">        apply_master_location(rsc-&gt;rsc_location);</a>
+<a name="ln732"> </a>
+<a name="ln733">        gIter2 = child_rsc-&gt;rsc_cons;</a>
+<a name="ln734">        for (; gIter2 != NULL; gIter2 = gIter2-&gt;next) {</a>
+<a name="ln735">            rsc_colocation_t *cons = (rsc_colocation_t *) gIter2-&gt;data;</a>
+<a name="ln736"> </a>
+<a name="ln737">            child_rsc-&gt;cmds-&gt;rsc_colocation_lh(child_rsc, cons-&gt;rsc_rh, cons);</a>
+<a name="ln738">        }</a>
+<a name="ln739"> </a>
+<a name="ln740">        child_rsc-&gt;sort_index = child_rsc-&gt;priority;</a>
+<a name="ln741">        pe_rsc_trace(rsc, &quot;Assigning priority for %s: %d&quot;, child_rsc-&gt;id, child_rsc-&gt;priority);</a>
+<a name="ln742"> </a>
+<a name="ln743">        if (next_role == RSC_ROLE_MASTER) {</a>
+<a name="ln744">            child_rsc-&gt;sort_index = INFINITY;</a>
+<a name="ln745">        }</a>
+<a name="ln746">    }</a>
+<a name="ln747"> </a>
+<a name="ln748">    dump_node_scores(LOG_DEBUG_3, rsc, &quot;Pre merge&quot;, rsc-&gt;allowed_nodes);</a>
+<a name="ln749">    master_promotion_order(rsc, data_set);</a>
+<a name="ln750"> </a>
+<a name="ln751">    /* mark the first N as masters */</a>
+<a name="ln752"> </a>
+<a name="ln753">    gIter = rsc-&gt;children;</a>
+<a name="ln754">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln755">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln756">        score2char_stack(child_rsc-&gt;sort_index, score, len);</a>
+<a name="ln757"> </a>
+<a name="ln758">        chosen = child_rsc-&gt;fns-&gt;location(child_rsc, NULL, FALSE);</a>
+<a name="ln759">        if (show_scores) {</a>
+<a name="ln760">            fprintf(stdout, &quot;%s promotion score on %s: %s\n&quot;,</a>
+<a name="ln761">                    child_rsc-&gt;id, chosen ? chosen-&gt;details-&gt;uname : &quot;none&quot;, score);</a>
+<a name="ln762"> </a>
+<a name="ln763">        } else {</a>
+<a name="ln764">            do_crm_log(scores_log_level, &quot;%s promotion score on %s: %s&quot;,</a>
+<a name="ln765">                       child_rsc-&gt;id, chosen ? chosen-&gt;details-&gt;uname : &quot;none&quot;, score);</a>
+<a name="ln766">        }</a>
+<a name="ln767"> </a>
+<a name="ln768">        chosen = NULL;          /* nuke 'chosen' so that we don't promote more than the</a>
+<a name="ln769">                                 * required number of instances</a>
+<a name="ln770">                                 */</a>
+<a name="ln771"> </a>
+<a name="ln772">        if (child_rsc-&gt;sort_index &lt; 0) {</a>
+<a name="ln773">            pe_rsc_trace(rsc, &quot;Not supposed to promote child: %s&quot;, child_rsc-&gt;id);</a>
+<a name="ln774"> </a>
+<a name="ln775">        } else if (promoted &lt; clone_data-&gt;master_max || is_not_set(rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln776">            chosen = can_be_master(child_rsc);</a>
+<a name="ln777">        }</a>
+<a name="ln778"> </a>
+<a name="ln779">        pe_rsc_debug(rsc, &quot;%s master score: %d&quot;, child_rsc-&gt;id, child_rsc-&gt;priority);</a>
+<a name="ln780"> </a>
+<a name="ln781">        if (chosen == NULL) {</a>
+<a name="ln782">            set_role_slave(child_rsc, FALSE);</a>
+<a name="ln783">            continue;</a>
+<a name="ln784"> </a>
+<a name="ln785">        } else if(child_rsc-&gt;role &lt; RSC_ROLE_MASTER</a>
+<a name="ln786">              &amp;&amp; is_set(data_set-&gt;flags, pe_flag_have_quorum) == FALSE</a>
+<a name="ln787">              &amp;&amp; data_set-&gt;no_quorum_policy == no_quorum_freeze) {</a>
+<a name="ln788">            crm_notice(&quot;Resource %s cannot be elevated from %s to %s: no-quorum-policy=freeze&quot;,</a>
+<a name="ln789">                       child_rsc-&gt;id, role2text(child_rsc-&gt;role), role2text(child_rsc-&gt;next_role));</a>
+<a name="ln790">            set_role_slave(child_rsc, FALSE);</a>
+<a name="ln791">            continue;</a>
+<a name="ln792">        }</a>
+<a name="ln793"> </a>
+<a name="ln794">        chosen-&gt;count++;</a>
+<a name="ln795">        pe_rsc_info(rsc, &quot;Promoting %s (%s %s)&quot;,</a>
+<a name="ln796">                    child_rsc-&gt;id, role2text(child_rsc-&gt;role), chosen-&gt;details-&gt;uname);</a>
+<a name="ln797">        set_role_master(child_rsc);</a>
+<a name="ln798">        promoted++;</a>
+<a name="ln799">    }</a>
+<a name="ln800"> </a>
+<a name="ln801">    clone_data-&gt;masters_allocated = promoted;</a>
+<a name="ln802">    pe_rsc_info(rsc, &quot;%s: Promoted %d instances of a possible %d to master&quot;,</a>
+<a name="ln803">                rsc-&gt;id, promoted, clone_data-&gt;master_max);</a>
+<a name="ln804"> </a>
+<a name="ln805">    clear_bit(rsc-&gt;flags, pe_rsc_provisional);</a>
+<a name="ln806">    clear_bit(rsc-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln807"> </a>
+<a name="ln808">    return NULL;</a>
+<a name="ln809">}</a>
+<a name="ln810"> </a>
+<a name="ln811">void</a>
+<a name="ln812">master_create_actions(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln813">{</a>
+<a name="ln814">    action_t *action = NULL;</a>
+<a name="ln815">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln816">    action_t *action_complete = NULL;</a>
+<a name="ln817">    gboolean any_promoting = FALSE;</a>
+<a name="ln818">    gboolean any_demoting = FALSE;</a>
+<a name="ln819">    resource_t *last_promote_rsc = NULL;</a>
+<a name="ln820">    resource_t *last_demote_rsc = NULL;</a>
+<a name="ln821"> </a>
+<a name="ln822">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln823"> </a>
+<a name="ln824">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln825"> </a>
+<a name="ln826">    pe_rsc_debug(rsc, &quot;Creating actions for %s&quot;, rsc-&gt;id);</a>
+<a name="ln827"> </a>
+<a name="ln828">    /* create actions as normal */</a>
+<a name="ln829">    clone_create_actions(rsc, data_set);</a>
+<a name="ln830"> </a>
+<a name="ln831">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln832">        gboolean child_promoting = FALSE;</a>
+<a name="ln833">        gboolean child_demoting = FALSE;</a>
+<a name="ln834">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln835"> </a>
+<a name="ln836">        pe_rsc_trace(rsc, &quot;Creating actions for %s&quot;, child_rsc-&gt;id);</a>
+<a name="ln837">        child_rsc-&gt;cmds-&gt;create_actions(child_rsc, data_set);</a>
+<a name="ln838">        master_update_pseudo_status(child_rsc, &amp;child_demoting, &amp;child_promoting);</a>
+<a name="ln839"> </a>
+<a name="ln840">        any_demoting = any_demoting || child_demoting;</a>
+<a name="ln841">        any_promoting = any_promoting || child_promoting;</a>
+<a name="ln842">        pe_rsc_trace(rsc, &quot;Created actions for %s: %d %d&quot;, child_rsc-&gt;id, child_promoting,</a>
+<a name="ln843">                     child_demoting);</a>
+<a name="ln844">    }</a>
+<a name="ln845"> </a>
+<a name="ln846">    /* promote */</a>
+<a name="ln847">    action = promote_action(rsc, NULL, !any_promoting);</a>
+<a name="ln848">    action_complete = custom_action(rsc, promoted_key(rsc),</a>
+<a name="ln849">                                    RSC_PROMOTED, NULL, !any_promoting, TRUE, data_set);</a>
+<a name="ln850"> </a>
+<a name="ln851">    action_complete-&gt;priority = INFINITY;</a>
+<a name="ln852">    update_action_flags(action, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln853">    update_action_flags(action, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln854">    update_action_flags(action_complete, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln855">    update_action_flags(action_complete, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln856"> </a>
+<a name="ln857">    if (clone_data-&gt;masters_allocated &gt; 0) {</a>
+<a name="ln858">        update_action_flags(action, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln859">        update_action_flags(action_complete, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln860">    }</a>
+<a name="ln861"> </a>
+<a name="ln862">    child_promoting_constraints(clone_data, pe_order_optional,</a>
+<a name="ln863">                                rsc, NULL, last_promote_rsc, data_set);</a>
+<a name="ln864"> </a>
+<a name="ln865">    if (clone_data-&gt;promote_notify == NULL) {</a>
+<a name="ln866">        clone_data-&gt;promote_notify =</a>
+<a name="ln867">            create_notification_boundaries(rsc, RSC_PROMOTE, action, action_complete, data_set);</a>
+<a name="ln868">    }</a>
+<a name="ln869"> </a>
+<a name="ln870">    /* demote */</a>
+<a name="ln871">    action = demote_action(rsc, NULL, !any_demoting);</a>
+<a name="ln872">    action_complete = custom_action(rsc, demoted_key(rsc),</a>
+<a name="ln873">                                    RSC_DEMOTED, NULL, !any_demoting, TRUE, data_set);</a>
+<a name="ln874">    action_complete-&gt;priority = INFINITY;</a>
+<a name="ln875"> </a>
+<a name="ln876">    update_action_flags(action, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln877">    update_action_flags(action, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln878">    update_action_flags(action_complete, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln879">    update_action_flags(action_complete, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln880"> </a>
+<a name="ln881">    child_demoting_constraints(clone_data, pe_order_optional, rsc, NULL, last_demote_rsc, data_set);</a>
+<a name="ln882"> </a>
+<a name="ln883">    if (clone_data-&gt;demote_notify == NULL) {</a>
+<a name="ln884">        clone_data-&gt;demote_notify =</a>
+<a name="ln885">            create_notification_boundaries(rsc, RSC_DEMOTE, action, action_complete, data_set);</a>
+<a name="ln886"> </a>
+<a name="ln887">        if (clone_data-&gt;promote_notify) {</a>
+<a name="ln888">            /* If we ever wanted groups to have notifications we'd need to move this to native_internal_constraints() one day</a>
+<a name="ln889">             * Requires exposing *_notify</a>
+<a name="ln890">             */</a>
+<a name="ln891">            order_actions(clone_data-&gt;stop_notify-&gt;post_done, clone_data-&gt;promote_notify-&gt;pre,</a>
+<a name="ln892">                          pe_order_optional);</a>
+<a name="ln893">            order_actions(clone_data-&gt;start_notify-&gt;post_done, clone_data-&gt;promote_notify-&gt;pre,</a>
+<a name="ln894">                          pe_order_optional);</a>
+<a name="ln895">            order_actions(clone_data-&gt;demote_notify-&gt;post_done, clone_data-&gt;promote_notify-&gt;pre,</a>
+<a name="ln896">                          pe_order_optional);</a>
+<a name="ln897">            order_actions(clone_data-&gt;demote_notify-&gt;post_done, clone_data-&gt;start_notify-&gt;pre,</a>
+<a name="ln898">                          pe_order_optional);</a>
+<a name="ln899">            order_actions(clone_data-&gt;demote_notify-&gt;post_done, clone_data-&gt;stop_notify-&gt;pre,</a>
+<a name="ln900">                          pe_order_optional);</a>
+<a name="ln901">        }</a>
+<a name="ln902">    }</a>
+<a name="ln903"> </a>
+<a name="ln904">    /* restore the correct priority */</a>
+<a name="ln905"> </a>
+<a name="ln906">    gIter = rsc-&gt;children;</a>
+<a name="ln907">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln908">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln909"> </a>
+<a name="ln910">        child_rsc-&gt;priority = rsc-&gt;priority;</a>
+<a name="ln911">    }</a>
+<a name="ln912">}</a>
+<a name="ln913"> </a>
+<a name="ln914">void</a>
+<a name="ln915">master_internal_constraints(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln916">{</a>
+<a name="ln917">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln918">    resource_t *last_rsc = NULL;</a>
+<a name="ln919">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln920"> </a>
+<a name="ln921">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln922"> </a>
+<a name="ln923">    clone_internal_constraints(rsc, data_set);</a>
+<a name="ln924"> </a>
+<a name="ln925">    /* global stopped before start */</a>
+<a name="ln926">    new_rsc_order(rsc, RSC_STOPPED, rsc, RSC_START, pe_order_optional, data_set);</a>
+<a name="ln927"> </a>
+<a name="ln928">    /* global stopped before promote */</a>
+<a name="ln929">    new_rsc_order(rsc, RSC_STOPPED, rsc, RSC_PROMOTE, pe_order_optional, data_set);</a>
+<a name="ln930"> </a>
+<a name="ln931">    /* global demoted before start */</a>
+<a name="ln932">    new_rsc_order(rsc, RSC_DEMOTED, rsc, RSC_START, pe_order_optional, data_set);</a>
+<a name="ln933"> </a>
+<a name="ln934">    /* global started before promote */</a>
+<a name="ln935">    new_rsc_order(rsc, RSC_STARTED, rsc, RSC_PROMOTE, pe_order_optional, data_set);</a>
+<a name="ln936"> </a>
+<a name="ln937">    /* global demoted before stop */</a>
+<a name="ln938">    new_rsc_order(rsc, RSC_DEMOTED, rsc, RSC_STOP, pe_order_optional, data_set);</a>
+<a name="ln939"> </a>
+<a name="ln940">    /* global demote before demoted */</a>
+<a name="ln941">    new_rsc_order(rsc, RSC_DEMOTE, rsc, RSC_DEMOTED, pe_order_optional, data_set);</a>
+<a name="ln942"> </a>
+<a name="ln943">    /* global demoted before promote */</a>
+<a name="ln944">    new_rsc_order(rsc, RSC_DEMOTED, rsc, RSC_PROMOTE, pe_order_optional, data_set);</a>
+<a name="ln945"> </a>
+<a name="ln946">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln947">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln948"> </a>
+<a name="ln949">        /* child demote before promote */</a>
+<a name="ln950">        new_rsc_order(child_rsc, RSC_DEMOTE, child_rsc, RSC_PROMOTE, pe_order_optional, data_set);</a>
+<a name="ln951"> </a>
+<a name="ln952">        child_promoting_constraints(clone_data, pe_order_optional,</a>
+<a name="ln953">                                    rsc, child_rsc, last_rsc, data_set);</a>
+<a name="ln954"> </a>
+<a name="ln955">        child_demoting_constraints(clone_data, pe_order_optional,</a>
+<a name="ln956">                                   rsc, child_rsc, last_rsc, data_set);</a>
+<a name="ln957"> </a>
+<a name="ln958">        last_rsc = child_rsc;</a>
+<a name="ln959">    }</a>
+<a name="ln960">}</a>
+<a name="ln961"> </a>
+<a name="ln962">static void</a>
+<a name="ln963">node_hash_update_one(GHashTable * hash, node_t * other, const char *attr, int score)</a>
+<a name="ln964">{</a>
+<a name="ln965">    GHashTableIter iter;</a>
+<a name="ln966">    node_t *node = NULL;</a>
+<a name="ln967">    const char *value = NULL;</a>
+<a name="ln968"> </a>
+<a name="ln969">    if (other == NULL) {</a>
+<a name="ln970">        return;</a>
+<a name="ln971"> </a>
+<a name="ln972">    } else if (attr == NULL) {</a>
+<a name="ln973">        attr = &quot;#&quot; XML_ATTR_UNAME;</a>
+<a name="ln974">    }</a>
+<a name="ln975"> </a>
+<a name="ln976">    value = g_hash_table_lookup(other-&gt;details-&gt;attrs, attr);</a>
+<a name="ln977">    g_hash_table_iter_init(&amp;iter, hash);</a>
+<a name="ln978">    while (g_hash_table_iter_next(&amp;iter, NULL, (void **)&amp;node)) {</a>
+<a name="ln979">        const char *tmp = g_hash_table_lookup(node-&gt;details-&gt;attrs, attr);</a>
+<a name="ln980"> </a>
+<a name="ln981">        if (safe_str_eq(value, tmp)) {</a>
+<a name="ln982">            crm_trace(&quot;%s: %d + %d&quot;, node-&gt;details-&gt;uname, node-&gt;weight, other-&gt;weight);</a>
+<a name="ln983">            node-&gt;weight = merge_weights(node-&gt;weight, score);</a>
+<a name="ln984">        }</a>
+<a name="ln985">    }</a>
+<a name="ln986">}</a>
+<a name="ln987"> </a>
+<a name="ln988">void</a>
+<a name="ln989">master_rsc_colocation_rh(resource_t * rsc_lh, resource_t * rsc_rh, rsc_colocation_t * constraint)</a>
+<a name="ln990">{</a>
+<a name="ln991">    GListPtr gIter = NULL;</a>
+<a name="ln992"> </a>
+<a name="ln993">    CRM_CHECK(rsc_rh != NULL, return);</a>
+<a name="ln994">    if (is_set(rsc_rh-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln995">        return;</a>
+<a name="ln996"> </a>
+<a name="ln997">    } else if (constraint-&gt;role_rh == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln998">        pe_rsc_trace(rsc_rh, &quot;Handling %s as a clone colocation&quot;, constraint-&gt;id);</a>
+<a name="ln999">        clone_rsc_colocation_rh(rsc_lh, rsc_rh, constraint);</a>
+<a name="ln1000">        return;</a>
+<a name="ln1001">    }</a>
+<a name="ln1002"> </a>
+<a name="ln1003">    CRM_CHECK(rsc_lh != NULL, return);</a>
+<a name="ln1004">    CRM_CHECK(rsc_lh-&gt;variant == pe_native, return);</a>
+<a name="ln1005">    pe_rsc_trace(rsc_rh, &quot;Processing constraint %s: %d&quot;, constraint-&gt;id, constraint-&gt;score);</a>
+<a name="ln1006"> </a>
+<a name="ln1007">    if (constraint-&gt;role_rh == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln1008"> </a>
+<a name="ln1009">        gIter = rsc_rh-&gt;children;</a>
+<a name="ln1010">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1011">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1012"> </a>
+<a name="ln1013">            child_rsc-&gt;cmds-&gt;rsc_colocation_rh(rsc_lh, child_rsc, constraint);</a>
+<a name="ln1014">        }</a>
+<a name="ln1015"> </a>
+<a name="ln1016">    } else if (is_set(rsc_lh-&gt;flags, pe_rsc_provisional)) {</a>
+<a name="ln1017">        GListPtr rhs = NULL;</a>
+<a name="ln1018"> </a>
+<a name="ln1019">        gIter = rsc_rh-&gt;children;</a>
+<a name="ln1020">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1021">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1022">            node_t *chosen = child_rsc-&gt;fns-&gt;location(child_rsc, NULL, FALSE);</a>
+<a name="ln1023">            enum rsc_role_e next_role = child_rsc-&gt;fns-&gt;state(child_rsc, FALSE);</a>
+<a name="ln1024"> </a>
+<a name="ln1025">            pe_rsc_trace(rsc_rh, &quot;Processing: %s&quot;, child_rsc-&gt;id);</a>
+<a name="ln1026">            if (chosen != NULL &amp;&amp; next_role == constraint-&gt;role_rh) {</a>
+<a name="ln1027">                pe_rsc_trace(rsc_rh, &quot;Applying: %s %s %s %d&quot;, child_rsc-&gt;id,</a>
+<a name="ln1028">                             role2text(next_role), chosen-&gt;details-&gt;uname, constraint-&gt;score);</a>
+<a name="ln1029">                if (constraint-&gt;score &lt; INFINITY) {</a>
+<a name="ln1030">                    node_hash_update_one(rsc_lh-&gt;allowed_nodes, chosen,</a>
+<a name="ln1031">                                         constraint-&gt;node_attribute, constraint-&gt;score);</a>
+<a name="ln1032">                }</a>
+<a name="ln1033">                rhs = g_list_prepend(rhs, chosen);</a>
+<a name="ln1034">            }</a>
+<a name="ln1035">        }</a>
+<a name="ln1036"> </a>
+<a name="ln1037">        /* Only do this if it's not a master-master colocation</a>
+<a name="ln1038">         * Doing this unconditionally would prevent the slaves from being started</a>
+<a name="ln1039">         */</a>
+<a name="ln1040">        if (constraint-&gt;role_lh != RSC_ROLE_MASTER || constraint-&gt;role_rh != RSC_ROLE_MASTER) {</a>
+<a name="ln1041">            if (constraint-&gt;score &gt;= INFINITY) {</a>
+<a name="ln1042">                node_list_exclude(rsc_lh-&gt;allowed_nodes, rhs, TRUE);</a>
+<a name="ln1043">            }</a>
+<a name="ln1044">        }</a>
+<a name="ln1045">        g_list_free(rhs);</a>
+<a name="ln1046"> </a>
+<a name="ln1047">    } else if (constraint-&gt;role_lh == RSC_ROLE_MASTER) {</a>
+<a name="ln1048">        resource_t *rh_child = find_compatible_child(rsc_lh, rsc_rh, constraint-&gt;role_rh, FALSE);</a>
+<a name="ln1049"> </a>
+<a name="ln1050">        if (rh_child == NULL &amp;&amp; constraint-&gt;score &gt;= INFINITY) {</a>
+<a name="ln1051">            pe_rsc_trace(rsc_lh, &quot;%s can't be promoted %s&quot;, rsc_lh-&gt;id, constraint-&gt;id);</a>
+<a name="ln1052">            rsc_lh-&gt;priority = -INFINITY;</a>
+<a name="ln1053"> </a>
+<a name="ln1054">        } else if (rh_child != NULL) {</a>
+<a name="ln1055">            int new_priority = merge_weights(rsc_lh-&gt;priority, constraint-&gt;score);</a>
+<a name="ln1056"> </a>
+<a name="ln1057">            pe_rsc_debug(rsc_lh, &quot;Applying %s to %s&quot;, constraint-&gt;id, rsc_lh-&gt;id);</a>
+<a name="ln1058">            pe_rsc_debug(rsc_lh, &quot;\t%s: %d-&gt;%d&quot;, rsc_lh-&gt;id, rsc_lh-&gt;priority, new_priority);</a>
+<a name="ln1059">            rsc_lh-&gt;priority = new_priority;</a>
+<a name="ln1060">        }</a>
+<a name="ln1061">    }</a>
+<a name="ln1062"> </a>
+<a name="ln1063">    return;</a>
+<a name="ln1064">}</a>
+<a name="ln1065"> </a>
+<a name="ln1066">void</a>
+<a name="ln1067">master_append_meta(resource_t * rsc, xmlNode * xml)</a>
+<a name="ln1068">{</a>
+<a name="ln1069">    char *name = NULL;</a>
+<a name="ln1070">    clone_variant_data_t *clone_data = NULL;</a>
+<a name="ln1071"> </a>
+<a name="ln1072">    get_clone_variant_data(clone_data, rsc);</a>
+<a name="ln1073"> </a>
+<a name="ln1074">    clone_append_meta(rsc, xml);</a>
+<a name="ln1075"> </a>
+<a name="ln1076">    name = crm_meta_name(XML_RSC_ATTR_MASTER_MAX);</a>
+<a name="ln1077">    crm_xml_add_int(xml, name, clone_data-&gt;master_max);</a>
+<a name="ln1078">    free(name);</a>
+<a name="ln1079"> </a>
+<a name="ln1080">    name = crm_meta_name(XML_RSC_ATTR_MASTER_NODEMAX);</a>
+<a name="ln1081">    crm_xml_add_int(xml, name, clone_data-&gt;master_node_max);</a>
+<a name="ln1082">    free(name);</a>
+<a name="ln1083">}</a>
+
+</code></pre>
+<div class="balloon" rel="520"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 520, 519.</p></div>
+<div class="balloon" rel="705"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'chosen != NULL' is always true.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

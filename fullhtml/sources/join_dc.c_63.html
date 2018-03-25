@@ -1,0 +1,764 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22">#include &lt;crm_internal.h&gt;</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm/crm.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln27">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln28">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln31">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln32">#include &quot;tengine.h&quot;</a>
+<a name="ln33"> </a>
+<a name="ln34">char *max_epoch = NULL;</a>
+<a name="ln35">char *max_generation_from = NULL;</a>
+<a name="ln36">xmlNode *max_generation_xml = NULL;</a>
+<a name="ln37"> </a>
+<a name="ln38">void initialize_join(gboolean before);</a>
+<a name="ln39">void finalize_join_for(gpointer key, gpointer value, gpointer user_data);</a>
+<a name="ln40">void finalize_sync_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data);</a>
+<a name="ln41">gboolean check_join_state(enum crmd_fsa_state cur_state, const char *source);</a>
+<a name="ln42"> </a>
+<a name="ln43">static int current_join_id = 0;</a>
+<a name="ln44">unsigned long long saved_ccm_membership_id = 0;</a>
+<a name="ln45"> </a>
+<a name="ln46">void</a>
+<a name="ln47">crm_update_peer_join(const char *source, crm_node_t * node, enum crm_join_phase phase)</a>
+<a name="ln48">{</a>
+<a name="ln49">    enum crm_join_phase last = 0;</a>
+<a name="ln50"> </a>
+<a name="ln51">    if(node == NULL) {</a>
+<a name="ln52">        crm_err(&quot;Could not update join because node not specified&quot;</a>
+<a name="ln53">                CRM_XS &quot; join-%u source=%s phase=%s&quot;,</a>
+<a name="ln54">                current_join_id, source, crm_join_phase_str(phase));</a>
+<a name="ln55">        return;</a>
+<a name="ln56">    }</a>
+<a name="ln57"> </a>
+<a name="ln58">    /* Remote nodes do not participate in joins */</a>
+<a name="ln59">    if (is_set(node-&gt;flags, crm_remote_node)) {</a>
+<a name="ln60">        return;</a>
+<a name="ln61">    }</a>
+<a name="ln62"> </a>
+<a name="ln63">    last = node-&gt;join;</a>
+<a name="ln64"> </a>
+<a name="ln65">    if(phase == last) {</a>
+<a name="ln66">        crm_trace(&quot;%s: Node %s[%u] - join-%u phase still %s&quot;,</a>
+<a name="ln67">                  source, node-&gt;uname, node-&gt;id, current_join_id,</a>
+<a name="ln68">                  crm_join_phase_str(last));</a>
+<a name="ln69"> </a>
+<a name="ln70">    } else if ((phase &lt;= crm_join_none) || (phase == (last + 1))) {</a>
+<a name="ln71">        node-&gt;join = phase;</a>
+<a name="ln72">        crm_info(&quot;%s: Node %s[%u] - join-%u phase %s -&gt; %s&quot;,</a>
+<a name="ln73">                 source, node-&gt;uname, node-&gt;id, current_join_id,</a>
+<a name="ln74">                 crm_join_phase_str(last), crm_join_phase_str(phase));</a>
+<a name="ln75"> </a>
+<a name="ln76">    } else {</a>
+<a name="ln77">        crm_err(&quot;Could not update join for node %s because phase transition invalid &quot;</a>
+<a name="ln78">                CRM_XS &quot; join-%u source=%s node_id=%u last=%s new=%s&quot;,</a>
+<a name="ln79">                node-&gt;uname, current_join_id, source, node-&gt;id,</a>
+<a name="ln80">                crm_join_phase_str(last), crm_join_phase_str(phase));</a>
+<a name="ln81">    }</a>
+<a name="ln82">}</a>
+<a name="ln83"> </a>
+<a name="ln84">void</a>
+<a name="ln85">initialize_join(gboolean before)</a>
+<a name="ln86">{</a>
+<a name="ln87">    GHashTableIter iter;</a>
+<a name="ln88">    crm_node_t *peer = NULL;</a>
+<a name="ln89"> </a>
+<a name="ln90">    /* clear out/reset a bunch of stuff */</a>
+<a name="ln91">    crm_debug(&quot;join-%d: Initializing join data (flag=%s)&quot;,</a>
+<a name="ln92">              current_join_id, before ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln93"> </a>
+<a name="ln94">    g_hash_table_iter_init(&amp;iter, crm_peer_cache);</a>
+<a name="ln95">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp;peer)) {</a>
+<a name="ln96">        crm_update_peer_join(__FUNCTION__, peer, crm_join_none);</a>
+<a name="ln97">    }</a>
+<a name="ln98"> </a>
+<a name="ln99">    if (before) {</a>
+<a name="ln100">        if (max_generation_from != NULL) {</a>
+<a name="ln101">            free(max_generation_from);</a>
+<a name="ln102">            max_generation_from = NULL;</a>
+<a name="ln103">        }</a>
+<a name="ln104">        if (max_generation_xml != NULL) {</a>
+<a name="ln105">            free_xml(max_generation_xml);</a>
+<a name="ln106">            max_generation_xml = NULL;</a>
+<a name="ln107">        }</a>
+<a name="ln108">        clear_bit(fsa_input_register, R_HAVE_CIB);</a>
+<a name="ln109">        clear_bit(fsa_input_register, R_CIB_ASKED);</a>
+<a name="ln110">    }</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">/*!</a>
+<a name="ln114"> * \internal</a>
+<a name="ln115"> * \brief Create a join message from the DC</a>
+<a name="ln116"> *</a>
+<a name="ln117"> * \param[in] join_op  Join operation name</a>
+<a name="ln118"> * \param[in] host_to  Recipient of message</a>
+<a name="ln119"> */</a>
+<a name="ln120">static xmlNode *</a>
+<a name="ln121">create_dc_message(const char *join_op, const char *host_to)</a>
+<a name="ln122">{</a>
+<a name="ln123">    xmlNode *msg = create_request(join_op, NULL, host_to, CRM_SYSTEM_CRMD,</a>
+<a name="ln124">                                  CRM_SYSTEM_DC, NULL);</a>
+<a name="ln125"> </a>
+<a name="ln126">    /* Identify which election this is a part of */</a>
+<a name="ln127">    crm_xml_add_int(msg, F_CRM_JOIN_ID, current_join_id);</a>
+<a name="ln128"> </a>
+<a name="ln129">    /* Add a field specifying whether the DC is shutting down. This keeps the</a>
+<a name="ln130">     * joining node from fencing the old DC if it becomes the new DC.</a>
+<a name="ln131">     */</a>
+<a name="ln132">    crm_xml_add_boolean(msg, F_CRM_DC_LEAVING,</a>
+<a name="ln133">                        is_set(fsa_input_register, R_SHUTDOWN));</a>
+<a name="ln134">    return msg;</a>
+<a name="ln135">}</a>
+<a name="ln136"> </a>
+<a name="ln137">static void</a>
+<a name="ln138">join_make_offer(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln139">{</a>
+<a name="ln140">    xmlNode *offer = NULL;</a>
+<a name="ln141">    crm_node_t *member = (crm_node_t *)value;</a>
+<a name="ln142"> </a>
+<a name="ln143">    CRM_ASSERT(member != NULL);</a>
+<a name="ln144">    if (crm_is_peer_active(member) == FALSE) {</a>
+<a name="ln145">        crm_info(&quot;Not making an offer to %s: not active (%s)&quot;, member-&gt;uname, member-&gt;state);</a>
+<a name="ln146">        if(member-&gt;expected == NULL &amp;&amp; safe_str_eq(member-&gt;state, CRM_NODE_LOST)) {</a>
+<a name="ln147">            /* You would think this unsafe, but in fact this plus an</a>
+<a name="ln148">             * active resource is what causes it to be fenced.</a>
+<a name="ln149">             *</a>
+<a name="ln150">             * Yes, this does mean that any node that dies at the same</a>
+<a name="ln151">             * time as the old DC and is not running resource (still)</a>
+<a name="ln152">             * won't be fenced.</a>
+<a name="ln153">             *</a>
+<a name="ln154">             * I'm not happy about this either.</a>
+<a name="ln155">             */</a>
+<a name="ln156">            crm_update_peer_expected(__FUNCTION__, member, CRMD_JOINSTATE_DOWN);</a>
+<a name="ln157">        }</a>
+<a name="ln158">        return;</a>
+<a name="ln159">    }</a>
+<a name="ln160"> </a>
+<a name="ln161">    if (member-&gt;uname == NULL) {</a>
+<a name="ln162">        crm_info(&quot;No recipient for welcome message.(Node uuid:%s)&quot;, member-&gt;uuid);</a>
+<a name="ln163">        return;</a>
+<a name="ln164">    }</a>
+<a name="ln165"> </a>
+<a name="ln166">    if (saved_ccm_membership_id != crm_peer_seq) {</a>
+<a name="ln167">        saved_ccm_membership_id = crm_peer_seq;</a>
+<a name="ln168">        crm_info(&quot;Making join offers based on membership %llu&quot;, crm_peer_seq);</a>
+<a name="ln169">    }</a>
+<a name="ln170"> </a>
+<a name="ln171">    if(user_data &amp;&amp; member-&gt;join &gt; crm_join_none) {</a>
+<a name="ln172">        crm_info(&quot;Skipping %s: already known %d&quot;, member-&gt;uname, member-&gt;join);</a>
+<a name="ln173">        return;</a>
+<a name="ln174">    }</a>
+<a name="ln175"> </a>
+<a name="ln176">    crm_update_peer_join(__FUNCTION__, (crm_node_t*)member, crm_join_none);</a>
+<a name="ln177"> </a>
+<a name="ln178">    offer = create_dc_message(CRM_OP_JOIN_OFFER, member-&gt;uname);</a>
+<a name="ln179"> </a>
+<a name="ln180">    /* send the welcome */</a>
+<a name="ln181">    crm_info(&quot;join-%d: Sending offer to %s&quot;, current_join_id, member-&gt;uname);</a>
+<a name="ln182"> </a>
+<a name="ln183">    send_cluster_message(member, crm_msg_crmd, offer, TRUE);</a>
+<a name="ln184">    free_xml(offer);</a>
+<a name="ln185"> </a>
+<a name="ln186">    crm_update_peer_join(__FUNCTION__, member, crm_join_welcomed);</a>
+<a name="ln187">    /* crm_update_peer_expected(__FUNCTION__, member, CRMD_JOINSTATE_PENDING); */</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">/*	 A_DC_JOIN_OFFER_ALL	*/</a>
+<a name="ln191">void</a>
+<a name="ln192">do_dc_join_offer_all(long long action,</a>
+<a name="ln193">                     enum crmd_fsa_cause cause,</a>
+<a name="ln194">                     enum crmd_fsa_state cur_state,</a>
+<a name="ln195">                     enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln196">{</a>
+<a name="ln197">    /* reset everyone's status back to down or in_ccm in the CIB</a>
+<a name="ln198">     *</a>
+<a name="ln199">     * any nodes that are active in the CIB but not in the CCM list</a>
+<a name="ln200">     *   will be seen as offline by the PE anyway</a>
+<a name="ln201">     */</a>
+<a name="ln202">    current_join_id++;</a>
+<a name="ln203">    initialize_join(TRUE);</a>
+<a name="ln204">/* 	do_update_cib_nodes(TRUE, __FUNCTION__); */</a>
+<a name="ln205"> </a>
+<a name="ln206">    update_dc(NULL);</a>
+<a name="ln207">    if (cause == C_HA_MESSAGE &amp;&amp; current_input == I_NODE_JOIN) {</a>
+<a name="ln208">        crm_info(&quot;A new node joined the cluster&quot;);</a>
+<a name="ln209">    }</a>
+<a name="ln210">    g_hash_table_foreach(crm_peer_cache, join_make_offer, NULL);</a>
+<a name="ln211"> </a>
+<a name="ln212">    /* don't waste time by invoking the PE yet; */</a>
+<a name="ln213">    crm_info(&quot;join-%d: Waiting on %d outstanding join acks&quot;,</a>
+<a name="ln214">             current_join_id, crmd_join_phase_count(crm_join_welcomed));</a>
+<a name="ln215">}</a>
+<a name="ln216"> </a>
+<a name="ln217">/*	 A_DC_JOIN_OFFER_ONE	*/</a>
+<a name="ln218">void</a>
+<a name="ln219">do_dc_join_offer_one(long long action,</a>
+<a name="ln220">                     enum crmd_fsa_cause cause,</a>
+<a name="ln221">                     enum crmd_fsa_state cur_state,</a>
+<a name="ln222">                     enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln223">{</a>
+<a name="ln224">    crm_node_t *member;</a>
+<a name="ln225">    ha_msg_input_t *welcome = NULL;</a>
+<a name="ln226"> </a>
+<a name="ln227">    const char *op = NULL;</a>
+<a name="ln228">    const char *join_to = NULL;</a>
+<a name="ln229"> </a>
+<a name="ln230">    if (msg_data-&gt;data) {</a>
+<a name="ln231">        welcome = fsa_typed_data(fsa_dt_ha_msg);</a>
+<a name="ln232"> </a>
+<a name="ln233">    } else {</a>
+<a name="ln234">        crm_info(&quot;An unknown node joined - (re-)offer to any unconfirmed nodes&quot;);</a>
+<a name="ln235">        g_hash_table_foreach(crm_peer_cache, join_make_offer, &amp;member);</a>
+<a name="ln236">        check_join_state(cur_state, __FUNCTION__);</a>
+<a name="ln237">        return;</a>
+<a name="ln238">    }</a>
+<a name="ln239"> </a>
+<a name="ln240">    if (welcome == NULL) {</a>
+<a name="ln241">        crm_err(&quot;Attempt to send welcome message without a message to reply to!&quot;);</a>
+<a name="ln242">        return;</a>
+<a name="ln243">    }</a>
+<a name="ln244"> </a>
+<a name="ln245">    join_to = crm_element_value(welcome-&gt;msg, F_CRM_HOST_FROM);</a>
+<a name="ln246">    if (join_to == NULL) {</a>
+<a name="ln247">        crm_err(&quot;Attempt to send welcome message without a host to reply to!&quot;);</a>
+<a name="ln248">        return;</a>
+<a name="ln249">    }</a>
+<a name="ln250"> </a>
+<a name="ln251">    member = crm_get_peer(0, join_to);</a>
+<a name="ln252">    op = crm_element_value(welcome-&gt;msg, F_CRM_TASK);</a>
+<a name="ln253">    if (join_to != NULL &amp;&amp; (cur_state == S_INTEGRATION || cur_state == S_FINALIZE_JOIN)) {</a>
+<a name="ln254">        /* note: it _is_ possible that a node will have been</a>
+<a name="ln255">         *  sick or starting up when the original offer was made.</a>
+<a name="ln256">         *  however, it will either re-announce itself in due course</a>
+<a name="ln257">         *  _or_ we can re-store the original offer on the client.</a>
+<a name="ln258">         */</a>
+<a name="ln259">        crm_trace(&quot;(Re-)offering membership to %s...&quot;, join_to);</a>
+<a name="ln260">    }</a>
+<a name="ln261"> </a>
+<a name="ln262">    crm_info(&quot;join-%d: Processing %s request from %s in state %s&quot;,</a>
+<a name="ln263">             current_join_id, op, join_to, fsa_state2string(cur_state));</a>
+<a name="ln264"> </a>
+<a name="ln265">    crm_update_peer_join(__FUNCTION__, member, crm_join_none);</a>
+<a name="ln266">    join_make_offer(NULL, member, NULL);</a>
+<a name="ln267"> </a>
+<a name="ln268">    /* always offer to the DC (ourselves)</a>
+<a name="ln269">     * this ensures the correct value for max_generation_from</a>
+<a name="ln270">     */</a>
+<a name="ln271">    if (strcmp(join_to, fsa_our_uname) != 0) {</a>
+<a name="ln272">        member = crm_get_peer(0, fsa_our_uname);</a>
+<a name="ln273">        join_make_offer(NULL, member, NULL);</a>
+<a name="ln274">    }</a>
+<a name="ln275"> </a>
+<a name="ln276">    /* this was a genuine join request, cancel any existing</a>
+<a name="ln277">     * transition and invoke the PE</a>
+<a name="ln278">     */</a>
+<a name="ln279">    abort_transition(INFINITY, tg_restart, &quot;Node join&quot;, NULL);</a>
+<a name="ln280"> </a>
+<a name="ln281">    /* don't waste time by invoking the PE yet; */</a>
+<a name="ln282">    crm_debug(&quot;Waiting on %d outstanding join acks for join-%d&quot;,</a>
+<a name="ln283">              crmd_join_phase_count(crm_join_welcomed), current_join_id);</a>
+<a name="ln284">}</a>
+<a name="ln285"> </a>
+<a name="ln286">static int</a>
+<a name="ln287">compare_int_fields(xmlNode * left, xmlNode * right, const char *field)</a>
+<a name="ln288">{</a>
+<a name="ln289">    const char *elem_l = crm_element_value(left, field);</a>
+<a name="ln290">    const char *elem_r = crm_element_value(right, field);</a>
+<a name="ln291"> </a>
+<a name="ln292">    int int_elem_l = crm_int_helper(elem_l, NULL);</a>
+<a name="ln293">    int int_elem_r = crm_int_helper(elem_r, NULL);</a>
+<a name="ln294"> </a>
+<a name="ln295">    if (int_elem_l &lt; int_elem_r) {</a>
+<a name="ln296">        return -1;</a>
+<a name="ln297"> </a>
+<a name="ln298">    } else if (int_elem_l &gt; int_elem_r) {</a>
+<a name="ln299">        return 1;</a>
+<a name="ln300">    }</a>
+<a name="ln301"> </a>
+<a name="ln302">    return 0;</a>
+<a name="ln303">}</a>
+<a name="ln304"> </a>
+<a name="ln305">/*	 A_DC_JOIN_PROCESS_REQ	*/</a>
+<a name="ln306">void</a>
+<a name="ln307">do_dc_join_filter_offer(long long action,</a>
+<a name="ln308">                        enum crmd_fsa_cause cause,</a>
+<a name="ln309">                        enum crmd_fsa_state cur_state,</a>
+<a name="ln310">                        enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln311">{</a>
+<a name="ln312">    xmlNode *generation = NULL;</a>
+<a name="ln313"> </a>
+<a name="ln314">    int cmp = 0;</a>
+<a name="ln315">    int join_id = -1;</a>
+<a name="ln316">    gboolean ack_nack_bool = TRUE;</a>
+<a name="ln317">    const char *ack_nack = CRMD_JOINSTATE_MEMBER;</a>
+<a name="ln318">    ha_msg_input_t *join_ack = fsa_typed_data(fsa_dt_ha_msg);</a>
+<a name="ln319"> </a>
+<a name="ln320">    const char *join_from = crm_element_value(join_ack-&gt;msg, F_CRM_HOST_FROM);</a>
+<a name="ln321">    const char *ref = crm_element_value(join_ack-&gt;msg, F_CRM_REFERENCE);</a>
+<a name="ln322"> </a>
+<a name="ln323">    crm_node_t *join_node = crm_get_peer(0, join_from);</a>
+<a name="ln324"> </a>
+<a name="ln325">    crm_debug(&quot;Processing req from %s&quot;, join_from);</a>
+<a name="ln326"> </a>
+<a name="ln327">    generation = join_ack-&gt;xml;</a>
+<a name="ln328">    crm_element_value_int(join_ack-&gt;msg, F_CRM_JOIN_ID, &amp;join_id);</a>
+<a name="ln329"> </a>
+<a name="ln330">    if (max_generation_xml != NULL &amp;&amp; generation != NULL) {</a>
+<a name="ln331">        int lpc = 0;</a>
+<a name="ln332"> </a>
+<a name="ln333">        const char *attributes[] = {</a>
+<a name="ln334">            XML_ATTR_GENERATION_ADMIN,</a>
+<a name="ln335">            XML_ATTR_GENERATION,</a>
+<a name="ln336">            XML_ATTR_NUMUPDATES,</a>
+<a name="ln337">        };</a>
+<a name="ln338"> </a>
+<a name="ln339">        for (lpc = 0; cmp == 0 &amp;&amp; lpc &lt; DIMOF(attributes); lpc++) {</a>
+<a name="ln340">            cmp = compare_int_fields(max_generation_xml, generation, attributes[lpc]);</a>
+<a name="ln341">        }</a>
+<a name="ln342">    }</a>
+<a name="ln343"> </a>
+<a name="ln344">    if (join_id != current_join_id) {</a>
+<a name="ln345">        crm_debug(&quot;Invalid response from %s: join-%d vs. join-%d&quot;,</a>
+<a name="ln346">                  join_from, join_id, current_join_id);</a>
+<a name="ln347">        check_join_state(cur_state, __FUNCTION__);</a>
+<a name="ln348">        return;</a>
+<a name="ln349"> </a>
+<a name="ln350">    } else if (join_node == NULL || crm_is_peer_active(join_node) == FALSE) {</a>
+<a name="ln351">        crm_err(&quot;Node %s is not a member&quot;, join_from);</a>
+<a name="ln352">        ack_nack_bool = FALSE;</a>
+<a name="ln353"> </a>
+<a name="ln354">    } else if (generation == NULL) {</a>
+<a name="ln355">        crm_err(&quot;Generation was NULL&quot;);</a>
+<a name="ln356">        ack_nack_bool = FALSE;</a>
+<a name="ln357"> </a>
+<a name="ln358">    } else if (max_generation_xml == NULL) {</a>
+<a name="ln359">        max_generation_xml = copy_xml(generation);</a>
+<a name="ln360">        max_generation_from = strdup(join_from);</a>
+<a name="ln361"> </a>
+<a name="ln362">    } else if (cmp &lt; 0 || (cmp == 0 &amp;&amp; safe_str_eq(join_from, fsa_our_uname))) {</a>
+<a name="ln363">        crm_debug(&quot;%s has a better generation number than&quot;</a>
+<a name="ln364">                  &quot; the current max %s&quot;, join_from, max_generation_from);</a>
+<a name="ln365">        if (max_generation_xml) {</a>
+<a name="ln366">            crm_log_xml_debug(max_generation_xml, &quot;Max generation&quot;);</a>
+<a name="ln367">        }</a>
+<a name="ln368">        crm_log_xml_debug(generation, &quot;Their generation&quot;);</a>
+<a name="ln369"> </a>
+<a name="ln370">        free(max_generation_from);</a>
+<a name="ln371">        free_xml(max_generation_xml);</a>
+<a name="ln372"> </a>
+<a name="ln373">        max_generation_from = strdup(join_from);</a>
+<a name="ln374">        max_generation_xml = copy_xml(join_ack-&gt;xml);</a>
+<a name="ln375">    }</a>
+<a name="ln376"> </a>
+<a name="ln377">    if (ack_nack_bool == FALSE) {</a>
+<a name="ln378">        /* NACK this client */</a>
+<a name="ln379">        ack_nack = CRMD_JOINSTATE_NACK;</a>
+<a name="ln380">        crm_update_peer_join(__FUNCTION__, join_node, crm_join_nack);</a>
+<a name="ln381">        crm_err(&quot;Rejecting cluster join request from %s &quot; CRM_XS</a>
+<a name="ln382">                &quot; NACK join-%d ref=%s&quot;, join_from, join_id, ref);</a>
+<a name="ln383"> </a>
+<a name="ln384">    } else {</a>
+<a name="ln385">        crm_debug(&quot;join-%d: Welcoming node %s (ref %s)&quot;, join_id, join_from, ref);</a>
+<a name="ln386">        crm_update_peer_join(__FUNCTION__, join_node, crm_join_integrated);</a>
+<a name="ln387">    }</a>
+<a name="ln388"> </a>
+<a name="ln389">    crm_update_peer_expected(__FUNCTION__, join_node, ack_nack);</a>
+<a name="ln390"> </a>
+<a name="ln391">    crm_debug(&quot;%u nodes have been integrated into join-%d&quot;,</a>
+<a name="ln392">              crmd_join_phase_count(crm_join_integrated), join_id);</a>
+<a name="ln393"> </a>
+<a name="ln394"> </a>
+<a name="ln395">    if (check_join_state(cur_state, __FUNCTION__) == FALSE) {</a>
+<a name="ln396">        /* don't waste time by invoking the PE yet; */</a>
+<a name="ln397">        crm_debug(&quot;join-%d: Still waiting on %d outstanding offers&quot;,</a>
+<a name="ln398">                  join_id, crmd_join_phase_count(crm_join_welcomed));</a>
+<a name="ln399">    }</a>
+<a name="ln400">}</a>
+<a name="ln401"> </a>
+<a name="ln402">/*	A_DC_JOIN_FINALIZE	*/</a>
+<a name="ln403">void</a>
+<a name="ln404">do_dc_join_finalize(long long action,</a>
+<a name="ln405">                    enum crmd_fsa_cause cause,</a>
+<a name="ln406">                    enum crmd_fsa_state cur_state,</a>
+<a name="ln407">                    enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln408">{</a>
+<a name="ln409">    char *sync_from = NULL;</a>
+<a name="ln410">    int rc = pcmk_ok;</a>
+<a name="ln411"> </a>
+<a name="ln412">    /* This we can do straight away and avoid clients timing us out</a>
+<a name="ln413">     *  while we compute the latest CIB</a>
+<a name="ln414">     */</a>
+<a name="ln415">    crm_debug(&quot;Finalizing join-%d for %d clients&quot;,</a>
+<a name="ln416">              current_join_id, crmd_join_phase_count(crm_join_integrated));</a>
+<a name="ln417"> </a>
+<a name="ln418">    crmd_join_phase_log(LOG_INFO);</a>
+<a name="ln419">    if (crmd_join_phase_count(crm_join_welcomed) != 0) {</a>
+<a name="ln420">        crm_info(&quot;Waiting for %d more nodes&quot;, crmd_join_phase_count(crm_join_welcomed));</a>
+<a name="ln421">        /* crmd_fsa_stall(FALSE); Needed? */</a>
+<a name="ln422">        return;</a>
+<a name="ln423"> </a>
+<a name="ln424">    } else if (crmd_join_phase_count(crm_join_integrated) == 0) {</a>
+<a name="ln425">        /* Nothing to do */</a>
+<a name="ln426">        check_join_state(fsa_state, __FUNCTION__);</a>
+<a name="ln427">        return;</a>
+<a name="ln428">    }</a>
+<a name="ln429"> </a>
+<a name="ln430">    clear_bit(fsa_input_register, R_HAVE_CIB);</a>
+<a name="ln431">    if (max_generation_from == NULL || safe_str_eq(max_generation_from, fsa_our_uname)) {</a>
+<a name="ln432">        set_bit(fsa_input_register, R_HAVE_CIB);</a>
+<a name="ln433">    }</a>
+<a name="ln434"> </a>
+<a name="ln435">    if (is_set(fsa_input_register, R_IN_TRANSITION)) {</a>
+<a name="ln436">        crm_warn(&quot;Delaying response to cluster join offer while transition in progress &quot;</a>
+<a name="ln437">                 CRM_XS &quot; join-%d&quot;, current_join_id);</a>
+<a name="ln438">        crmd_fsa_stall(FALSE);</a>
+<a name="ln439">        return;</a>
+<a name="ln440">    }</a>
+<a name="ln441"> </a>
+<a name="ln442">    if (max_generation_from &amp;&amp; is_set(fsa_input_register, R_HAVE_CIB) == FALSE) {</a>
+<a name="ln443">        /* ask for the agreed best CIB */</a>
+<a name="ln444">        sync_from = strdup(max_generation_from);</a>
+<a name="ln445">        set_bit(fsa_input_register, R_CIB_ASKED);</a>
+<a name="ln446">        crm_notice(&quot;Syncing the Cluster Information Base from %s to rest of cluster &quot;</a>
+<a name="ln447">                   CRM_XS &quot; join-%d&quot;, sync_from, current_join_id);</a>
+<a name="ln448">        crm_log_xml_notice(max_generation_xml, &quot;Requested version&quot;);</a>
+<a name="ln449"> </a>
+<a name="ln450">    } else {</a>
+<a name="ln451">        /* Send _our_ CIB out to everyone */</a>
+<a name="ln452">        sync_from = strdup(fsa_our_uname);</a>
+<a name="ln453">        crm_info(&quot;join-%d: Syncing our CIB to the rest of the cluster&quot;,</a>
+<a name="ln454">                 current_join_id);</a>
+<a name="ln455">        crm_log_xml_debug(max_generation_xml, &quot;Requested version&quot;);</a>
+<a name="ln456">    }</a>
+<a name="ln457"> </a>
+<a name="ln458"> </a>
+<a name="ln459">    rc = fsa_cib_conn-&gt;cmds-&gt;sync_from(fsa_cib_conn, sync_from, NULL, cib_quorum_override);</a>
+<a name="ln460">    fsa_register_cib_callback(rc, FALSE, sync_from, finalize_sync_callback);</a>
+<a name="ln461">}</a>
+<a name="ln462"> </a>
+<a name="ln463">void</a>
+<a name="ln464">finalize_sync_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln465">{</a>
+<a name="ln466">    CRM_LOG_ASSERT(-EPERM != rc);</a>
+<a name="ln467">    clear_bit(fsa_input_register, R_CIB_ASKED);</a>
+<a name="ln468">    if (rc != pcmk_ok) {</a>
+<a name="ln469">        do_crm_log((rc == -pcmk_err_old_data ? LOG_WARNING : LOG_ERR),</a>
+<a name="ln470">                   &quot;Sync from %s failed: %s&quot;, (char *)user_data, pcmk_strerror(rc));</a>
+<a name="ln471"> </a>
+<a name="ln472">        /* restart the whole join process */</a>
+<a name="ln473">        register_fsa_error_adv(C_FSA_INTERNAL, I_ELECTION_DC, NULL, NULL, __FUNCTION__);</a>
+<a name="ln474"> </a>
+<a name="ln475">    } else if (AM_I_DC &amp;&amp; fsa_state == S_FINALIZE_JOIN) {</a>
+<a name="ln476">        set_bit(fsa_input_register, R_HAVE_CIB);</a>
+<a name="ln477">        clear_bit(fsa_input_register, R_CIB_ASKED);</a>
+<a name="ln478"> </a>
+<a name="ln479">        /* make sure dc_uuid is re-set to us */</a>
+<a name="ln480">        if (check_join_state(fsa_state, __FUNCTION__) == FALSE) {</a>
+<a name="ln481">            crm_debug(&quot;Notifying %d clients of join-%d results&quot;,</a>
+<a name="ln482">                      crmd_join_phase_count(crm_join_integrated), current_join_id);</a>
+<a name="ln483">            g_hash_table_foreach(crm_peer_cache, finalize_join_for, NULL);</a>
+<a name="ln484">        }</a>
+<a name="ln485"> </a>
+<a name="ln486">    } else {</a>
+<a name="ln487">        crm_debug(&quot;No longer the DC in S_FINALIZE_JOIN: %s/%s&quot;,</a>
+<a name="ln488">                  AM_I_DC ? &quot;DC&quot; : &quot;CRMd&quot;, fsa_state2string(fsa_state));</a>
+<a name="ln489">    }</a>
+<a name="ln490">}</a>
+<a name="ln491"> </a>
+<a name="ln492">static void</a>
+<a name="ln493">join_update_complete_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln494">{</a>
+<a name="ln495">    fsa_data_t *msg_data = NULL;</a>
+<a name="ln496"> </a>
+<a name="ln497">    if (rc == pcmk_ok) {</a>
+<a name="ln498">        crm_debug(&quot;Join update %d complete&quot;, call_id);</a>
+<a name="ln499">        check_join_state(fsa_state, __FUNCTION__);</a>
+<a name="ln500"> </a>
+<a name="ln501">    } else {</a>
+<a name="ln502">        crm_err(&quot;Join update %d failed&quot;, call_id);</a>
+<a name="ln503">        crm_log_xml_debug(msg, &quot;failed&quot;);</a>
+<a name="ln504">        register_fsa_error(C_FSA_INTERNAL, I_ERROR, NULL);</a>
+<a name="ln505">    }</a>
+<a name="ln506">}</a>
+<a name="ln507"> </a>
+<a name="ln508">/*	A_DC_JOIN_PROCESS_ACK	*/</a>
+<a name="ln509">void</a>
+<a name="ln510">do_dc_join_ack(long long action,</a>
+<a name="ln511">               enum crmd_fsa_cause cause,</a>
+<a name="ln512">               enum crmd_fsa_state cur_state,</a>
+<a name="ln513">               enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln514">{</a>
+<a name="ln515">    int join_id = -1;</a>
+<a name="ln516">    int call_id = 0;</a>
+<a name="ln517">    ha_msg_input_t *join_ack = fsa_typed_data(fsa_dt_ha_msg);</a>
+<a name="ln518"> </a>
+<a name="ln519">    const char *op = crm_element_value(join_ack-&gt;msg, F_CRM_TASK);</a>
+<a name="ln520">    const char *join_from = crm_element_value(join_ack-&gt;msg, F_CRM_HOST_FROM);</a>
+<a name="ln521">    crm_node_t *peer = crm_get_peer(0, join_from);</a>
+<a name="ln522"> </a>
+<a name="ln523">    if (safe_str_neq(op, CRM_OP_JOIN_CONFIRM) || peer == NULL) {</a>
+<a name="ln524">        crm_debug(&quot;Ignoring op=%s message from %s&quot;, op, join_from);</a>
+<a name="ln525">        return;</a>
+<a name="ln526">    }</a>
+<a name="ln527"> </a>
+<a name="ln528">    crm_trace(&quot;Processing ack from %s&quot;, join_from);</a>
+<a name="ln529">    crm_element_value_int(join_ack-&gt;msg, F_CRM_JOIN_ID, &amp;join_id);</a>
+<a name="ln530"> </a>
+<a name="ln531">    if (peer-&gt;join != crm_join_finalized) {</a>
+<a name="ln532">        crm_info(&quot;Join not in progress: ignoring join-%d from %s (phase = %d)&quot;,</a>
+<a name="ln533">                 join_id, join_from, peer-&gt;join);</a>
+<a name="ln534">        return;</a>
+<a name="ln535"> </a>
+<a name="ln536">    } else if (join_id != current_join_id) {</a>
+<a name="ln537">        crm_err(&quot;Invalid response from %s: join-%d vs. join-%d&quot;,</a>
+<a name="ln538">                join_from, join_id, current_join_id);</a>
+<a name="ln539">        crm_update_peer_join(__FUNCTION__, peer, crm_join_nack);</a>
+<a name="ln540">        return;</a>
+<a name="ln541">    }</a>
+<a name="ln542"> </a>
+<a name="ln543">    crm_update_peer_join(__FUNCTION__, peer, crm_join_confirmed);</a>
+<a name="ln544"> </a>
+<a name="ln545">    crm_info(&quot;join-%d: Updating node state to %s for %s&quot;,</a>
+<a name="ln546">             join_id, CRMD_JOINSTATE_MEMBER, join_from);</a>
+<a name="ln547"> </a>
+<a name="ln548">    /* update CIB with the current LRM status from the node</a>
+<a name="ln549">     * We don't need to notify the TE of these updates, a transition will</a>
+<a name="ln550">     *   be started in due time</a>
+<a name="ln551">     */</a>
+<a name="ln552">    erase_status_tag(join_from, XML_CIB_TAG_LRM, cib_scope_local);</a>
+<a name="ln553"> </a>
+<a name="ln554">    if (safe_str_eq(join_from, fsa_our_uname)) {</a>
+<a name="ln555">        xmlNode *now_dc_lrmd_state = do_lrm_query(TRUE, fsa_our_uname);</a>
+<a name="ln556"> </a>
+<a name="ln557">        if (now_dc_lrmd_state != NULL) {</a>
+<a name="ln558">            crm_debug(&quot;LRM state is updated from do_lrm_query.(%s)&quot;, join_from);</a>
+<a name="ln559">            fsa_cib_update(XML_CIB_TAG_STATUS, now_dc_lrmd_state,</a>
+<a name="ln560">                cib_scope_local | cib_quorum_override | cib_can_create, call_id, NULL);</a>
+<a name="ln561">            free_xml(now_dc_lrmd_state);</a>
+<a name="ln562">        } else {</a>
+<a name="ln563">            crm_warn(&quot;Could not get our LRM state. LRM state is updated from join_ack-&gt;xml.(%s)&quot;, join_from);</a>
+<a name="ln564">            fsa_cib_update(XML_CIB_TAG_STATUS, join_ack-&gt;xml,</a>
+<a name="ln565">                cib_scope_local | cib_quorum_override | cib_can_create, call_id, NULL);</a>
+<a name="ln566">        }</a>
+<a name="ln567">    } else {</a>
+<a name="ln568">        crm_debug(&quot;LRM state is updated from join_ack-&gt;xml.(%s)&quot;, join_from);</a>
+<a name="ln569">        fsa_cib_update(XML_CIB_TAG_STATUS, join_ack-&gt;xml,</a>
+<a name="ln570">           cib_scope_local | cib_quorum_override | cib_can_create, call_id, NULL);</a>
+<a name="ln571">    }</a>
+<a name="ln572"> </a>
+<a name="ln573">    fsa_register_cib_callback(call_id, FALSE, NULL, join_update_complete_callback);</a>
+<a name="ln574">    crm_debug(&quot;join-%d: Registered callback for LRM update %d&quot;, join_id, call_id);</a>
+<a name="ln575">}</a>
+<a name="ln576"> </a>
+<a name="ln577">void</a>
+<a name="ln578">finalize_join_for(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln579">{</a>
+<a name="ln580">    xmlNode *acknak = NULL;</a>
+<a name="ln581">    xmlNode *tmp1 = NULL;</a>
+<a name="ln582">    crm_node_t *join_node = value;</a>
+<a name="ln583">    const char *join_to = join_node-&gt;uname;</a>
+<a name="ln584"> </a>
+<a name="ln585">    if(join_node-&gt;join != crm_join_integrated) {</a>
+<a name="ln586">        crm_trace(&quot;Skipping %s in state %d&quot;, join_to, join_node-&gt;join);</a>
+<a name="ln587">        return;</a>
+<a name="ln588">    }</a>
+<a name="ln589"> </a>
+<a name="ln590">    /* make sure a node entry exists for the new node */</a>
+<a name="ln591">    crm_trace(&quot;Creating node entry for %s&quot;, join_to);</a>
+<a name="ln592"> </a>
+<a name="ln593">    tmp1 = create_xml_node(NULL, XML_CIB_TAG_NODE);</a>
+<a name="ln594">    set_uuid(tmp1, XML_ATTR_UUID, join_node);</a>
+<a name="ln595">    crm_xml_add(tmp1, XML_ATTR_UNAME, join_to);</a>
+<a name="ln596"> </a>
+<a name="ln597">    fsa_cib_anon_update(XML_CIB_TAG_NODES, tmp1,</a>
+<a name="ln598">                        cib_scope_local | cib_quorum_override | cib_can_create);</a>
+<a name="ln599">    free_xml(tmp1);</a>
+<a name="ln600"> </a>
+<a name="ln601">    join_node = crm_get_peer(0, join_to);</a>
+<a name="ln602">    if (crm_is_peer_active(join_node) == FALSE) {</a>
+<a name="ln603">        /*</a>
+<a name="ln604">         * NACK'ing nodes that the membership layer doesn't know about yet</a>
+<a name="ln605">         * simply creates more churn</a>
+<a name="ln606">         *</a>
+<a name="ln607">         * Better to leave them waiting and let the join restart when</a>
+<a name="ln608">         * the new membership event comes in</a>
+<a name="ln609">         *</a>
+<a name="ln610">         * All other NACKs (due to versions etc) should still be processed</a>
+<a name="ln611">         */</a>
+<a name="ln612">        crm_update_peer_expected(__FUNCTION__, join_node, CRMD_JOINSTATE_PENDING);</a>
+<a name="ln613">        return;</a>
+<a name="ln614">    }</a>
+<a name="ln615"> </a>
+<a name="ln616">    /* send the ack/nack to the node */</a>
+<a name="ln617">    acknak = create_dc_message(CRM_OP_JOIN_ACKNAK, join_to);</a>
+<a name="ln618"> </a>
+<a name="ln619">    crm_debug(&quot;join-%d: ACK'ing join request from %s&quot;,</a>
+<a name="ln620">              current_join_id, join_to);</a>
+<a name="ln621">    crm_xml_add(acknak, CRM_OP_JOIN_ACKNAK, XML_BOOLEAN_TRUE);</a>
+<a name="ln622">    crm_update_peer_join(__FUNCTION__, join_node, crm_join_finalized);</a>
+<a name="ln623">    crm_update_peer_expected(__FUNCTION__, join_node, CRMD_JOINSTATE_MEMBER);</a>
+<a name="ln624"> </a>
+<a name="ln625">    send_cluster_message(crm_get_peer(0, join_to), crm_msg_crmd, acknak, TRUE);</a>
+<a name="ln626">    free_xml(acknak);</a>
+<a name="ln627">    return;</a>
+<a name="ln628">}</a>
+<a name="ln629"> </a>
+<a name="ln630">void ghash_print_node(gpointer key, gpointer value, gpointer user_data);</a>
+<a name="ln631"> </a>
+<a name="ln632">gboolean</a>
+<a name="ln633">check_join_state(enum crmd_fsa_state cur_state, const char *source)</a>
+<a name="ln634">{</a>
+<a name="ln635">    static unsigned long long highest_seq = 0;</a>
+<a name="ln636"> </a>
+<a name="ln637">    crm_debug(&quot;Invoked by %s in state: %s&quot;, source, fsa_state2string(cur_state));</a>
+<a name="ln638"> </a>
+<a name="ln639">    if (saved_ccm_membership_id != crm_peer_seq) {</a>
+<a name="ln640">        crm_debug(&quot;%s: Membership changed since join started: %llu -&gt; %llu (%llu)&quot;,</a>
+<a name="ln641">                  source, saved_ccm_membership_id, crm_peer_seq, highest_seq);</a>
+<a name="ln642">        if(highest_seq &lt; crm_peer_seq) {</a>
+<a name="ln643">            /* Don't spam the FSA with duplicates */</a>
+<a name="ln644">            highest_seq = crm_peer_seq;</a>
+<a name="ln645">            register_fsa_input_before(C_FSA_INTERNAL, I_NODE_JOIN, NULL);</a>
+<a name="ln646">        }</a>
+<a name="ln647"> </a>
+<a name="ln648">    } else if (cur_state == S_INTEGRATION) {</a>
+<a name="ln649">        if (crmd_join_phase_count(crm_join_welcomed) == 0) {</a>
+<a name="ln650">            crm_debug(&quot;join-%d: Integration of %d peers complete: %s&quot;,</a>
+<a name="ln651">                      current_join_id, crmd_join_phase_count(crm_join_integrated), source);</a>
+<a name="ln652">            register_fsa_input_before(C_FSA_INTERNAL, I_INTEGRATED, NULL);</a>
+<a name="ln653">            return TRUE;</a>
+<a name="ln654">        }</a>
+<a name="ln655"> </a>
+<a name="ln656">    } else if (cur_state == S_FINALIZE_JOIN) {</a>
+<a name="ln657">        if (is_set(fsa_input_register, R_HAVE_CIB) == FALSE) {</a>
+<a name="ln658">            crm_debug(&quot;join-%d: Delaying I_FINALIZED until we have the CIB&quot;, current_join_id);</a>
+<a name="ln659">            return TRUE;</a>
+<a name="ln660"> </a>
+<a name="ln661">        } else if (crmd_join_phase_count(crm_join_welcomed) != 0) {</a>
+<a name="ln662">            crm_debug(&quot;join-%d: Still waiting on %d welcomed nodes&quot;,</a>
+<a name="ln663">                      current_join_id, crmd_join_phase_count(crm_join_welcomed));</a>
+<a name="ln664">            crmd_join_phase_log(LOG_DEBUG);</a>
+<a name="ln665"> </a>
+<a name="ln666">        } else if (crmd_join_phase_count(crm_join_integrated) != 0) {</a>
+<a name="ln667">            crm_debug(&quot;join-%d: Still waiting on %d integrated nodes&quot;,</a>
+<a name="ln668">                      current_join_id, crmd_join_phase_count(crm_join_integrated));</a>
+<a name="ln669">            crmd_join_phase_log(LOG_DEBUG);</a>
+<a name="ln670"> </a>
+<a name="ln671">        } else if (crmd_join_phase_count(crm_join_finalized) != 0) {</a>
+<a name="ln672">            crm_debug(&quot;join-%d: Still waiting on %d finalized nodes&quot;,</a>
+<a name="ln673">                      current_join_id, crmd_join_phase_count(crm_join_finalized));</a>
+<a name="ln674">            crmd_join_phase_log(LOG_DEBUG);</a>
+<a name="ln675"> </a>
+<a name="ln676">        } else {</a>
+<a name="ln677">            crm_debug(&quot;join-%d complete: %s&quot;, current_join_id, source);</a>
+<a name="ln678">            register_fsa_input_later(C_FSA_INTERNAL, I_FINALIZED, NULL);</a>
+<a name="ln679">            return TRUE;</a>
+<a name="ln680">        }</a>
+<a name="ln681">    }</a>
+<a name="ln682"> </a>
+<a name="ln683">    return FALSE;</a>
+<a name="ln684">}</a>
+<a name="ln685"> </a>
+<a name="ln686">void</a>
+<a name="ln687">do_dc_join_final(long long action,</a>
+<a name="ln688">                 enum crmd_fsa_cause cause,</a>
+<a name="ln689">                 enum crmd_fsa_state cur_state,</a>
+<a name="ln690">                 enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln691">{</a>
+<a name="ln692">    crm_debug(&quot;Ensuring DC, quorum and node attributes are up-to-date&quot;);</a>
+<a name="ln693">    update_attrd(NULL, NULL, NULL, NULL, FALSE);</a>
+<a name="ln694">    crm_update_quorum(crm_have_quorum, TRUE);</a>
+<a name="ln695">}</a>
+<a name="ln696"> </a>
+<a name="ln697">int crmd_join_phase_count(enum crm_join_phase phase)</a>
+<a name="ln698">{</a>
+<a name="ln699">    int count = 0;</a>
+<a name="ln700">    crm_node_t *peer;</a>
+<a name="ln701">    GHashTableIter iter;</a>
+<a name="ln702"> </a>
+<a name="ln703">    g_hash_table_iter_init(&amp;iter, crm_peer_cache);</a>
+<a name="ln704">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp;peer)) {</a>
+<a name="ln705">        if(peer-&gt;join == phase) {</a>
+<a name="ln706">            count++;</a>
+<a name="ln707">        }</a>
+<a name="ln708">    }</a>
+<a name="ln709">    return count;</a>
+<a name="ln710">}</a>
+<a name="ln711"> </a>
+<a name="ln712">void crmd_join_phase_log(int level)</a>
+<a name="ln713">{</a>
+<a name="ln714">    crm_node_t *peer;</a>
+<a name="ln715">    GHashTableIter iter;</a>
+<a name="ln716"> </a>
+<a name="ln717">    g_hash_table_iter_init(&amp;iter, crm_peer_cache);</a>
+<a name="ln718">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp;peer)) {</a>
+<a name="ln719">        do_crm_log(level, &quot;join-%d: %s=%s&quot;, current_join_id, peer-&gt;uname,</a>
+<a name="ln720">                   crm_join_phase_str(peer-&gt;join));</a>
+<a name="ln721">    }</a>
+<a name="ln722">}</a>
+
+</code></pre>
+<div class="balloon" rel="253"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: join_to != NULL.</p></div>
+<div class="balloon" rel="1"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V002/" target="_blank">V002</a> Some diagnostic messages may contain incorrect line number in this file.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

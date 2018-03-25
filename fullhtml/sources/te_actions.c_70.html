@@ -1,0 +1,814 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;crm/crm.h&gt;</a>
+<a name="ln27">#include &lt;crm/cib.h&gt;</a>
+<a name="ln28">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln31">#include &lt;tengine.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln34">#include &lt;crmd_lrm.h&gt;</a>
+<a name="ln35">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln36">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln37">#include &lt;throttle.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">char *te_uuid = NULL;</a>
+<a name="ln40">GHashTable *te_targets = NULL;</a>
+<a name="ln41">void send_rsc_command(crm_action_t * action);</a>
+<a name="ln42">static void te_update_job_count(crm_action_t * action, int offset);</a>
+<a name="ln43"> </a>
+<a name="ln44">static void</a>
+<a name="ln45">te_start_action_timer(crm_graph_t * graph, crm_action_t * action)</a>
+<a name="ln46">{</a>
+<a name="ln47">    action-&gt;timer = calloc(1, sizeof(crm_action_timer_t));</a>
+<a name="ln48">    action-&gt;timer-&gt;timeout = action-&gt;timeout;</a>
+<a name="ln49">    action-&gt;timer-&gt;reason = timeout_action;</a>
+<a name="ln50">    action-&gt;timer-&gt;action = action;</a>
+<a name="ln51">    action-&gt;timer-&gt;source_id = g_timeout_add(action-&gt;timer-&gt;timeout + graph-&gt;network_delay,</a>
+<a name="ln52">                                             action_timer_callback, (void *)action-&gt;timer);</a>
+<a name="ln53"> </a>
+<a name="ln54">    CRM_ASSERT(action-&gt;timer-&gt;source_id != 0);</a>
+<a name="ln55">}</a>
+<a name="ln56"> </a>
+<a name="ln57">static gboolean</a>
+<a name="ln58">te_pseudo_action(crm_graph_t * graph, crm_action_t * pseudo)</a>
+<a name="ln59">{</a>
+<a name="ln60">    const char *task = crm_element_value(pseudo-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln61"> </a>
+<a name="ln62">    /* send to peers as well? */</a>
+<a name="ln63">    if (safe_str_eq(task, CRM_OP_MAINTENANCE_NODES)) {</a>
+<a name="ln64">        GHashTableIter iter;</a>
+<a name="ln65">        crm_node_t *node = NULL;</a>
+<a name="ln66"> </a>
+<a name="ln67">        g_hash_table_iter_init(&amp;iter, crm_peer_cache);</a>
+<a name="ln68">        while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp;node)) {</a>
+<a name="ln69">            xmlNode *cmd = NULL;</a>
+<a name="ln70"> </a>
+<a name="ln71">            if (safe_str_eq(fsa_our_uname, node-&gt;uname)) {</a>
+<a name="ln72">                continue;</a>
+<a name="ln73">            }</a>
+<a name="ln74"> </a>
+<a name="ln75">            cmd = create_request(task, pseudo-&gt;xml, node-&gt;uname,</a>
+<a name="ln76">                                 CRM_SYSTEM_CRMD, CRM_SYSTEM_TENGINE, NULL);</a>
+<a name="ln77">            send_cluster_message(node, crm_msg_crmd, cmd, FALSE);</a>
+<a name="ln78">            free_xml(cmd);</a>
+<a name="ln79">        }</a>
+<a name="ln80"> </a>
+<a name="ln81">        remote_ra_process_maintenance_nodes(pseudo-&gt;xml);</a>
+<a name="ln82">    } else {</a>
+<a name="ln83">        /* Check action for Pacemaker Remote node side effects */</a>
+<a name="ln84">        remote_ra_process_pseudo(pseudo-&gt;xml);</a>
+<a name="ln85">    }</a>
+<a name="ln86"> </a>
+<a name="ln87">    crm_debug(&quot;Pseudo-action %d (%s) fired and confirmed&quot;, pseudo-&gt;id,</a>
+<a name="ln88">              crm_element_value(pseudo-&gt;xml, XML_LRM_ATTR_TASK_KEY));</a>
+<a name="ln89">    te_action_confirmed(pseudo);</a>
+<a name="ln90">    update_graph(graph, pseudo);</a>
+<a name="ln91">    trigger_graph();</a>
+<a name="ln92">    return TRUE;</a>
+<a name="ln93">}</a>
+<a name="ln94"> </a>
+<a name="ln95">void</a>
+<a name="ln96">send_stonith_update(crm_action_t * action, const char *target, const char *uuid)</a>
+<a name="ln97">{</a>
+<a name="ln98">    int rc = pcmk_ok;</a>
+<a name="ln99">    crm_node_t *peer = NULL;</a>
+<a name="ln100"> </a>
+<a name="ln101">    /* We (usually) rely on the membership layer to do node_update_cluster,</a>
+<a name="ln102">     * and the peer status callback to do node_update_peer, because the node</a>
+<a name="ln103">     * might have already rejoined before we get the stonith result here.</a>
+<a name="ln104">     */</a>
+<a name="ln105">    int flags = node_update_join | node_update_expected;</a>
+<a name="ln106"> </a>
+<a name="ln107">    /* zero out the node-status &amp; remove all LRM status info */</a>
+<a name="ln108">    xmlNode *node_state = NULL;</a>
+<a name="ln109"> </a>
+<a name="ln110">    CRM_CHECK(target != NULL, return);</a>
+<a name="ln111">    CRM_CHECK(uuid != NULL, return);</a>
+<a name="ln112"> </a>
+<a name="ln113">    /* Make sure the membership and join caches are accurate */</a>
+<a name="ln114">    peer = crm_get_peer_full(0, target, CRM_GET_PEER_ANY);</a>
+<a name="ln115"> </a>
+<a name="ln116">    CRM_CHECK(peer != NULL, return);</a>
+<a name="ln117"> </a>
+<a name="ln118">    if (peer-&gt;state == NULL) {</a>
+<a name="ln119">        /* Usually, we rely on the membership layer to update the cluster state</a>
+<a name="ln120">         * in the CIB. However, if the node has never been seen, do it here, so</a>
+<a name="ln121">         * the node is not considered unclean.</a>
+<a name="ln122">         */</a>
+<a name="ln123">        flags |= node_update_cluster;</a>
+<a name="ln124">    }</a>
+<a name="ln125"> </a>
+<a name="ln126">    if (peer-&gt;uuid == NULL) {</a>
+<a name="ln127">        crm_info(&quot;Recording uuid '%s' for node '%s'&quot;, uuid, target);</a>
+<a name="ln128">        peer-&gt;uuid = strdup(uuid);</a>
+<a name="ln129">    }</a>
+<a name="ln130"> </a>
+<a name="ln131">    crmd_peer_down(peer, TRUE);</a>
+<a name="ln132"> </a>
+<a name="ln133">    /* Generate a node state update for the CIB */</a>
+<a name="ln134">    node_state = create_node_state_update(peer, flags, NULL, __FUNCTION__);</a>
+<a name="ln135"> </a>
+<a name="ln136">    /* we have to mark whether or not remote nodes have already been fenced */</a>
+<a name="ln137">    if (peer-&gt;flags &amp; crm_remote_node) {</a>
+<a name="ln138">        time_t now = time(NULL);</a>
+<a name="ln139">        char *now_s = crm_itoa(now);</a>
+<a name="ln140">        crm_xml_add(node_state, XML_NODE_IS_FENCED, now_s);</a>
+<a name="ln141">        free(now_s);</a>
+<a name="ln142">    }</a>
+<a name="ln143"> </a>
+<a name="ln144">    /* Force our known ID */</a>
+<a name="ln145">    crm_xml_add(node_state, XML_ATTR_UUID, uuid);</a>
+<a name="ln146"> </a>
+<a name="ln147">    rc = fsa_cib_conn-&gt;cmds-&gt;update(fsa_cib_conn, XML_CIB_TAG_STATUS, node_state,</a>
+<a name="ln148">                                    cib_quorum_override | cib_scope_local | cib_can_create);</a>
+<a name="ln149"> </a>
+<a name="ln150">    /* Delay processing the trigger until the update completes */</a>
+<a name="ln151">    crm_debug(&quot;Sending fencing update %d for %s&quot;, rc, target);</a>
+<a name="ln152">    fsa_register_cib_callback(rc, FALSE, strdup(target), cib_fencing_updated);</a>
+<a name="ln153"> </a>
+<a name="ln154">    /* Make sure it sticks */</a>
+<a name="ln155">    /* fsa_cib_conn-&gt;cmds-&gt;bump_epoch(fsa_cib_conn, cib_quorum_override|cib_scope_local);    */</a>
+<a name="ln156"> </a>
+<a name="ln157">    erase_status_tag(peer-&gt;uname, XML_CIB_TAG_LRM, cib_scope_local);</a>
+<a name="ln158">    erase_status_tag(peer-&gt;uname, XML_TAG_TRANSIENT_NODEATTRS, cib_scope_local);</a>
+<a name="ln159"> </a>
+<a name="ln160">    free_xml(node_state);</a>
+<a name="ln161">    return;</a>
+<a name="ln162">}</a>
+<a name="ln163"> </a>
+<a name="ln164">static gboolean</a>
+<a name="ln165">te_fence_node(crm_graph_t * graph, crm_action_t * action)</a>
+<a name="ln166">{</a>
+<a name="ln167">    int rc = 0;</a>
+<a name="ln168">    const char *id = NULL;</a>
+<a name="ln169">    const char *uuid = NULL;</a>
+<a name="ln170">    const char *target = NULL;</a>
+<a name="ln171">    const char *type = NULL;</a>
+<a name="ln172">    gboolean invalid_action = FALSE;</a>
+<a name="ln173">    enum stonith_call_options options = st_opt_none;</a>
+<a name="ln174"> </a>
+<a name="ln175">    id = ID(action-&gt;xml);</a>
+<a name="ln176">    target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln177">    uuid = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET_UUID);</a>
+<a name="ln178">    type = crm_meta_value(action-&gt;params, &quot;stonith_action&quot;);</a>
+<a name="ln179"> </a>
+<a name="ln180">    CRM_CHECK(id != NULL, invalid_action = TRUE);</a>
+<a name="ln181">    CRM_CHECK(uuid != NULL, invalid_action = TRUE);</a>
+<a name="ln182">    CRM_CHECK(type != NULL, invalid_action = TRUE);</a>
+<a name="ln183">    CRM_CHECK(target != NULL, invalid_action = TRUE);</a>
+<a name="ln184"> </a>
+<a name="ln185">    if (invalid_action) {</a>
+<a name="ln186">        crm_log_xml_warn(action-&gt;xml, &quot;BadAction&quot;);</a>
+<a name="ln187">        return FALSE;</a>
+<a name="ln188">    }</a>
+<a name="ln189"> </a>
+<a name="ln190">    crm_notice(&quot;Requesting fencing (%s) of node %s &quot;</a>
+<a name="ln191">               CRM_XS &quot; action=%s timeout=%d&quot;,</a>
+<a name="ln192">               type, target, id, transition_graph-&gt;stonith_timeout);</a>
+<a name="ln193"> </a>
+<a name="ln194">    /* Passing NULL means block until we can connect... */</a>
+<a name="ln195">    te_connect_stonith(NULL);</a>
+<a name="ln196"> </a>
+<a name="ln197">    if (crmd_join_phase_count(crm_join_confirmed) == 1) {</a>
+<a name="ln198">        options |= st_opt_allow_suicide;</a>
+<a name="ln199">    }</a>
+<a name="ln200"> </a>
+<a name="ln201">    rc = stonith_api-&gt;cmds-&gt;fence(stonith_api, options, target, type,</a>
+<a name="ln202">                                  transition_graph-&gt;stonith_timeout / 1000, 0);</a>
+<a name="ln203"> </a>
+<a name="ln204">    stonith_api-&gt;cmds-&gt;register_callback(stonith_api, rc, transition_graph-&gt;stonith_timeout / 1000,</a>
+<a name="ln205">                                         st_opt_timeout_updates,</a>
+<a name="ln206">                                         generate_transition_key(transition_graph-&gt;id, action-&gt;id,</a>
+<a name="ln207">                                                                 0, te_uuid),</a>
+<a name="ln208">                                         &quot;tengine_stonith_callback&quot;, tengine_stonith_callback);</a>
+<a name="ln209"> </a>
+<a name="ln210">    return TRUE;</a>
+<a name="ln211">}</a>
+<a name="ln212"> </a>
+<a name="ln213">static int</a>
+<a name="ln214">get_target_rc(crm_action_t * action)</a>
+<a name="ln215">{</a>
+<a name="ln216">    const char *target_rc_s = crm_meta_value(action-&gt;params, XML_ATTR_TE_TARGET_RC);</a>
+<a name="ln217"> </a>
+<a name="ln218">    if (target_rc_s != NULL) {</a>
+<a name="ln219">        return crm_parse_int(target_rc_s, &quot;0&quot;);</a>
+<a name="ln220">    }</a>
+<a name="ln221">    return 0;</a>
+<a name="ln222">}</a>
+<a name="ln223"> </a>
+<a name="ln224">static gboolean</a>
+<a name="ln225">te_crm_command(crm_graph_t * graph, crm_action_t * action)</a>
+<a name="ln226">{</a>
+<a name="ln227">    char *counter = NULL;</a>
+<a name="ln228">    xmlNode *cmd = NULL;</a>
+<a name="ln229">    gboolean is_local = FALSE;</a>
+<a name="ln230"> </a>
+<a name="ln231">    const char *id = NULL;</a>
+<a name="ln232">    const char *task = NULL;</a>
+<a name="ln233">    const char *value = NULL;</a>
+<a name="ln234">    const char *on_node = NULL;</a>
+<a name="ln235">    const char *router_node = NULL;</a>
+<a name="ln236"> </a>
+<a name="ln237">    gboolean rc = TRUE;</a>
+<a name="ln238">    gboolean no_wait = FALSE;</a>
+<a name="ln239"> </a>
+<a name="ln240">    id = ID(action-&gt;xml);</a>
+<a name="ln241">    task = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln242">    on_node = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln243">    router_node = crm_element_value(action-&gt;xml, XML_LRM_ATTR_ROUTER_NODE);</a>
+<a name="ln244"> </a>
+<a name="ln245">    if (!router_node) {</a>
+<a name="ln246">        router_node = on_node;</a>
+<a name="ln247">    }</a>
+<a name="ln248"> </a>
+<a name="ln249">    CRM_CHECK(on_node != NULL &amp;&amp; strlen(on_node) != 0,</a>
+<a name="ln250">              crm_err(&quot;Corrupted command (id=%s) %s: no node&quot;, crm_str(id), crm_str(task));</a>
+<a name="ln251">              return FALSE);</a>
+<a name="ln252"> </a>
+<a name="ln253">    crm_info(&quot;Executing crm-event (%s): %s on %s%s%s&quot;,</a>
+<a name="ln254">             crm_str(id), crm_str(task), on_node,</a>
+<a name="ln255">             is_local ? &quot; (local)&quot; : &quot;&quot;, no_wait ? &quot; - no waiting&quot; : &quot;&quot;);</a>
+<a name="ln256"> </a>
+<a name="ln257">    if (safe_str_eq(router_node, fsa_our_uname)) {</a>
+<a name="ln258">        is_local = TRUE;</a>
+<a name="ln259">    }</a>
+<a name="ln260"> </a>
+<a name="ln261">    value = crm_meta_value(action-&gt;params, XML_ATTR_TE_NOWAIT);</a>
+<a name="ln262">    if (crm_is_true(value)) {</a>
+<a name="ln263">        no_wait = TRUE;</a>
+<a name="ln264">    }</a>
+<a name="ln265"> </a>
+<a name="ln266">    if (is_local &amp;&amp; safe_str_eq(task, CRM_OP_SHUTDOWN)) {</a>
+<a name="ln267">        /* defer until everything else completes */</a>
+<a name="ln268">        crm_info(&quot;crm-event (%s) is a local shutdown&quot;, crm_str(id));</a>
+<a name="ln269">        graph-&gt;completion_action = tg_shutdown;</a>
+<a name="ln270">        graph-&gt;abort_reason = &quot;local shutdown&quot;;</a>
+<a name="ln271">        te_action_confirmed(action);</a>
+<a name="ln272">        update_graph(graph, action);</a>
+<a name="ln273">        trigger_graph();</a>
+<a name="ln274">        return TRUE;</a>
+<a name="ln275"> </a>
+<a name="ln276">    } else if (safe_str_eq(task, CRM_OP_SHUTDOWN)) {</a>
+<a name="ln277">        crm_node_t *peer = crm_get_peer(0, router_node);</a>
+<a name="ln278">        crm_update_peer_expected(__FUNCTION__, peer, CRMD_JOINSTATE_DOWN);</a>
+<a name="ln279">    }</a>
+<a name="ln280"> </a>
+<a name="ln281">    cmd = create_request(task, action-&gt;xml, router_node, CRM_SYSTEM_CRMD, CRM_SYSTEM_TENGINE, NULL);</a>
+<a name="ln282"> </a>
+<a name="ln283">    counter =</a>
+<a name="ln284">        generate_transition_key(transition_graph-&gt;id, action-&gt;id, get_target_rc(action), te_uuid);</a>
+<a name="ln285">    crm_xml_add(cmd, XML_ATTR_TRANSITION_KEY, counter);</a>
+<a name="ln286"> </a>
+<a name="ln287">    rc = send_cluster_message(crm_get_peer(0, router_node), crm_msg_crmd, cmd, TRUE);</a>
+<a name="ln288">    free(counter);</a>
+<a name="ln289">    free_xml(cmd);</a>
+<a name="ln290"> </a>
+<a name="ln291">    if (rc == FALSE) {</a>
+<a name="ln292">        crm_err(&quot;Action %d failed: send&quot;, action-&gt;id);</a>
+<a name="ln293">        return FALSE;</a>
+<a name="ln294"> </a>
+<a name="ln295">    } else if (no_wait) {</a>
+<a name="ln296">        te_action_confirmed(action);</a>
+<a name="ln297">        update_graph(graph, action);</a>
+<a name="ln298">        trigger_graph();</a>
+<a name="ln299"> </a>
+<a name="ln300">    } else {</a>
+<a name="ln301">        if (action-&gt;timeout &lt;= 0) {</a>
+<a name="ln302">            crm_err(&quot;Action %d: %s on %s had an invalid timeout (%dms).  Using %dms instead&quot;,</a>
+<a name="ln303">                    action-&gt;id, task, on_node, action-&gt;timeout, graph-&gt;network_delay);</a>
+<a name="ln304">            action-&gt;timeout = graph-&gt;network_delay;</a>
+<a name="ln305">        }</a>
+<a name="ln306">        te_start_action_timer(graph, action);</a>
+<a name="ln307">    }</a>
+<a name="ln308"> </a>
+<a name="ln309">    return TRUE;</a>
+<a name="ln310">}</a>
+<a name="ln311"> </a>
+<a name="ln312">gboolean</a>
+<a name="ln313">cib_action_update(crm_action_t * action, int status, int op_rc)</a>
+<a name="ln314">{</a>
+<a name="ln315">    lrmd_event_data_t *op = NULL;</a>
+<a name="ln316">    xmlNode *state = NULL;</a>
+<a name="ln317">    xmlNode *rsc = NULL;</a>
+<a name="ln318">    xmlNode *xml_op = NULL;</a>
+<a name="ln319">    xmlNode *action_rsc = NULL;</a>
+<a name="ln320"> </a>
+<a name="ln321">    int rc = pcmk_ok;</a>
+<a name="ln322"> </a>
+<a name="ln323">    const char *rsc_id = NULL;</a>
+<a name="ln324">    const char *task = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln325">    const char *target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln326">    const char *task_uuid = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK_KEY);</a>
+<a name="ln327">    const char *target_uuid = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET_UUID);</a>
+<a name="ln328"> </a>
+<a name="ln329">    int call_options = cib_quorum_override | cib_scope_local;</a>
+<a name="ln330">    int target_rc = get_target_rc(action);</a>
+<a name="ln331"> </a>
+<a name="ln332">    if (status == PCMK_LRM_OP_PENDING) {</a>
+<a name="ln333">        crm_debug(&quot;%s %d: Recording pending operation %s on %s&quot;,</a>
+<a name="ln334">                  crm_element_name(action-&gt;xml), action-&gt;id, task_uuid, target);</a>
+<a name="ln335">    } else {</a>
+<a name="ln336">        crm_warn(&quot;%s %d: %s on %s timed out&quot;,</a>
+<a name="ln337">                 crm_element_name(action-&gt;xml), action-&gt;id, task_uuid, target);</a>
+<a name="ln338">    }</a>
+<a name="ln339"> </a>
+<a name="ln340">    action_rsc = find_xml_node(action-&gt;xml, XML_CIB_TAG_RESOURCE, TRUE);</a>
+<a name="ln341">    if (action_rsc == NULL) {</a>
+<a name="ln342">        return FALSE;</a>
+<a name="ln343">    }</a>
+<a name="ln344"> </a>
+<a name="ln345">    rsc_id = ID(action_rsc);</a>
+<a name="ln346">    CRM_CHECK(rsc_id != NULL, crm_log_xml_err(action-&gt;xml, &quot;Bad:action&quot;);</a>
+<a name="ln347">              return FALSE);</a>
+<a name="ln348"> </a>
+<a name="ln349">/*</a>
+<a name="ln350">  update the CIB</a>
+<a name="ln351"> </a>
+<a name="ln352">&lt;node_state id=&quot;hadev&quot;&gt;</a>
+<a name="ln353">      &lt;lrm&gt;</a>
+<a name="ln354">        &lt;lrm_resources&gt;</a>
+<a name="ln355">          &lt;lrm_resource id=&quot;rsc2&quot; last_op=&quot;start&quot; op_code=&quot;0&quot; target=&quot;hadev&quot;/&gt;</a>
+<a name="ln356">*/</a>
+<a name="ln357"> </a>
+<a name="ln358">    state = create_xml_node(NULL, XML_CIB_TAG_STATE);</a>
+<a name="ln359"> </a>
+<a name="ln360">    crm_xml_add(state, XML_ATTR_UUID, target_uuid);</a>
+<a name="ln361">    crm_xml_add(state, XML_ATTR_UNAME, target);</a>
+<a name="ln362"> </a>
+<a name="ln363">    rsc = create_xml_node(state, XML_CIB_TAG_LRM);</a>
+<a name="ln364">    crm_xml_add(rsc, XML_ATTR_ID, target_uuid);</a>
+<a name="ln365"> </a>
+<a name="ln366">    rsc = create_xml_node(rsc, XML_LRM_TAG_RESOURCES);</a>
+<a name="ln367">    rsc = create_xml_node(rsc, XML_LRM_TAG_RESOURCE);</a>
+<a name="ln368">    crm_xml_add(rsc, XML_ATTR_ID, rsc_id);</a>
+<a name="ln369"> </a>
+<a name="ln370"> </a>
+<a name="ln371">    crm_copy_xml_element(action_rsc, rsc, XML_ATTR_TYPE);</a>
+<a name="ln372">    crm_copy_xml_element(action_rsc, rsc, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln373">    crm_copy_xml_element(action_rsc, rsc, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln374"> </a>
+<a name="ln375">    op = convert_graph_action(NULL, action, status, op_rc);</a>
+<a name="ln376">    op-&gt;call_id = -1;</a>
+<a name="ln377">    op-&gt;user_data = generate_transition_key(transition_graph-&gt;id, action-&gt;id, target_rc, te_uuid);</a>
+<a name="ln378"> </a>
+<a name="ln379">    xml_op = create_operation_update(rsc, op, CRM_FEATURE_SET, target_rc, target, __FUNCTION__, LOG_INFO);</a>
+<a name="ln380">    lrmd_free_event(op);</a>
+<a name="ln381"> </a>
+<a name="ln382">    crm_trace(&quot;Updating CIB with \&quot;%s\&quot; (%s): %s %s on %s&quot;,</a>
+<a name="ln383">              status &lt; 0 ? &quot;new action&quot; : XML_ATTR_TIMEOUT,</a>
+<a name="ln384">              crm_element_name(action-&gt;xml), crm_str(task), rsc_id, target);</a>
+<a name="ln385">    crm_log_xml_trace(xml_op, &quot;Op&quot;);</a>
+<a name="ln386"> </a>
+<a name="ln387">    rc = fsa_cib_conn-&gt;cmds-&gt;update(fsa_cib_conn, XML_CIB_TAG_STATUS, state, call_options);</a>
+<a name="ln388"> </a>
+<a name="ln389">    crm_trace(&quot;Updating CIB with %s action %d: %s on %s (call_id=%d)&quot;,</a>
+<a name="ln390">              services_lrm_status_str(status), action-&gt;id, task_uuid, target, rc);</a>
+<a name="ln391"> </a>
+<a name="ln392">    fsa_register_cib_callback(rc, FALSE, NULL, cib_action_updated);</a>
+<a name="ln393">    free_xml(state);</a>
+<a name="ln394"> </a>
+<a name="ln395">    action-&gt;sent_update = TRUE;</a>
+<a name="ln396"> </a>
+<a name="ln397">    if (rc &lt; pcmk_ok) {</a>
+<a name="ln398">        return FALSE;</a>
+<a name="ln399">    }</a>
+<a name="ln400"> </a>
+<a name="ln401">    return TRUE;</a>
+<a name="ln402">}</a>
+<a name="ln403"> </a>
+<a name="ln404">static gboolean</a>
+<a name="ln405">te_rsc_command(crm_graph_t * graph, crm_action_t * action)</a>
+<a name="ln406">{</a>
+<a name="ln407">    /* never overwrite stop actions in the CIB with</a>
+<a name="ln408">     *   anything other than completed results</a>
+<a name="ln409">     *</a>
+<a name="ln410">     * Writing pending stops makes it look like the</a>
+<a name="ln411">     *   resource is running again</a>
+<a name="ln412">     */</a>
+<a name="ln413">    xmlNode *cmd = NULL;</a>
+<a name="ln414">    xmlNode *rsc_op = NULL;</a>
+<a name="ln415"> </a>
+<a name="ln416">    gboolean rc = TRUE;</a>
+<a name="ln417">    gboolean no_wait = FALSE;</a>
+<a name="ln418">    gboolean is_local = FALSE;</a>
+<a name="ln419"> </a>
+<a name="ln420">    char *counter = NULL;</a>
+<a name="ln421">    const char *task = NULL;</a>
+<a name="ln422">    const char *value = NULL;</a>
+<a name="ln423">    const char *on_node = NULL;</a>
+<a name="ln424">    const char *router_node = NULL;</a>
+<a name="ln425">    const char *task_uuid = NULL;</a>
+<a name="ln426"> </a>
+<a name="ln427">    CRM_ASSERT(action != NULL);</a>
+<a name="ln428">    CRM_ASSERT(action-&gt;xml != NULL);</a>
+<a name="ln429"> </a>
+<a name="ln430">    action-&gt;executed = FALSE;</a>
+<a name="ln431">    on_node = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln432"> </a>
+<a name="ln433">    CRM_CHECK(on_node != NULL &amp;&amp; strlen(on_node) != 0,</a>
+<a name="ln434">              crm_err(&quot;Corrupted command(id=%s) %s: no node&quot;, ID(action-&gt;xml), crm_str(task));</a>
+<a name="ln435">              return FALSE);</a>
+<a name="ln436"> </a>
+<a name="ln437">    rsc_op = action-&gt;xml;</a>
+<a name="ln438">    task = crm_element_value(rsc_op, XML_LRM_ATTR_TASK);</a>
+<a name="ln439">    task_uuid = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK_KEY);</a>
+<a name="ln440">    router_node = crm_element_value(rsc_op, XML_LRM_ATTR_ROUTER_NODE);</a>
+<a name="ln441"> </a>
+<a name="ln442">    if (!router_node) {</a>
+<a name="ln443">        router_node = on_node;</a>
+<a name="ln444">    }</a>
+<a name="ln445"> </a>
+<a name="ln446">    counter =</a>
+<a name="ln447">        generate_transition_key(transition_graph-&gt;id, action-&gt;id, get_target_rc(action), te_uuid);</a>
+<a name="ln448">    crm_xml_add(rsc_op, XML_ATTR_TRANSITION_KEY, counter);</a>
+<a name="ln449"> </a>
+<a name="ln450">    if (safe_str_eq(router_node, fsa_our_uname)) {</a>
+<a name="ln451">        is_local = TRUE;</a>
+<a name="ln452">    }</a>
+<a name="ln453"> </a>
+<a name="ln454">    value = crm_meta_value(action-&gt;params, XML_ATTR_TE_NOWAIT);</a>
+<a name="ln455">    if (crm_is_true(value)) {</a>
+<a name="ln456">        no_wait = TRUE;</a>
+<a name="ln457">    }</a>
+<a name="ln458"> </a>
+<a name="ln459">    crm_notice(&quot;Initiating %s operation %s%s on %s%s &quot;CRM_XS&quot; action %d&quot;,</a>
+<a name="ln460">               task, task_uuid, (is_local? &quot; locally&quot; : &quot;&quot;), on_node,</a>
+<a name="ln461">               (no_wait? &quot; without waiting&quot; : &quot;&quot;), action-&gt;id);</a>
+<a name="ln462"> </a>
+<a name="ln463">    cmd = create_request(CRM_OP_INVOKE_LRM, rsc_op, router_node,</a>
+<a name="ln464">                         CRM_SYSTEM_LRMD, CRM_SYSTEM_TENGINE, NULL);</a>
+<a name="ln465"> </a>
+<a name="ln466">    if (is_local) {</a>
+<a name="ln467">        /* shortcut local resource commands */</a>
+<a name="ln468">        ha_msg_input_t data = {</a>
+<a name="ln469">            .msg = cmd,</a>
+<a name="ln470">            .xml = rsc_op,</a>
+<a name="ln471">        };</a>
+<a name="ln472"> </a>
+<a name="ln473">        fsa_data_t msg = {</a>
+<a name="ln474">            .id = 0,</a>
+<a name="ln475">            .data = &amp;data,</a>
+<a name="ln476">            .data_type = fsa_dt_ha_msg,</a>
+<a name="ln477">            .fsa_input = I_NULL,</a>
+<a name="ln478">            .fsa_cause = C_FSA_INTERNAL,</a>
+<a name="ln479">            .actions = A_LRM_INVOKE,</a>
+<a name="ln480">            .origin = __FUNCTION__,</a>
+<a name="ln481">        };</a>
+<a name="ln482"> </a>
+<a name="ln483">        do_lrm_invoke(A_LRM_INVOKE, C_FSA_INTERNAL, fsa_state, I_NULL, &amp;msg);</a>
+<a name="ln484"> </a>
+<a name="ln485">    } else {</a>
+<a name="ln486">        rc = send_cluster_message(crm_get_peer(0, router_node), crm_msg_lrmd, cmd, TRUE);</a>
+<a name="ln487">    }</a>
+<a name="ln488"> </a>
+<a name="ln489">    free(counter);</a>
+<a name="ln490">    free_xml(cmd);</a>
+<a name="ln491"> </a>
+<a name="ln492">    action-&gt;executed = TRUE;</a>
+<a name="ln493"> </a>
+<a name="ln494">    if (rc == FALSE) {</a>
+<a name="ln495">        crm_err(&quot;Action %d failed: send&quot;, action-&gt;id);</a>
+<a name="ln496">        return FALSE;</a>
+<a name="ln497"> </a>
+<a name="ln498">    } else if (no_wait) {</a>
+<a name="ln499">        crm_info(&quot;Action %d confirmed - no wait&quot;, action-&gt;id);</a>
+<a name="ln500">        action-&gt;confirmed = TRUE; /* Just mark confirmed.</a>
+<a name="ln501">                                   * Don't bump the job count only to immediately decrement it</a>
+<a name="ln502">                                   */</a>
+<a name="ln503">        update_graph(transition_graph, action);</a>
+<a name="ln504">        trigger_graph();</a>
+<a name="ln505"> </a>
+<a name="ln506">    } else if (action-&gt;confirmed == TRUE) {</a>
+<a name="ln507">        crm_debug(&quot;Action %d: %s %s on %s(timeout %dms) was already confirmed.&quot;,</a>
+<a name="ln508">                  action-&gt;id, task, task_uuid, on_node, action-&gt;timeout);</a>
+<a name="ln509">    } else {</a>
+<a name="ln510">        if (action-&gt;timeout &lt;= 0) {</a>
+<a name="ln511">            crm_err(&quot;Action %d: %s %s on %s had an invalid timeout (%dms).  Using %dms instead&quot;,</a>
+<a name="ln512">                    action-&gt;id, task, task_uuid, on_node, action-&gt;timeout, graph-&gt;network_delay);</a>
+<a name="ln513">            action-&gt;timeout = graph-&gt;network_delay;</a>
+<a name="ln514">        }</a>
+<a name="ln515">        te_update_job_count(action, 1);</a>
+<a name="ln516">        te_start_action_timer(graph, action);</a>
+<a name="ln517">    }</a>
+<a name="ln518"> </a>
+<a name="ln519">    return TRUE;</a>
+<a name="ln520">}</a>
+<a name="ln521"> </a>
+<a name="ln522">struct te_peer_s</a>
+<a name="ln523">{</a>
+<a name="ln524">        char *name;</a>
+<a name="ln525">        int jobs;</a>
+<a name="ln526">        int migrate_jobs;</a>
+<a name="ln527">};</a>
+<a name="ln528"> </a>
+<a name="ln529">static void te_peer_free(gpointer p)</a>
+<a name="ln530">{</a>
+<a name="ln531">    struct te_peer_s *peer = p;</a>
+<a name="ln532"> </a>
+<a name="ln533">    free(peer-&gt;name);</a>
+<a name="ln534">    free(peer);</a>
+<a name="ln535">}</a>
+<a name="ln536"> </a>
+<a name="ln537">void te_reset_job_counts(void)</a>
+<a name="ln538">{</a>
+<a name="ln539">    GHashTableIter iter;</a>
+<a name="ln540">    struct te_peer_s *peer = NULL;</a>
+<a name="ln541"> </a>
+<a name="ln542">    if(te_targets == NULL) {</a>
+<a name="ln543">        te_targets = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, te_peer_free);</a>
+<a name="ln544">    }</a>
+<a name="ln545"> </a>
+<a name="ln546">    g_hash_table_iter_init(&amp;iter, te_targets);</a>
+<a name="ln547">    while (g_hash_table_iter_next(&amp;iter, NULL, (gpointer *) &amp; peer)) {</a>
+<a name="ln548">        peer-&gt;jobs = 0;</a>
+<a name="ln549">        peer-&gt;migrate_jobs = 0;</a>
+<a name="ln550">    }</a>
+<a name="ln551">}</a>
+<a name="ln552"> </a>
+<a name="ln553">static void</a>
+<a name="ln554">te_update_job_count_on(const char *target, int offset, bool migrate)</a>
+<a name="ln555">{</a>
+<a name="ln556">    struct te_peer_s *r = NULL;</a>
+<a name="ln557"> </a>
+<a name="ln558">    if(target == NULL || te_targets == NULL) {</a>
+<a name="ln559">        return;</a>
+<a name="ln560">    }</a>
+<a name="ln561"> </a>
+<a name="ln562">    r = g_hash_table_lookup(te_targets, target);</a>
+<a name="ln563">    if(r == NULL) {</a>
+<a name="ln564">        r = calloc(1, sizeof(struct te_peer_s));</a>
+<a name="ln565">        r-&gt;name = strdup(target);</a>
+<a name="ln566">        g_hash_table_insert(te_targets, r-&gt;name, r);</a>
+<a name="ln567">    }</a>
+<a name="ln568"> </a>
+<a name="ln569">    r-&gt;jobs += offset;</a>
+<a name="ln570">    if(migrate) {</a>
+<a name="ln571">        r-&gt;migrate_jobs += offset;</a>
+<a name="ln572">    }</a>
+<a name="ln573">    crm_trace(&quot;jobs[%s] = %d&quot;, target, r-&gt;jobs);</a>
+<a name="ln574">}</a>
+<a name="ln575"> </a>
+<a name="ln576">static void</a>
+<a name="ln577">te_update_job_count(crm_action_t * action, int offset)</a>
+<a name="ln578">{</a>
+<a name="ln579">    const char *task = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln580">    const char *target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln581"> </a>
+<a name="ln582">    if (action-&gt;type != action_type_rsc || target == NULL) {</a>
+<a name="ln583">        /* No limit on these */</a>
+<a name="ln584">        return;</a>
+<a name="ln585">    }</a>
+<a name="ln586"> </a>
+<a name="ln587">    /* if we have a router node, this means the action is performing</a>
+<a name="ln588">     * on a remote node. For now, we count all action occuring on a</a>
+<a name="ln589">     * remote node against the job list on the cluster node hosting</a>
+<a name="ln590">     * the connection resources */</a>
+<a name="ln591">    target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_ROUTER_NODE);</a>
+<a name="ln592"> </a>
+<a name="ln593">    if ((target == NULL) &amp;&amp;</a>
+<a name="ln594">        (safe_str_eq(task, CRMD_ACTION_MIGRATE) || safe_str_eq(task, CRMD_ACTION_MIGRATED))) {</a>
+<a name="ln595"> </a>
+<a name="ln596">        const char *t1 = crm_meta_value(action-&gt;params, XML_LRM_ATTR_MIGRATE_SOURCE);</a>
+<a name="ln597">        const char *t2 = crm_meta_value(action-&gt;params, XML_LRM_ATTR_MIGRATE_TARGET);</a>
+<a name="ln598"> </a>
+<a name="ln599">        te_update_job_count_on(t1, offset, TRUE);</a>
+<a name="ln600">        te_update_job_count_on(t2, offset, TRUE);</a>
+<a name="ln601">        return;</a>
+<a name="ln602">    } else if (target == NULL) {</a>
+<a name="ln603">        target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln604">    }</a>
+<a name="ln605"> </a>
+<a name="ln606">    te_update_job_count_on(target, offset, FALSE);</a>
+<a name="ln607">}</a>
+<a name="ln608"> </a>
+<a name="ln609">static gboolean</a>
+<a name="ln610">te_should_perform_action_on(crm_graph_t * graph, crm_action_t * action, const char *target)</a>
+<a name="ln611">{</a>
+<a name="ln612">    int limit = 0;</a>
+<a name="ln613">    struct te_peer_s *r = NULL;</a>
+<a name="ln614">    const char *task = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln615">    const char *id = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK_KEY);</a>
+<a name="ln616"> </a>
+<a name="ln617">    if(target == NULL) {</a>
+<a name="ln618">        /* No limit on these */</a>
+<a name="ln619">        return TRUE;</a>
+<a name="ln620"> </a>
+<a name="ln621">    } else if(te_targets == NULL) {</a>
+<a name="ln622">        return FALSE;</a>
+<a name="ln623">    }</a>
+<a name="ln624"> </a>
+<a name="ln625">    r = g_hash_table_lookup(te_targets, target);</a>
+<a name="ln626">    limit = throttle_get_job_limit(target);</a>
+<a name="ln627"> </a>
+<a name="ln628">    if(r == NULL) {</a>
+<a name="ln629">        r = calloc(1, sizeof(struct te_peer_s));</a>
+<a name="ln630">        r-&gt;name = strdup(target);</a>
+<a name="ln631">        g_hash_table_insert(te_targets, r-&gt;name, r);</a>
+<a name="ln632">    }</a>
+<a name="ln633"> </a>
+<a name="ln634">    if(limit &lt;= r-&gt;jobs) {</a>
+<a name="ln635">        crm_trace(&quot;Peer %s is over their job limit of %d (%d): deferring %s&quot;,</a>
+<a name="ln636">                  target, limit, r-&gt;jobs, id);</a>
+<a name="ln637">        return FALSE;</a>
+<a name="ln638"> </a>
+<a name="ln639">    } else if(graph-&gt;migration_limit &gt; 0 &amp;&amp; r-&gt;migrate_jobs &gt;= graph-&gt;migration_limit) {</a>
+<a name="ln640">        if (safe_str_eq(task, CRMD_ACTION_MIGRATE) || safe_str_eq(task, CRMD_ACTION_MIGRATED)) {</a>
+<a name="ln641">            crm_trace(&quot;Peer %s is over their migration job limit of %d (%d): deferring %s&quot;,</a>
+<a name="ln642">                      target, graph-&gt;migration_limit, r-&gt;migrate_jobs, id);</a>
+<a name="ln643">            return FALSE;</a>
+<a name="ln644">        }</a>
+<a name="ln645">    }</a>
+<a name="ln646"> </a>
+<a name="ln647">    crm_trace(&quot;Peer %s has not hit their limit yet. current jobs = %d limit= %d limit&quot;, target, r-&gt;jobs, limit);</a>
+<a name="ln648"> </a>
+<a name="ln649">    return TRUE;</a>
+<a name="ln650">}</a>
+<a name="ln651"> </a>
+<a name="ln652">static gboolean</a>
+<a name="ln653">te_should_perform_action(crm_graph_t * graph, crm_action_t * action)</a>
+<a name="ln654">{</a>
+<a name="ln655">    const char *target = NULL;</a>
+<a name="ln656">    const char *task = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln657"> </a>
+<a name="ln658">    if (action-&gt;type != action_type_rsc) {</a>
+<a name="ln659">        /* No limit on these */</a>
+<a name="ln660">        return TRUE;</a>
+<a name="ln661">    }</a>
+<a name="ln662"> </a>
+<a name="ln663">    /* if we have a router node, this means the action is performing</a>
+<a name="ln664">     * on a remote node. For now, we count all action occuring on a</a>
+<a name="ln665">     * remote node against the job list on the cluster node hosting</a>
+<a name="ln666">     * the connection resources */</a>
+<a name="ln667">    target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_ROUTER_NODE);</a>
+<a name="ln668"> </a>
+<a name="ln669">    if ((target == NULL) &amp;&amp;</a>
+<a name="ln670">        (safe_str_eq(task, CRMD_ACTION_MIGRATE) || safe_str_eq(task, CRMD_ACTION_MIGRATED))) {</a>
+<a name="ln671"> </a>
+<a name="ln672">        target = crm_meta_value(action-&gt;params, XML_LRM_ATTR_MIGRATE_SOURCE);</a>
+<a name="ln673">        if(te_should_perform_action_on(graph, action, target) == FALSE) {</a>
+<a name="ln674">            return FALSE;</a>
+<a name="ln675">        }</a>
+<a name="ln676"> </a>
+<a name="ln677">        target = crm_meta_value(action-&gt;params, XML_LRM_ATTR_MIGRATE_TARGET);</a>
+<a name="ln678"> </a>
+<a name="ln679">    } else if (target == NULL) {</a>
+<a name="ln680">        target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln681">    }</a>
+<a name="ln682"> </a>
+<a name="ln683">    return te_should_perform_action_on(graph, action, target);</a>
+<a name="ln684">}</a>
+<a name="ln685"> </a>
+<a name="ln686">void</a>
+<a name="ln687">te_action_confirmed(crm_action_t * action)</a>
+<a name="ln688">{</a>
+<a name="ln689">    const char *target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln690"> </a>
+<a name="ln691">    if (action-&gt;confirmed == FALSE &amp;&amp; action-&gt;type == action_type_rsc &amp;&amp; target != NULL) {</a>
+<a name="ln692">        te_update_job_count(action, -1);</a>
+<a name="ln693">    }</a>
+<a name="ln694">    action-&gt;confirmed = TRUE;</a>
+<a name="ln695">}</a>
+<a name="ln696"> </a>
+<a name="ln697"> </a>
+<a name="ln698">crm_graph_functions_t te_graph_fns = {</a>
+<a name="ln699">    te_pseudo_action,</a>
+<a name="ln700">    te_rsc_command,</a>
+<a name="ln701">    te_crm_command,</a>
+<a name="ln702">    te_fence_node,</a>
+<a name="ln703">    te_should_perform_action,</a>
+<a name="ln704">};</a>
+<a name="ln705"> </a>
+<a name="ln706">void</a>
+<a name="ln707">notify_crmd(crm_graph_t * graph)</a>
+<a name="ln708">{</a>
+<a name="ln709">    const char *type = &quot;unknown&quot;;</a>
+<a name="ln710">    enum crmd_fsa_input event = I_NULL;</a>
+<a name="ln711"> </a>
+<a name="ln712">    crm_debug(&quot;Processing transition completion in state %s&quot;, fsa_state2string(fsa_state));</a>
+<a name="ln713"> </a>
+<a name="ln714">    CRM_CHECK(graph-&gt;complete, graph-&gt;complete = TRUE);</a>
+<a name="ln715"> </a>
+<a name="ln716">    switch (graph-&gt;completion_action) {</a>
+<a name="ln717">        case tg_stop:</a>
+<a name="ln718">            type = &quot;stop&quot;;</a>
+<a name="ln719">            if (fsa_state == S_TRANSITION_ENGINE) {</a>
+<a name="ln720">                event = I_TE_SUCCESS;</a>
+<a name="ln721">            }</a>
+<a name="ln722">            break;</a>
+<a name="ln723">        case tg_done:</a>
+<a name="ln724">            type = &quot;done&quot;;</a>
+<a name="ln725">            if (fsa_state == S_TRANSITION_ENGINE) {</a>
+<a name="ln726">                event = I_TE_SUCCESS;</a>
+<a name="ln727">            }</a>
+<a name="ln728">            break;</a>
+<a name="ln729"> </a>
+<a name="ln730">        case tg_restart:</a>
+<a name="ln731">            type = &quot;restart&quot;;</a>
+<a name="ln732">            if (fsa_state == S_TRANSITION_ENGINE) {</a>
+<a name="ln733">                if (transition_timer-&gt;period_ms &gt; 0) {</a>
+<a name="ln734">                    crm_timer_stop(transition_timer);</a>
+<a name="ln735">                    crm_timer_start(transition_timer);</a>
+<a name="ln736">                } else {</a>
+<a name="ln737">                    event = I_PE_CALC;</a>
+<a name="ln738">                }</a>
+<a name="ln739"> </a>
+<a name="ln740">            } else if (fsa_state == S_POLICY_ENGINE) {</a>
+<a name="ln741">                register_fsa_action(A_PE_INVOKE);</a>
+<a name="ln742">            }</a>
+<a name="ln743">            break;</a>
+<a name="ln744"> </a>
+<a name="ln745">        case tg_shutdown:</a>
+<a name="ln746">            type = &quot;shutdown&quot;;</a>
+<a name="ln747">            if (is_set(fsa_input_register, R_SHUTDOWN)) {</a>
+<a name="ln748">                event = I_STOP;</a>
+<a name="ln749"> </a>
+<a name="ln750">            } else {</a>
+<a name="ln751">                crm_err(&quot;We didn't ask to be shut down, yet our PE is telling us to.&quot;);</a>
+<a name="ln752">                event = I_TERMINATE;</a>
+<a name="ln753">            }</a>
+<a name="ln754">    }</a>
+<a name="ln755"> </a>
+<a name="ln756">    crm_debug(&quot;Transition %d status: %s - %s&quot;, graph-&gt;id, type, crm_str(graph-&gt;abort_reason));</a>
+<a name="ln757"> </a>
+<a name="ln758">    graph-&gt;abort_reason = NULL;</a>
+<a name="ln759">    graph-&gt;completion_action = tg_done;</a>
+<a name="ln760">    clear_bit(fsa_input_register, R_IN_TRANSITION);</a>
+<a name="ln761"> </a>
+<a name="ln762">    if (event != I_NULL) {</a>
+<a name="ln763">        register_fsa_input(C_FSA_INTERNAL, event, NULL);</a>
+<a name="ln764"> </a>
+<a name="ln765">    } else if (fsa_source) {</a>
+<a name="ln766">        mainloop_set_trigger(fsa_source);</a>
+<a name="ln767">    }</a>
+<a name="ln768">}</a>
+
+</code></pre>
+<div class="balloon" rel="48"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'action->timer'. Check lines: 48, 47.</p></div>
+<div class="balloon" rel="54"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (action->timer->source_id != 0) == (0).</p></div>
+<div class="balloon" rel="565"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'r'. Check lines: 565, 564.</p></div>
+<div class="balloon" rel="566"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 566, 565.</p></div>
+<div class="balloon" rel="630"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'r'. Check lines: 630, 629.</p></div>
+<div class="balloon" rel="631"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 631, 630.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

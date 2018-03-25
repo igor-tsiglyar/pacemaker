@@ -1,0 +1,679 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2012 David Vossel &lt;davidvossel@gmail.com&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;glib.h&gt;</a>
+<a name="ln27">#include &lt;unistd.h&gt;</a>
+<a name="ln28">#include &lt;signal.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;sys/types.h&gt;</a>
+<a name="ln31">#include &lt;sys/wait.h&gt;</a>
+<a name="ln32">#include &lt;sys/prctl.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;crm/crm.h&gt;</a>
+<a name="ln35">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln36">#include &lt;crm/services.h&gt;</a>
+<a name="ln37">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln38">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln40"> </a>
+<a name="ln41">#include &lt;lrmd_private.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#if defined(HAVE_GNUTLS_GNUTLS_H) &amp;&amp; defined(SUPPORT_REMOTE)</a>
+<a name="ln44">#  define ENABLE_PCMK_REMOTE</a>
+<a name="ln45">#endif</a>
+<a name="ln46"> </a>
+<a name="ln47">GMainLoop *mainloop = NULL;</a>
+<a name="ln48">static qb_ipcs_service_t *ipcs = NULL;</a>
+<a name="ln49">stonith_t *stonith_api = NULL;</a>
+<a name="ln50">int lrmd_call_id = 0;</a>
+<a name="ln51"> </a>
+<a name="ln52">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln53">/* whether shutdown request has been sent */</a>
+<a name="ln54">static volatile sig_atomic_t shutting_down = FALSE;</a>
+<a name="ln55"> </a>
+<a name="ln56">/* timer for waiting for acknowledgment of shutdown request */</a>
+<a name="ln57">static volatile guint shutdown_ack_timer = 0;</a>
+<a name="ln58"> </a>
+<a name="ln59">static gboolean lrmd_exit(gpointer data);</a>
+<a name="ln60">#endif</a>
+<a name="ln61"> </a>
+<a name="ln62">static void</a>
+<a name="ln63">stonith_connection_destroy_cb(stonith_t * st, stonith_event_t * e)</a>
+<a name="ln64">{</a>
+<a name="ln65">    stonith_api-&gt;state = stonith_disconnected;</a>
+<a name="ln66">    crm_err(&quot;LRMD lost STONITH connection&quot;);</a>
+<a name="ln67">    stonith_connection_failed();</a>
+<a name="ln68">}</a>
+<a name="ln69"> </a>
+<a name="ln70">stonith_t *</a>
+<a name="ln71">get_stonith_connection(void)</a>
+<a name="ln72">{</a>
+<a name="ln73">    if (stonith_api &amp;&amp; stonith_api-&gt;state == stonith_disconnected) {</a>
+<a name="ln74">        stonith_api_delete(stonith_api);</a>
+<a name="ln75">        stonith_api = NULL;</a>
+<a name="ln76">    }</a>
+<a name="ln77"> </a>
+<a name="ln78">    if (!stonith_api) {</a>
+<a name="ln79">        int rc = 0;</a>
+<a name="ln80">        int tries = 10;</a>
+<a name="ln81"> </a>
+<a name="ln82">        stonith_api = stonith_api_new();</a>
+<a name="ln83">        do {</a>
+<a name="ln84">            rc = stonith_api-&gt;cmds-&gt;connect(stonith_api, &quot;lrmd&quot;, NULL);</a>
+<a name="ln85">            if (rc == pcmk_ok) {</a>
+<a name="ln86">                stonith_api-&gt;cmds-&gt;register_notification(stonith_api,</a>
+<a name="ln87">                                                         T_STONITH_NOTIFY_DISCONNECT,</a>
+<a name="ln88">                                                         stonith_connection_destroy_cb);</a>
+<a name="ln89">                break;</a>
+<a name="ln90">            }</a>
+<a name="ln91">            sleep(1);</a>
+<a name="ln92">            tries--;</a>
+<a name="ln93">        } while (tries);</a>
+<a name="ln94"> </a>
+<a name="ln95">        if (rc) {</a>
+<a name="ln96">            crm_err(&quot;Unable to connect to stonith daemon to execute command. error: %s&quot;,</a>
+<a name="ln97">                    pcmk_strerror(rc));</a>
+<a name="ln98">            stonith_api_delete(stonith_api);</a>
+<a name="ln99">            stonith_api = NULL;</a>
+<a name="ln100">        }</a>
+<a name="ln101">    }</a>
+<a name="ln102">    return stonith_api;</a>
+<a name="ln103">}</a>
+<a name="ln104"> </a>
+<a name="ln105">static int32_t</a>
+<a name="ln106">lrmd_ipc_accept(qb_ipcs_connection_t * c, uid_t uid, gid_t gid)</a>
+<a name="ln107">{</a>
+<a name="ln108">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln109">    if (crm_client_new(c, uid, gid) == NULL) {</a>
+<a name="ln110">        return -EIO;</a>
+<a name="ln111">    }</a>
+<a name="ln112">    return 0;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">static void</a>
+<a name="ln116">lrmd_ipc_created(qb_ipcs_connection_t * c)</a>
+<a name="ln117">{</a>
+<a name="ln118">    crm_client_t *new_client = crm_client_get(c);</a>
+<a name="ln119"> </a>
+<a name="ln120">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln121">    CRM_ASSERT(new_client != NULL);</a>
+<a name="ln122">    /* Now that the connection is offically established, alert</a>
+<a name="ln123">     * the other clients a new connection exists. */</a>
+<a name="ln124"> </a>
+<a name="ln125">    notify_of_new_client(new_client);</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">static int32_t</a>
+<a name="ln129">lrmd_ipc_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)</a>
+<a name="ln130">{</a>
+<a name="ln131">    uint32_t id = 0;</a>
+<a name="ln132">    uint32_t flags = 0;</a>
+<a name="ln133">    crm_client_t *client = crm_client_get(c);</a>
+<a name="ln134">    xmlNode *request = crm_ipcs_recv(client, data, size, &amp;id, &amp;flags);</a>
+<a name="ln135"> </a>
+<a name="ln136">    CRM_CHECK(client != NULL, crm_err(&quot;Invalid client&quot;);</a>
+<a name="ln137">              return FALSE);</a>
+<a name="ln138">    CRM_CHECK(client-&gt;id != NULL, crm_err(&quot;Invalid client: %p&quot;, client);</a>
+<a name="ln139">              return FALSE);</a>
+<a name="ln140"> </a>
+<a name="ln141">    CRM_CHECK(flags &amp; crm_ipc_client_response, crm_err(&quot;Invalid client request: %p&quot;, client);</a>
+<a name="ln142">              return FALSE);</a>
+<a name="ln143"> </a>
+<a name="ln144">    if (!request) {</a>
+<a name="ln145">        return 0;</a>
+<a name="ln146">    }</a>
+<a name="ln147"> </a>
+<a name="ln148">    if (!client-&gt;name) {</a>
+<a name="ln149">        const char *value = crm_element_value(request, F_LRMD_CLIENTNAME);</a>
+<a name="ln150"> </a>
+<a name="ln151">        if (value == NULL) {</a>
+<a name="ln152">            client-&gt;name = crm_itoa(crm_ipcs_client_pid(c));</a>
+<a name="ln153">        } else {</a>
+<a name="ln154">            client-&gt;name = strdup(value);</a>
+<a name="ln155">        }</a>
+<a name="ln156">    }</a>
+<a name="ln157"> </a>
+<a name="ln158">    lrmd_call_id++;</a>
+<a name="ln159">    if (lrmd_call_id &lt; 1) {</a>
+<a name="ln160">        lrmd_call_id = 1;</a>
+<a name="ln161">    }</a>
+<a name="ln162"> </a>
+<a name="ln163">    crm_xml_add(request, F_LRMD_CLIENTID, client-&gt;id);</a>
+<a name="ln164">    crm_xml_add(request, F_LRMD_CLIENTNAME, client-&gt;name);</a>
+<a name="ln165">    crm_xml_add_int(request, F_LRMD_CALLID, lrmd_call_id);</a>
+<a name="ln166"> </a>
+<a name="ln167">    process_lrmd_message(client, id, request);</a>
+<a name="ln168"> </a>
+<a name="ln169">    free_xml(request);</a>
+<a name="ln170">    return 0;</a>
+<a name="ln171">}</a>
+<a name="ln172"> </a>
+<a name="ln173">/*!</a>
+<a name="ln174"> * \internal</a>
+<a name="ln175"> * \brief Free a client connection, and exit if appropriate</a>
+<a name="ln176"> *</a>
+<a name="ln177"> * \param[in] client  Client connection to free</a>
+<a name="ln178"> */</a>
+<a name="ln179">void</a>
+<a name="ln180">lrmd_client_destroy(crm_client_t *client)</a>
+<a name="ln181">{</a>
+<a name="ln182">    crm_client_destroy(client);</a>
+<a name="ln183"> </a>
+<a name="ln184">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln185">    /* If we were waiting to shut down, we can now safely do so</a>
+<a name="ln186">     * if there are no more proxied IPC providers</a>
+<a name="ln187">     */</a>
+<a name="ln188">    if (shutting_down &amp;&amp; (ipc_proxy_get_provider() == NULL)) {</a>
+<a name="ln189">        lrmd_exit(NULL);</a>
+<a name="ln190">    }</a>
+<a name="ln191">#endif</a>
+<a name="ln192">}</a>
+<a name="ln193"> </a>
+<a name="ln194">static int32_t</a>
+<a name="ln195">lrmd_ipc_closed(qb_ipcs_connection_t * c)</a>
+<a name="ln196">{</a>
+<a name="ln197">    crm_client_t *client = crm_client_get(c);</a>
+<a name="ln198"> </a>
+<a name="ln199">    if (client == NULL) {</a>
+<a name="ln200">        return 0;</a>
+<a name="ln201">    }</a>
+<a name="ln202"> </a>
+<a name="ln203">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln204">    client_disconnect_cleanup(client-&gt;id);</a>
+<a name="ln205">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln206">    ipc_proxy_remove_provider(client);</a>
+<a name="ln207">#endif</a>
+<a name="ln208">    lrmd_client_destroy(client);</a>
+<a name="ln209">    return 0;</a>
+<a name="ln210">}</a>
+<a name="ln211"> </a>
+<a name="ln212">static void</a>
+<a name="ln213">lrmd_ipc_destroy(qb_ipcs_connection_t * c)</a>
+<a name="ln214">{</a>
+<a name="ln215">    lrmd_ipc_closed(c);</a>
+<a name="ln216">    crm_trace(&quot;Connection %p&quot;, c);</a>
+<a name="ln217">}</a>
+<a name="ln218"> </a>
+<a name="ln219">static struct qb_ipcs_service_handlers lrmd_ipc_callbacks = {</a>
+<a name="ln220">    .connection_accept = lrmd_ipc_accept,</a>
+<a name="ln221">    .connection_created = lrmd_ipc_created,</a>
+<a name="ln222">    .msg_process = lrmd_ipc_dispatch,</a>
+<a name="ln223">    .connection_closed = lrmd_ipc_closed,</a>
+<a name="ln224">    .connection_destroyed = lrmd_ipc_destroy</a>
+<a name="ln225">};</a>
+<a name="ln226"> </a>
+<a name="ln227">int</a>
+<a name="ln228">lrmd_server_send_reply(crm_client_t * client, uint32_t id, xmlNode * reply)</a>
+<a name="ln229">{</a>
+<a name="ln230"> </a>
+<a name="ln231">    crm_trace(&quot;sending reply to client (%s) with msg id %d&quot;, client-&gt;id, id);</a>
+<a name="ln232">    switch (client-&gt;kind) {</a>
+<a name="ln233">        case CRM_CLIENT_IPC:</a>
+<a name="ln234">            return crm_ipcs_send(client, id, reply, FALSE);</a>
+<a name="ln235">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln236">        case CRM_CLIENT_TLS:</a>
+<a name="ln237">            return lrmd_tls_send_msg(client-&gt;remote, reply, id, &quot;reply&quot;);</a>
+<a name="ln238">#endif</a>
+<a name="ln239">        default:</a>
+<a name="ln240">            crm_err(&quot;Unknown lrmd client type %d&quot;, client-&gt;kind);</a>
+<a name="ln241">    }</a>
+<a name="ln242">    return -1;</a>
+<a name="ln243">}</a>
+<a name="ln244"> </a>
+<a name="ln245">int</a>
+<a name="ln246">lrmd_server_send_notify(crm_client_t * client, xmlNode * msg)</a>
+<a name="ln247">{</a>
+<a name="ln248">    crm_trace(&quot;sending notify to client (%s)&quot;, client-&gt;id);</a>
+<a name="ln249">    switch (client-&gt;kind) {</a>
+<a name="ln250">        case CRM_CLIENT_IPC:</a>
+<a name="ln251">            if (client-&gt;ipcs == NULL) {</a>
+<a name="ln252">                crm_trace(&quot;Asked to send event to disconnected local client&quot;);</a>
+<a name="ln253">                return -1;</a>
+<a name="ln254">            }</a>
+<a name="ln255">            return crm_ipcs_send(client, 0, msg, crm_ipc_server_event);</a>
+<a name="ln256">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln257">        case CRM_CLIENT_TLS:</a>
+<a name="ln258">            if (client-&gt;remote == NULL) {</a>
+<a name="ln259">                crm_trace(&quot;Asked to send event to disconnected remote client&quot;);</a>
+<a name="ln260">                return -1;</a>
+<a name="ln261">            }</a>
+<a name="ln262">            return lrmd_tls_send_msg(client-&gt;remote, msg, 0, &quot;notify&quot;);</a>
+<a name="ln263">#endif</a>
+<a name="ln264">        default:</a>
+<a name="ln265">            crm_err(&quot;Unknown lrmd client type %d&quot;, client-&gt;kind);</a>
+<a name="ln266">    }</a>
+<a name="ln267">    return -1;</a>
+<a name="ln268">}</a>
+<a name="ln269"> </a>
+<a name="ln270">/*!</a>
+<a name="ln271"> * \internal</a>
+<a name="ln272"> * \brief Clean up and exit immediately</a>
+<a name="ln273"> *</a>
+<a name="ln274"> * \param[in] data  Ignored</a>
+<a name="ln275"> *</a>
+<a name="ln276"> * \return Doesn't return</a>
+<a name="ln277"> * \note   This can be used as a timer callback.</a>
+<a name="ln278"> */</a>
+<a name="ln279">static gboolean</a>
+<a name="ln280">lrmd_exit(gpointer data)</a>
+<a name="ln281">{</a>
+<a name="ln282">    crm_info(&quot;Terminating with  %d clients&quot;, crm_hash_table_size(client_connections));</a>
+<a name="ln283"> </a>
+<a name="ln284">    if (stonith_api) {</a>
+<a name="ln285">        stonith_api-&gt;cmds-&gt;remove_notification(stonith_api, T_STONITH_NOTIFY_DISCONNECT);</a>
+<a name="ln286">        stonith_api-&gt;cmds-&gt;disconnect(stonith_api);</a>
+<a name="ln287">        stonith_api_delete(stonith_api);</a>
+<a name="ln288">    }</a>
+<a name="ln289">    if (ipcs) {</a>
+<a name="ln290">        mainloop_del_ipc_server(ipcs);</a>
+<a name="ln291">    }</a>
+<a name="ln292"> </a>
+<a name="ln293">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln294">    lrmd_tls_server_destroy();</a>
+<a name="ln295">    ipc_proxy_cleanup();</a>
+<a name="ln296">#endif</a>
+<a name="ln297"> </a>
+<a name="ln298">    crm_client_cleanup();</a>
+<a name="ln299">    g_hash_table_destroy(rsc_list);</a>
+<a name="ln300">    crm_exit(pcmk_ok);</a>
+<a name="ln301">    return FALSE;</a>
+<a name="ln302">}</a>
+<a name="ln303"> </a>
+<a name="ln304">/*!</a>
+<a name="ln305"> * \internal</a>
+<a name="ln306"> * \brief Request cluster shutdown if appropriate, otherwise exit immediately</a>
+<a name="ln307"> *</a>
+<a name="ln308"> * \param[in] nsig  Signal that caused invocation (ignored)</a>
+<a name="ln309"> */</a>
+<a name="ln310">static void</a>
+<a name="ln311">lrmd_shutdown(int nsig)</a>
+<a name="ln312">{</a>
+<a name="ln313">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln314">    crm_client_t *ipc_proxy = ipc_proxy_get_provider();</a>
+<a name="ln315"> </a>
+<a name="ln316">    /* If there are active proxied IPC providers, then we may be running</a>
+<a name="ln317">     * resources, so notify the cluster that we wish to shut down.</a>
+<a name="ln318">     */</a>
+<a name="ln319">    if (ipc_proxy) {</a>
+<a name="ln320">        if (shutting_down) {</a>
+<a name="ln321">            crm_notice(&quot;Waiting for cluster to stop resources before exiting&quot;);</a>
+<a name="ln322">            return;</a>
+<a name="ln323">        }</a>
+<a name="ln324"> </a>
+<a name="ln325">        crm_info(&quot;Sending shutdown request to cluster&quot;);</a>
+<a name="ln326">        if (ipc_proxy_shutdown_req(ipc_proxy) &lt; 0) {</a>
+<a name="ln327">            crm_crit(&quot;Shutdown request failed, exiting immediately&quot;);</a>
+<a name="ln328"> </a>
+<a name="ln329">        } else {</a>
+<a name="ln330">            /* We requested a shutdown. Now, we need to wait for an</a>
+<a name="ln331">             * acknowledgement from the proxy host (which ensures the proxy host</a>
+<a name="ln332">             * supports shutdown requests), then wait for all proxy hosts to</a>
+<a name="ln333">             * disconnect (which ensures that all resources have been stopped).</a>
+<a name="ln334">             */</a>
+<a name="ln335">            shutting_down = TRUE;</a>
+<a name="ln336"> </a>
+<a name="ln337">            /* Stop accepting new proxy connections */</a>
+<a name="ln338">            lrmd_tls_server_destroy();</a>
+<a name="ln339"> </a>
+<a name="ln340">            /* Older crmd versions will never acknowledge our request, so set a</a>
+<a name="ln341">             * fairly short timeout to exit quickly in that case. If we get the</a>
+<a name="ln342">             * ack, we'll defuse this timer.</a>
+<a name="ln343">             */</a>
+<a name="ln344">            shutdown_ack_timer = g_timeout_add_seconds(20, lrmd_exit, NULL);</a>
+<a name="ln345"> </a>
+<a name="ln346">            /* Currently, we let the OS kill us if the clients don't disconnect</a>
+<a name="ln347">             * in a reasonable time. We could instead set a long timer here</a>
+<a name="ln348">             * (shorter than what the OS is likely to use) and exit immediately</a>
+<a name="ln349">             * if it pops.</a>
+<a name="ln350">             */</a>
+<a name="ln351">            return;</a>
+<a name="ln352">        }</a>
+<a name="ln353">    }</a>
+<a name="ln354">#endif</a>
+<a name="ln355">    lrmd_exit(NULL);</a>
+<a name="ln356">}</a>
+<a name="ln357"> </a>
+<a name="ln358">/*!</a>
+<a name="ln359"> * \internal</a>
+<a name="ln360"> * \brief Defuse short exit timer if shutting down</a>
+<a name="ln361"> */</a>
+<a name="ln362">void handle_shutdown_ack()</a>
+<a name="ln363">{</a>
+<a name="ln364">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln365">    if (shutting_down) {</a>
+<a name="ln366">        crm_info(&quot;Received shutdown ack&quot;);</a>
+<a name="ln367">        if (shutdown_ack_timer &gt; 0) {</a>
+<a name="ln368">            g_source_remove(shutdown_ack_timer);</a>
+<a name="ln369">            shutdown_ack_timer = 0;</a>
+<a name="ln370">        }</a>
+<a name="ln371">        return;</a>
+<a name="ln372">    }</a>
+<a name="ln373">#endif</a>
+<a name="ln374">    crm_debug(&quot;Ignoring unexpected shutdown ack&quot;);</a>
+<a name="ln375">}</a>
+<a name="ln376"> </a>
+<a name="ln377">/*!</a>
+<a name="ln378"> * \internal</a>
+<a name="ln379"> * \brief Make short exit timer fire immediately</a>
+<a name="ln380"> */</a>
+<a name="ln381">void handle_shutdown_nack()</a>
+<a name="ln382">{</a>
+<a name="ln383">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln384">    if (shutting_down) {</a>
+<a name="ln385">        crm_info(&quot;Received shutdown nack&quot;);</a>
+<a name="ln386">        if (shutdown_ack_timer &gt; 0) {</a>
+<a name="ln387">            g_source_remove(shutdown_ack_timer);</a>
+<a name="ln388">            shutdown_ack_timer = g_timeout_add(0, lrmd_exit, NULL);</a>
+<a name="ln389">        }</a>
+<a name="ln390">        return;</a>
+<a name="ln391">    }</a>
+<a name="ln392">#endif</a>
+<a name="ln393">    crm_debug(&quot;Ignoring unexpected shutdown nack&quot;);</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396"> </a>
+<a name="ln397">static pid_t main_pid = 0;</a>
+<a name="ln398">static void</a>
+<a name="ln399">sigdone(void)</a>
+<a name="ln400">{</a>
+<a name="ln401">    exit(0);</a>
+<a name="ln402">}</a>
+<a name="ln403"> </a>
+<a name="ln404">static void</a>
+<a name="ln405">sigreap(void)</a>
+<a name="ln406">{</a>
+<a name="ln407">    pid_t pid = 0;</a>
+<a name="ln408">    int status;</a>
+<a name="ln409">    do {</a>
+<a name="ln410">        /*</a>
+<a name="ln411">         * Opinions seem to differ as to what to put here:</a>
+<a name="ln412">         *  -1, any child process</a>
+<a name="ln413">         *  0,  any child process whose process group ID is equal to that of the calling process</a>
+<a name="ln414">         */</a>
+<a name="ln415">        pid = waitpid(-1, &amp;status, WNOHANG);</a>
+<a name="ln416">        if(pid == main_pid) {</a>
+<a name="ln417">            /* Exit when pacemaker-remote exits and use the same return code */</a>
+<a name="ln418">            if (WIFEXITED(status)) {</a>
+<a name="ln419">                exit(WEXITSTATUS(status));</a>
+<a name="ln420">            }</a>
+<a name="ln421">            exit(1);</a>
+<a name="ln422">        }</a>
+<a name="ln423"> </a>
+<a name="ln424">    } while (pid &gt; 0);</a>
+<a name="ln425">}</a>
+<a name="ln426"> </a>
+<a name="ln427">static struct {</a>
+<a name="ln428">	int sig;</a>
+<a name="ln429">	void (*handler)(void);</a>
+<a name="ln430">} sigmap[] = {</a>
+<a name="ln431">	{ SIGCHLD, sigreap },</a>
+<a name="ln432">	{ SIGINT,  sigdone },</a>
+<a name="ln433">};</a>
+<a name="ln434"> </a>
+<a name="ln435">static void spawn_pidone(int argc, char **argv, char **envp)</a>
+<a name="ln436">{</a>
+<a name="ln437">    sigset_t set;</a>
+<a name="ln438"> </a>
+<a name="ln439">    if (getpid() != 1) {</a>
+<a name="ln440">        return;</a>
+<a name="ln441">    }</a>
+<a name="ln442"> </a>
+<a name="ln443">    sigfillset(&amp;set);</a>
+<a name="ln444">    sigprocmask(SIG_BLOCK, &amp;set, 0);</a>
+<a name="ln445"> </a>
+<a name="ln446">    main_pid = fork();</a>
+<a name="ln447">    switch (main_pid) {</a>
+<a name="ln448">	case 0:</a>
+<a name="ln449">            sigprocmask(SIG_UNBLOCK, &amp;set, NULL);</a>
+<a name="ln450">            setsid();</a>
+<a name="ln451">            setpgid(0, 0);</a>
+<a name="ln452"> </a>
+<a name="ln453">            /* Child remains as pacemaker_remoted */</a>
+<a name="ln454">            return;</a>
+<a name="ln455">	case -1:</a>
+<a name="ln456">            perror(&quot;fork&quot;);</a>
+<a name="ln457">    }</a>
+<a name="ln458"> </a>
+<a name="ln459">    /* Parent becomes the reaper of zombie processes */</a>
+<a name="ln460">    /* Safe to initialize logging now if needed */</a>
+<a name="ln461"> </a>
+<a name="ln462">#ifdef HAVE___PROGNAME</a>
+<a name="ln463">    /* Differentiate ourselves in the 'ps' output */</a>
+<a name="ln464">    {</a>
+<a name="ln465">        char *p;</a>
+<a name="ln466">        int i, maxlen;</a>
+<a name="ln467">        char *LastArgv = NULL;</a>
+<a name="ln468">        const char *name = &quot;pcmk-init&quot;;</a>
+<a name="ln469"> </a>
+<a name="ln470">	for(i = 0; i &lt; argc; i++) {</a>
+<a name="ln471">		if(!i || (LastArgv + 1 == argv[i]))</a>
+<a name="ln472">			LastArgv = argv[i] + strlen(argv[i]);</a>
+<a name="ln473">	}</a>
+<a name="ln474"> </a>
+<a name="ln475">	for(i = 0; envp[i] != NULL; i++) {</a>
+<a name="ln476">		if((LastArgv + 1) == envp[i]) {</a>
+<a name="ln477">			LastArgv = envp[i] + strlen(envp[i]);</a>
+<a name="ln478">		}</a>
+<a name="ln479">	}</a>
+<a name="ln480"> </a>
+<a name="ln481">        maxlen = (LastArgv - argv[0]) - 2;</a>
+<a name="ln482"> </a>
+<a name="ln483">        i = strlen(name);</a>
+<a name="ln484">        /* We can overwrite individual argv[] arguments */</a>
+<a name="ln485">        snprintf(argv[0], maxlen, &quot;%s&quot;, name);</a>
+<a name="ln486"> </a>
+<a name="ln487">        /* Now zero out everything else */</a>
+<a name="ln488">        p = &amp;argv[0][i];</a>
+<a name="ln489">        while(p &lt; LastArgv)</a>
+<a name="ln490">            *p++ = '\0';</a>
+<a name="ln491">        argv[1] = NULL;</a>
+<a name="ln492">    }</a>
+<a name="ln493">#endif /* HAVE___PROGNAME */</a>
+<a name="ln494"> </a>
+<a name="ln495">    while (1) {</a>
+<a name="ln496">	int sig;</a>
+<a name="ln497">	size_t i;</a>
+<a name="ln498"> </a>
+<a name="ln499">        sigwait(&amp;set, &amp;sig);</a>
+<a name="ln500">        for (i = 0; i &lt; DIMOF(sigmap); i++) {</a>
+<a name="ln501">            if (sigmap[i].sig == sig) {</a>
+<a name="ln502">                sigmap[i].handler();</a>
+<a name="ln503">                break;</a>
+<a name="ln504">            }</a>
+<a name="ln505">        }</a>
+<a name="ln506">    }</a>
+<a name="ln507">}</a>
+<a name="ln508"> </a>
+<a name="ln509">/* *INDENT-OFF* */</a>
+<a name="ln510">static struct crm_option long_options[] = {</a>
+<a name="ln511">    /* Top-level Options */</a>
+<a name="ln512">    {&quot;help&quot;,    0, 0,    '?', &quot;\tThis text&quot;},</a>
+<a name="ln513">    {&quot;version&quot;, 0, 0,    '$', &quot;\tVersion information&quot;  },</a>
+<a name="ln514">    {&quot;verbose&quot;, 0, 0,    'V', &quot;\tIncrease debug output&quot;},</a>
+<a name="ln515"> </a>
+<a name="ln516">    {&quot;logfile&quot;, 1, 0,    'l', &quot;\tSend logs to the additional named logfile&quot;},</a>
+<a name="ln517">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln518">    {&quot;port&quot;, 1, 0,       'p', &quot;\tPort to listen on&quot;},</a>
+<a name="ln519">#endif</a>
+<a name="ln520"> </a>
+<a name="ln521">    /* For compatibility with the original lrmd */</a>
+<a name="ln522">    {&quot;dummy&quot;,  0, 0, 'r', NULL, 1},</a>
+<a name="ln523">    {0, 0, 0, 0}</a>
+<a name="ln524">};</a>
+<a name="ln525">/* *INDENT-ON* */</a>
+<a name="ln526"> </a>
+<a name="ln527">int</a>
+<a name="ln528">main(int argc, char **argv, char **envp)</a>
+<a name="ln529">{</a>
+<a name="ln530">    int flag = 0;</a>
+<a name="ln531">    int index = 0;</a>
+<a name="ln532">    int bump_log_num = 0;</a>
+<a name="ln533">    const char *option = NULL;</a>
+<a name="ln534"> </a>
+<a name="ln535">    /* If necessary, create PID1 now before any FDs are opened */</a>
+<a name="ln536">    spawn_pidone(argc, argv, envp);</a>
+<a name="ln537"> </a>
+<a name="ln538">#ifndef ENABLE_PCMK_REMOTE</a>
+<a name="ln539">    crm_log_preinit(&quot;lrmd&quot;, argc, argv);</a>
+<a name="ln540">    crm_set_options(NULL, &quot;[options]&quot;, long_options,</a>
+<a name="ln541">                    &quot;Daemon for controlling services confirming to different standards&quot;);</a>
+<a name="ln542">#else</a>
+<a name="ln543">    crm_log_preinit(&quot;pacemaker_remoted&quot;, argc, argv);</a>
+<a name="ln544">    crm_set_options(NULL, &quot;[options]&quot;, long_options,</a>
+<a name="ln545">                    &quot;Pacemaker Remote daemon for extending pacemaker functionality to remote nodes.&quot;);</a>
+<a name="ln546">#endif</a>
+<a name="ln547"> </a>
+<a name="ln548">    while (1) {</a>
+<a name="ln549">        flag = crm_get_option(argc, argv, &amp;index);</a>
+<a name="ln550">        if (flag == -1) {</a>
+<a name="ln551">            break;</a>
+<a name="ln552">        }</a>
+<a name="ln553"> </a>
+<a name="ln554">        switch (flag) {</a>
+<a name="ln555">            case 'r':</a>
+<a name="ln556">                break;</a>
+<a name="ln557">            case 'l':</a>
+<a name="ln558">                crm_add_logfile(optarg);</a>
+<a name="ln559">                break;</a>
+<a name="ln560">            case 'p':</a>
+<a name="ln561">                setenv(&quot;PCMK_remote_port&quot;, optarg, 1);</a>
+<a name="ln562">                break;</a>
+<a name="ln563">            case 'V':</a>
+<a name="ln564">                bump_log_num++;</a>
+<a name="ln565">                break;</a>
+<a name="ln566">            case '?':</a>
+<a name="ln567">            case '$':</a>
+<a name="ln568">                crm_help(flag, EX_OK);</a>
+<a name="ln569">                break;</a>
+<a name="ln570">            default:</a>
+<a name="ln571">                crm_help('?', EX_USAGE);</a>
+<a name="ln572">                break;</a>
+<a name="ln573">        }</a>
+<a name="ln574">    }</a>
+<a name="ln575"> </a>
+<a name="ln576">    crm_log_init(NULL, LOG_INFO, TRUE, FALSE, argc, argv, FALSE);</a>
+<a name="ln577"> </a>
+<a name="ln578">    while (bump_log_num &gt; 0) {</a>
+<a name="ln579">        crm_bump_log_level(argc, argv);</a>
+<a name="ln580">        bump_log_num--;</a>
+<a name="ln581">    }</a>
+<a name="ln582"> </a>
+<a name="ln583">    option = daemon_option(&quot;logfacility&quot;);</a>
+<a name="ln584">    if(option &amp;&amp; safe_str_neq(option, &quot;none&quot;)) {</a>
+<a name="ln585">        setenv(&quot;HA_LOGFACILITY&quot;, option, 1);  /* Used by the ocf_log/ha_log OCF macro */</a>
+<a name="ln586">    }</a>
+<a name="ln587"> </a>
+<a name="ln588">    option = daemon_option(&quot;logfile&quot;);</a>
+<a name="ln589">    if(option &amp;&amp; safe_str_neq(option, &quot;none&quot;)) {</a>
+<a name="ln590">        setenv(&quot;HA_LOGFILE&quot;, option, 1);      /* Used by the ocf_log/ha_log OCF macro */</a>
+<a name="ln591"> </a>
+<a name="ln592">        if (daemon_option_enabled(crm_system_name, &quot;debug&quot;)) {</a>
+<a name="ln593">            setenv(&quot;HA_DEBUGLOG&quot;, option, 1); /* Used by the ocf_log/ha_debug OCF macro */</a>
+<a name="ln594">        }</a>
+<a name="ln595">    }</a>
+<a name="ln596"> </a>
+<a name="ln597">    /* The presence of this variable allegedly controls whether child</a>
+<a name="ln598">     * processes like httpd will try and use Systemd's sd_notify</a>
+<a name="ln599">     * API</a>
+<a name="ln600">     */</a>
+<a name="ln601">    unsetenv(&quot;NOTIFY_SOCKET&quot;);</a>
+<a name="ln602"> </a>
+<a name="ln603">    /* Used by RAs - Leave owned by root */</a>
+<a name="ln604">    crm_build_path(CRM_RSCTMP_DIR, 0755);</a>
+<a name="ln605"> </a>
+<a name="ln606">    /* Legacy: Used by RAs - Leave owned by root */</a>
+<a name="ln607">    crm_build_path(HA_STATE_DIR&quot;/heartbeat/rsctmp&quot;, 0755);</a>
+<a name="ln608"> </a>
+<a name="ln609">    rsc_list = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, free_rsc);</a>
+<a name="ln610">    ipcs = mainloop_add_ipc_server(CRM_SYSTEM_LRMD, QB_IPC_SHM, &amp;lrmd_ipc_callbacks);</a>
+<a name="ln611">    if (ipcs == NULL) {</a>
+<a name="ln612">        crm_err(&quot;Failed to create IPC server: shutting down and inhibiting respawn&quot;);</a>
+<a name="ln613">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln614">    }</a>
+<a name="ln615"> </a>
+<a name="ln616">#ifdef ENABLE_PCMK_REMOTE</a>
+<a name="ln617">    {</a>
+<a name="ln618">        const char *remote_port_str = getenv(&quot;PCMK_remote_port&quot;);</a>
+<a name="ln619">        int remote_port = remote_port_str ? atoi(remote_port_str) : DEFAULT_REMOTE_PORT;</a>
+<a name="ln620"> </a>
+<a name="ln621">        if (lrmd_init_remote_tls_server(remote_port) &lt; 0) {</a>
+<a name="ln622">            crm_err(&quot;Failed to create TLS server on port %d: shutting down and inhibiting respawn&quot;, remote_port);</a>
+<a name="ln623">            crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln624">        }</a>
+<a name="ln625">        ipc_proxy_init();</a>
+<a name="ln626">    }</a>
+<a name="ln627">#endif</a>
+<a name="ln628"> </a>
+<a name="ln629">    mainloop_add_signal(SIGTERM, lrmd_shutdown);</a>
+<a name="ln630">    mainloop = g_main_new(FALSE);</a>
+<a name="ln631">    crm_info(&quot;Starting&quot;);</a>
+<a name="ln632">    g_main_run(mainloop);</a>
+<a name="ln633"> </a>
+<a name="ln634">    /* should never get here */</a>
+<a name="ln635">    lrmd_exit(NULL);</a>
+<a name="ln636">    return pcmk_ok;</a>
+<a name="ln637">}</a>
+
+</code></pre>
+<div class="balloon" rel="604"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V536/" target="_blank">V536</a> Be advised that the utilized constant value is represented by an octal form. Oct: 0755, Dec: 493.</p></div>
+<div class="balloon" rel="607"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V536/" target="_blank">V536</a> Be advised that the utilized constant value is represented by an octal form. Oct: 0755, Dec: 493.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

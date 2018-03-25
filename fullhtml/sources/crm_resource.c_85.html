@@ -1,0 +1,1145 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5"> </a>
+<a name="ln6">/*</a>
+<a name="ln7"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln8"> *</a>
+<a name="ln9"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln10"> * modify it under the terms of the GNU General Public</a>
+<a name="ln11"> * License as published by the Free Software Foundation; either</a>
+<a name="ln12"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln13"> *</a>
+<a name="ln14"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln15"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln17"> * General Public License for more details.</a>
+<a name="ln18"> *</a>
+<a name="ln19"> * You should have received a copy of the GNU General Public</a>
+<a name="ln20"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln21"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_resource.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;sys/param.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;crm/crm.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;stdio.h&gt;</a>
+<a name="ln31">#include &lt;sys/types.h&gt;</a>
+<a name="ln32">#include &lt;unistd.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;stdlib.h&gt;</a>
+<a name="ln35">#include &lt;errno.h&gt;</a>
+<a name="ln36">#include &lt;fcntl.h&gt;</a>
+<a name="ln37">#include &lt;libgen.h&gt;</a>
+<a name="ln38">#include &lt;time.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">bool BE_QUIET = FALSE;</a>
+<a name="ln41">bool scope_master = FALSE;</a>
+<a name="ln42">int cib_options = cib_sync_call;</a>
+<a name="ln43"> </a>
+<a name="ln44">GMainLoop *mainloop = NULL;</a>
+<a name="ln45"> </a>
+<a name="ln46">#define message_timeout_ms 60*1000</a>
+<a name="ln47"> </a>
+<a name="ln48">static gboolean</a>
+<a name="ln49">resource_ipc_timeout(gpointer data)</a>
+<a name="ln50">{</a>
+<a name="ln51">    fprintf(stderr, &quot;No messages received in %d seconds.. aborting\n&quot;,</a>
+<a name="ln52">            (int)message_timeout_ms / 1000);</a>
+<a name="ln53">    crm_err(&quot;No messages received in %d seconds&quot;, (int)message_timeout_ms / 1000);</a>
+<a name="ln54">    return crm_exit(-1);</a>
+<a name="ln55">}</a>
+<a name="ln56"> </a>
+<a name="ln57">static void</a>
+<a name="ln58">resource_ipc_connection_destroy(gpointer user_data)</a>
+<a name="ln59">{</a>
+<a name="ln60">    crm_info(&quot;Connection to CRMd was terminated&quot;);</a>
+<a name="ln61">    crm_exit(1);</a>
+<a name="ln62">}</a>
+<a name="ln63"> </a>
+<a name="ln64">static void</a>
+<a name="ln65">start_mainloop(void)</a>
+<a name="ln66">{</a>
+<a name="ln67">    if (crmd_replies_needed == 0) {</a>
+<a name="ln68">        return;</a>
+<a name="ln69">    }</a>
+<a name="ln70"> </a>
+<a name="ln71">    mainloop = g_main_new(FALSE);</a>
+<a name="ln72">    fprintf(stderr, &quot;Waiting for %d replies from the CRMd&quot;, crmd_replies_needed);</a>
+<a name="ln73">    crm_debug(&quot;Waiting for %d replies from the CRMd&quot;, crmd_replies_needed);</a>
+<a name="ln74"> </a>
+<a name="ln75">    g_timeout_add(message_timeout_ms, resource_ipc_timeout, NULL);</a>
+<a name="ln76">    g_main_run(mainloop);</a>
+<a name="ln77">}</a>
+<a name="ln78"> </a>
+<a name="ln79">static int</a>
+<a name="ln80">resource_ipc_callback(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln81">{</a>
+<a name="ln82">    xmlNode *msg = string2xml(buffer);</a>
+<a name="ln83"> </a>
+<a name="ln84">    fprintf(stderr, &quot;.&quot;);</a>
+<a name="ln85">    crm_log_xml_trace(msg, &quot;[inbound]&quot;);</a>
+<a name="ln86"> </a>
+<a name="ln87">    crmd_replies_needed--;</a>
+<a name="ln88">    if (crmd_replies_needed == 0) {</a>
+<a name="ln89">        fprintf(stderr, &quot; OK\n&quot;);</a>
+<a name="ln90">        crm_debug(&quot;Got all the replies we expected&quot;);</a>
+<a name="ln91">        return crm_exit(pcmk_ok);</a>
+<a name="ln92">    }</a>
+<a name="ln93"> </a>
+<a name="ln94">    free_xml(msg);</a>
+<a name="ln95">    return 0;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">struct ipc_client_callbacks crm_callbacks = {</a>
+<a name="ln99">    .dispatch = resource_ipc_callback,</a>
+<a name="ln100">    .destroy = resource_ipc_connection_destroy,</a>
+<a name="ln101">};</a>
+<a name="ln102"> </a>
+<a name="ln103"> </a>
+<a name="ln104">/* short option letters still available: eEJkKXyYZ */</a>
+<a name="ln105"> </a>
+<a name="ln106">/* *INDENT-OFF* */</a>
+<a name="ln107">static struct crm_option long_options[] = {</a>
+<a name="ln108">    /* Top-level Options */</a>
+<a name="ln109">    {&quot;help&quot;,    0, 0, '?', &quot;\t\tThis text&quot;},</a>
+<a name="ln110">    {&quot;version&quot;, 0, 0, '$', &quot;\t\tVersion information&quot;  },</a>
+<a name="ln111">    {&quot;verbose&quot;, 0, 0, 'V', &quot;\t\tIncrease debug output&quot;},</a>
+<a name="ln112">    {&quot;quiet&quot;,   0, 0, 'Q', &quot;\t\tPrint only the value on stdout\n&quot;},</a>
+<a name="ln113"> </a>
+<a name="ln114">    {&quot;resource&quot;,   1, 0, 'r', &quot;\tResource ID&quot; },</a>
+<a name="ln115"> </a>
+<a name="ln116">    {&quot;-spacer-&quot;,1, 0, '-', &quot;\nQueries:&quot;},</a>
+<a name="ln117">    {&quot;list&quot;,       0, 0, 'L', &quot;\t\tList all cluster resources&quot;},</a>
+<a name="ln118">    {&quot;list-raw&quot;,   0, 0, 'l', &quot;\tList the IDs of all instantiated resources (no groups/clones/...)&quot;},</a>
+<a name="ln119">    {&quot;list-cts&quot;,   0, 0, 'c', NULL, pcmk_option_hidden},</a>
+<a name="ln120">    {&quot;list-operations&quot;, 0, 0, 'O', &quot;\tList active resource operations.  Optionally filtered by resource (-r) and/or node (-N)&quot;},</a>
+<a name="ln121">    {&quot;list-all-operations&quot;, 0, 0, 'o', &quot;List all resource operations.  Optionally filtered by resource (-r) and/or node (-N)\n&quot;},</a>
+<a name="ln122">    {&quot;pending&quot;,    0, 0, 'j', &quot;\t\tDisplay pending state if 'record-pending' is enabled\n&quot;, pcmk_option_hidden},</a>
+<a name="ln123"> </a>
+<a name="ln124">    {&quot;list-standards&quot;,        0, 0, 0, &quot;\tList supported standards&quot;},</a>
+<a name="ln125">    {&quot;list-ocf-providers&quot;,    0, 0, 0, &quot;List all available OCF providers&quot;},</a>
+<a name="ln126">    {&quot;list-agents&quot;,           1, 0, 0, &quot;List all agents available for the named standard and/or provider.&quot;},</a>
+<a name="ln127">    {&quot;list-ocf-alternatives&quot;, 1, 0, 0, &quot;List all available providers for the named OCF agent\n&quot;},</a>
+<a name="ln128">    {&quot;show-metadata&quot;,         1, 0, 0, &quot;Show the metadata for the named class:provider:agent&quot;},</a>
+<a name="ln129"> </a>
+<a name="ln130">    {&quot;query-xml&quot;,  0, 0, 'q', &quot;\tQuery the definition of a resource (template expanded)&quot;},</a>
+<a name="ln131">    {&quot;query-xml-raw&quot;,  0, 0, 'w', &quot;\tQuery the definition of a resource (raw xml)&quot;},</a>
+<a name="ln132">    {&quot;locate&quot;,     0, 0, 'W', &quot;\t\tDisplay the current location(s) of a resource&quot;},</a>
+<a name="ln133">    {&quot;stack&quot;,      0, 0, 'A', &quot;\t\tDisplay the prerequisites and dependents of a resource&quot;},</a>
+<a name="ln134">    {&quot;constraints&quot;,0, 0, 'a', &quot;\tDisplay the (co)location constraints that apply to a resource&quot;},</a>
+<a name="ln135"> </a>
+<a name="ln136">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nCommands:&quot;},</a>
+<a name="ln137">    {&quot;validate&quot;,   0, 0, 0, &quot;\t\tCall the validate-all action of the local given resource&quot;},</a>
+<a name="ln138">    {&quot;cleanup&quot;,         0, 0, 'C',</a>
+<a name="ln139">        &quot;\t\tDelete resource's history and re-check its current state. &quot;</a>
+<a name="ln140">        &quot;Optional: --resource (if not specified, all resources), &quot;</a>
+<a name="ln141">        &quot;--node (if not specified, all nodes), &quot;</a>
+<a name="ln142">        &quot;--force (if not specified, resource's group or clone will also be cleaned)&quot;</a>
+<a name="ln143">    },</a>
+<a name="ln144">    {&quot;set-parameter&quot;,   1, 0, 'p', &quot;Set the named parameter for a resource. See also -m, --meta&quot;},</a>
+<a name="ln145">    {&quot;get-parameter&quot;,   1, 0, 'g', &quot;Display the named parameter for a resource. See also -m, --meta&quot;},</a>
+<a name="ln146">    {&quot;delete-parameter&quot;,1, 0, 'd', &quot;Delete the named parameter for a resource. See also -m, --meta&quot;},</a>
+<a name="ln147">    {&quot;get-property&quot;,    1, 0, 'G', &quot;Display the 'class', 'type' or 'provider' of a resource&quot;, pcmk_option_hidden},</a>
+<a name="ln148">    {&quot;set-property&quot;,    1, 0, 'S',</a>
+<a name="ln149">        &quot;(Advanced) Set resource property (e.g. 'class', 'type', or 'provider'). Required: -r, -t, -v&quot;,</a>
+<a name="ln150">        pcmk_option_hidden},</a>
+<a name="ln151"> </a>
+<a name="ln152">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nResource location:&quot;},</a>
+<a name="ln153">    {</a>
+<a name="ln154">        &quot;move&quot;,    0, 0, 'M',</a>
+<a name="ln155">        &quot;\t\tMove a resource from its current location to the named destination.\n  &quot;</a>
+<a name="ln156">        &quot;\t\t\t\tRequires: --host. Optional: --lifetime, --master\n\n&quot;</a>
+<a name="ln157">        &quot;\t\t\t\tNOTE: This may prevent the resource from running on the previous location node until the implicit constraints expire or are removed with --unban\n&quot;</a>
+<a name="ln158">    },</a>
+<a name="ln159">    {</a>
+<a name="ln160">        &quot;ban&quot;,    0, 0, 'B',</a>
+<a name="ln161">        &quot;\t\tPrevent the named resource from running on the named --host.  \n&quot;</a>
+<a name="ln162">        &quot;\t\t\t\tRequires: --resource. Optional: --host, --lifetime, --master\n\n&quot;</a>
+<a name="ln163">        &quot;\t\t\t\tIf --host is not specified, it defaults to:\n&quot;</a>
+<a name="ln164">        &quot;\t\t\t\t * the current location for primitives and groups, or\n\n&quot;</a>
+<a name="ln165">        &quot;\t\t\t\t * the current location of the master for m/s resources with master-max=1\n\n&quot;</a>
+<a name="ln166">        &quot;\t\t\t\tAll other situations result in an error as there is no sane default.\n\n&quot;</a>
+<a name="ln167">        &quot;\t\t\t\tNOTE: This will prevent the resource from running on this node until the constraint expires or is removed with --clear\n&quot;</a>
+<a name="ln168">    },</a>
+<a name="ln169">    {</a>
+<a name="ln170">        &quot;clear&quot;, 0, 0, 'U', &quot;\t\tRemove all constraints created by the --ban and/or --move commands.  \n&quot;</a>
+<a name="ln171">        &quot;\t\t\t\tRequires: --resource. Optional: --host, --master\n\n&quot;</a>
+<a name="ln172">        &quot;\t\t\t\tIf --host is not specified, all constraints created by --ban and --move will be removed for the named resource.\n&quot;</a>
+<a name="ln173">    },</a>
+<a name="ln174">    {&quot;lifetime&quot;,   1, 0, 'u', &quot;\tLifespan of constraints created by the --ban and --move commands&quot;},</a>
+<a name="ln175">    {</a>
+<a name="ln176">        &quot;master&quot;,  0, 0,  0,</a>
+<a name="ln177">        &quot;\t\tLimit the scope of the --ban, --move and --clear  commands to the Master role.\n&quot;</a>
+<a name="ln178">        &quot;\t\t\t\tFor --ban and --move, the previous master can still remain active in the Slave role.&quot;</a>
+<a name="ln179">    },</a>
+<a name="ln180"> </a>
+<a name="ln181">    {&quot;-spacer-&quot;,   1, 0, '-', &quot;\nAdvanced Commands:&quot;},</a>
+<a name="ln182">    {&quot;delete&quot;,     0, 0, 'D', &quot;\t\t(Advanced) Delete a resource from the CIB&quot;},</a>
+<a name="ln183">    {&quot;fail&quot;,       0, 0, 'F', &quot;\t\t(Advanced) Tell the cluster this resource has failed&quot;},</a>
+<a name="ln184">    {&quot;restart&quot;,    0, 0,  0,  &quot;\t\t(Advanced) Tell the cluster to restart this resource and anything that depends on it&quot;},</a>
+<a name="ln185">    {&quot;wait&quot;,       0, 0,  0,  &quot;\t\t(Advanced) Wait until the cluster settles into a stable state&quot;},</a>
+<a name="ln186">    {&quot;force-demote&quot;,0,0,  0,  &quot;\t(Advanced) Bypass the cluster and demote a resource on the local node. Additional detail with -V&quot;},</a>
+<a name="ln187">    {&quot;force-stop&quot;, 0, 0,  0,  &quot;\t(Advanced) Bypass the cluster and stop a resource on the local node. Additional detail with -V&quot;},</a>
+<a name="ln188">    {&quot;force-start&quot;,0, 0,  0,  &quot;\t(Advanced) Bypass the cluster and start a resource on the local node. Additional detail with -V&quot;},</a>
+<a name="ln189">    {&quot;force-promote&quot;,0,0, 0,  &quot;\t(Advanced) Bypass the cluster and promote a resource on the local node. Additional detail with -V&quot;},</a>
+<a name="ln190">    {&quot;force-check&quot;,0, 0,  0,  &quot;\t(Advanced) Bypass the cluster and check the state of a resource on the local node. Additional detail with -V\n&quot;},</a>
+<a name="ln191"> </a>
+<a name="ln192">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nAdditional Options:&quot;},</a>
+<a name="ln193">    {&quot;node&quot;,		1, 0, 'N', &quot;\tHost uname&quot;},</a>
+<a name="ln194">    {&quot;recursive&quot;,       0, 0,  0,  &quot;\tFollow colocation chains when using --set-parameter&quot;},</a>
+<a name="ln195">    {&quot;resource-type&quot;,	1, 0, 't', &quot;Resource type (primitive, clone, group, ...)&quot;},</a>
+<a name="ln196">    {&quot;parameter-value&quot;, 1, 0, 'v', &quot;Value to use with -p&quot;},</a>
+<a name="ln197">    {&quot;meta&quot;,		0, 0, 'm', &quot;\t\tModify a resource's configuration option rather than one which is passed to the resource agent script. For use with -p, -g, -d&quot;},</a>
+<a name="ln198">    {&quot;utilization&quot;,	0, 0, 'z', &quot;\tModify a resource's utilization attribute. For use with -p, -g, -d&quot;},</a>
+<a name="ln199">    {</a>
+<a name="ln200">        &quot;operation&quot;,      required_argument, NULL, 'n',</a>
+<a name="ln201">        &quot;Operation to clear (used with -C -r; default all)&quot;</a>
+<a name="ln202">    },</a>
+<a name="ln203">    {</a>
+<a name="ln204">        &quot;interval&quot;,       required_argument, NULL, 'I',</a>
+<a name="ln205">        &quot;Interval of operation to clear (used with -C -r -n; default 0)&quot;</a>
+<a name="ln206">    },</a>
+<a name="ln207">    {&quot;set-name&quot;,        1, 0, 's', &quot;\t(Advanced) ID of the instance_attributes object to change&quot;},</a>
+<a name="ln208">    {&quot;nvpair&quot;,          1, 0, 'i', &quot;\t(Advanced) ID of the nvpair object to change/delete&quot;},</a>
+<a name="ln209">    {&quot;timeout&quot;,         1, 0, 'T',  &quot;\t(Advanced) Abort if command does not finish in this time (with --restart or --wait)&quot;},</a>
+<a name="ln210">    {&quot;force&quot;,		0, 0, 'f', &quot;\n&quot; /* Is this actually true anymore?</a>
+<a name="ln211">					   &quot;\t\tForce the resource to move by creating a rule for the current location and a score of -INFINITY&quot;</a>
+<a name="ln212">					   &quot;\n\t\tThis should be used if the resource's stickiness and constraint scores total more than INFINITY (Currently 100,000)&quot;</a>
+<a name="ln213">					   &quot;\n\t\tNOTE: This will prevent the resource from running on this node until the constraint is removed with -U or the --lifetime duration expires\n&quot;*/ },</a>
+<a name="ln214"> </a>
+<a name="ln215">    {&quot;xml-file&quot;, 1, 0, 'x', NULL, pcmk_option_hidden},\</a>
+<a name="ln216"> </a>
+<a name="ln217">    /* legacy options */</a>
+<a name="ln218">    {&quot;host-uname&quot;, 1, 0, 'H', NULL, pcmk_option_hidden},</a>
+<a name="ln219">    {&quot;migrate&quot;,    0, 0, 'M', NULL, pcmk_option_hidden},</a>
+<a name="ln220">    {&quot;un-migrate&quot;, 0, 0, 'U', NULL, pcmk_option_hidden},</a>
+<a name="ln221">    {&quot;un-move&quot;,    0, 0, 'U', NULL, pcmk_option_hidden},</a>
+<a name="ln222"> </a>
+<a name="ln223">    {&quot;refresh&quot;,    0, 0, 'R', NULL, pcmk_option_hidden},</a>
+<a name="ln224">    {&quot;reprobe&quot;,    0, 0, 'P', NULL, pcmk_option_hidden},</a>
+<a name="ln225"> </a>
+<a name="ln226">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;\nExamples:&quot;, pcmk_option_paragraph},</a>
+<a name="ln227">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;List the configured resources:&quot;, pcmk_option_paragraph},</a>
+<a name="ln228">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --list&quot;, pcmk_option_example},</a>
+<a name="ln229">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;List the available OCF agents:&quot;, pcmk_option_paragraph},</a>
+<a name="ln230">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --list-agents ocf&quot;, pcmk_option_example},</a>
+<a name="ln231">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;List the available OCF agents from the linux-ha project:&quot;, pcmk_option_paragraph},</a>
+<a name="ln232">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --list-agents ocf:heartbeat&quot;, pcmk_option_example},</a>
+<a name="ln233">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Display the current location of 'myResource':&quot;, pcmk_option_paragraph},</a>
+<a name="ln234">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --locate&quot;, pcmk_option_example},</a>
+<a name="ln235">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Move 'myResource' to another machine:&quot;, pcmk_option_paragraph},</a>
+<a name="ln236">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --move&quot;, pcmk_option_example},</a>
+<a name="ln237">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Move 'myResource' to a specific machine:&quot;, pcmk_option_paragraph},</a>
+<a name="ln238">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --move --node altNode&quot;, pcmk_option_example},</a>
+<a name="ln239">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Allow (but not force) 'myResource' to move back to its original location:&quot;, pcmk_option_paragraph},</a>
+<a name="ln240">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --un-move&quot;, pcmk_option_example},</a>
+<a name="ln241">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Tell the cluster that 'myResource' failed:&quot;, pcmk_option_paragraph},</a>
+<a name="ln242">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --fail&quot;, pcmk_option_example},</a>
+<a name="ln243">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Stop 'myResource' (and anything that depends on it):&quot;, pcmk_option_paragraph},</a>
+<a name="ln244">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --set-parameter target-role --meta --parameter-value Stopped&quot;, pcmk_option_example},</a>
+<a name="ln245">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Tell the cluster not to manage 'myResource':&quot;, pcmk_option_paragraph},</a>
+<a name="ln246">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;The cluster will not attempt to start or stop the resource under any circumstances.&quot;},</a>
+<a name="ln247">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Useful when performing maintenance tasks on a resource.&quot;, pcmk_option_paragraph},</a>
+<a name="ln248">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --set-parameter is-managed --meta --parameter-value false&quot;, pcmk_option_example},</a>
+<a name="ln249">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Erase the operation history of 'myResource' on 'aNode':&quot;, pcmk_option_paragraph},</a>
+<a name="ln250">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;The cluster will 'forget' the existing resource state (including any errors) and attempt to recover the resource.&quot;},</a>
+<a name="ln251">    {&quot;-spacer-&quot;,	1, 0, '-', &quot;Useful when a resource had failed permanently and has been repaired by an administrator.&quot;, pcmk_option_paragraph},</a>
+<a name="ln252">    {&quot;-spacer-&quot;,	1, 0, '-', &quot; crm_resource --resource myResource --cleanup --node aNode&quot;, pcmk_option_example},</a>
+<a name="ln253"> </a>
+<a name="ln254">    {0, 0, 0, 0}</a>
+<a name="ln255">};</a>
+<a name="ln256">/* *INDENT-ON* */</a>
+<a name="ln257"> </a>
+<a name="ln258">int</a>
+<a name="ln259">main(int argc, char **argv)</a>
+<a name="ln260">{</a>
+<a name="ln261">    char rsc_cmd = 'L';</a>
+<a name="ln262"> </a>
+<a name="ln263">    const char *rsc_id = NULL;</a>
+<a name="ln264">    const char *host_uname = NULL;</a>
+<a name="ln265">    const char *prop_name = NULL;</a>
+<a name="ln266">    const char *prop_value = NULL;</a>
+<a name="ln267">    const char *rsc_type = NULL;</a>
+<a name="ln268">    const char *prop_id = NULL;</a>
+<a name="ln269">    const char *prop_set = NULL;</a>
+<a name="ln270">    const char *rsc_long_cmd = NULL;</a>
+<a name="ln271">    const char *longname = NULL;</a>
+<a name="ln272">    const char *operation = NULL;</a>
+<a name="ln273">    const char *interval = NULL;</a>
+<a name="ln274">    GHashTable *override_params = NULL;</a>
+<a name="ln275"> </a>
+<a name="ln276">    char *xml_file = NULL;</a>
+<a name="ln277">    crm_ipc_t *crmd_channel = NULL;</a>
+<a name="ln278">    pe_working_set_t data_set;</a>
+<a name="ln279">    cib_t *cib_conn = NULL;</a>
+<a name="ln280">    bool recursive = FALSE;</a>
+<a name="ln281">    char *our_pid = NULL;</a>
+<a name="ln282"> </a>
+<a name="ln283">    /* Not all commands set these appropriately, but the defaults here are</a>
+<a name="ln284">     * sufficient to get the logic right. */</a>
+<a name="ln285">    bool require_resource = TRUE; /* whether command requires that resource be specified */</a>
+<a name="ln286">    bool require_dataset = TRUE;  /* whether command requires populated dataset instance */</a>
+<a name="ln287">    bool require_crmd = FALSE;    /* whether command requires connection to CRMd */</a>
+<a name="ln288"> </a>
+<a name="ln289">    int rc = pcmk_ok;</a>
+<a name="ln290">    int option_index = 0;</a>
+<a name="ln291">    int timeout_ms = 0;</a>
+<a name="ln292">    int argerr = 0;</a>
+<a name="ln293">    int flag;</a>
+<a name="ln294"> </a>
+<a name="ln295">    crm_log_cli_init(&quot;crm_resource&quot;);</a>
+<a name="ln296">    crm_set_options(NULL, &quot;(query|command) [options]&quot;, long_options,</a>
+<a name="ln297">                    &quot;Perform tasks related to cluster resources.\nAllows resources to be queried (definition and location), modified, and moved around the cluster.\n&quot;);</a>
+<a name="ln298"> </a>
+<a name="ln299">    if (argc &lt; 2) {</a>
+<a name="ln300">        crm_help('?', EX_USAGE);</a>
+<a name="ln301">    }</a>
+<a name="ln302"> </a>
+<a name="ln303">    while (1) {</a>
+<a name="ln304">        flag = crm_get_option_long(argc, argv, &amp;option_index, &amp;longname);</a>
+<a name="ln305">        if (flag == -1)</a>
+<a name="ln306">            break;</a>
+<a name="ln307"> </a>
+<a name="ln308">        switch (flag) {</a>
+<a name="ln309">            case 0: /* long options with no short equivalent */</a>
+<a name="ln310">                if (safe_str_eq(&quot;master&quot;, longname)) {</a>
+<a name="ln311">                    scope_master = TRUE;</a>
+<a name="ln312"> </a>
+<a name="ln313">                } else if(safe_str_eq(longname, &quot;recursive&quot;)) {</a>
+<a name="ln314">                    recursive = TRUE;</a>
+<a name="ln315"> </a>
+<a name="ln316">                } else if (safe_str_eq(&quot;wait&quot;, longname)) {</a>
+<a name="ln317">                    rsc_cmd = flag;</a>
+<a name="ln318">                    rsc_long_cmd = longname;</a>
+<a name="ln319">                    require_resource = FALSE;</a>
+<a name="ln320">                    require_dataset = FALSE;</a>
+<a name="ln321"> </a>
+<a name="ln322">                } else if (</a>
+<a name="ln323">                    safe_str_eq(&quot;validate&quot;, longname)</a>
+<a name="ln324">                    || safe_str_eq(&quot;restart&quot;, longname)</a>
+<a name="ln325">                    || safe_str_eq(&quot;force-demote&quot;,  longname)</a>
+<a name="ln326">                    || safe_str_eq(&quot;force-stop&quot;,    longname)</a>
+<a name="ln327">                    || safe_str_eq(&quot;force-start&quot;,   longname)</a>
+<a name="ln328">                    || safe_str_eq(&quot;force-promote&quot;, longname)</a>
+<a name="ln329">                    || safe_str_eq(&quot;force-check&quot;,   longname)) {</a>
+<a name="ln330">                    rsc_cmd = flag;</a>
+<a name="ln331">                    rsc_long_cmd = longname;</a>
+<a name="ln332">                    crm_log_args(argc, argv);</a>
+<a name="ln333"> </a>
+<a name="ln334">                } else if (safe_str_eq(&quot;list-ocf-providers&quot;, longname)</a>
+<a name="ln335">                           || safe_str_eq(&quot;list-ocf-alternatives&quot;, longname)</a>
+<a name="ln336">                           || safe_str_eq(&quot;list-standards&quot;, longname)) {</a>
+<a name="ln337">                    const char *text = NULL;</a>
+<a name="ln338">                    lrmd_list_t *list = NULL;</a>
+<a name="ln339">                    lrmd_list_t *iter = NULL;</a>
+<a name="ln340">                    lrmd_t *lrmd_conn = lrmd_api_new();</a>
+<a name="ln341"> </a>
+<a name="ln342">                    if (safe_str_eq(&quot;list-ocf-providers&quot;, longname)</a>
+<a name="ln343">                        || safe_str_eq(&quot;list-ocf-alternatives&quot;, longname)) {</a>
+<a name="ln344">                        rc = lrmd_conn-&gt;cmds-&gt;list_ocf_providers(lrmd_conn, optarg, &amp;list);</a>
+<a name="ln345">                        text = &quot;OCF providers&quot;;</a>
+<a name="ln346"> </a>
+<a name="ln347">                    } else if (safe_str_eq(&quot;list-standards&quot;, longname)) {</a>
+<a name="ln348">                        rc = lrmd_conn-&gt;cmds-&gt;list_standards(lrmd_conn, &amp;list);</a>
+<a name="ln349">                        text = &quot;standards&quot;;</a>
+<a name="ln350">                    }</a>
+<a name="ln351"> </a>
+<a name="ln352">                    if (rc &gt; 0) {</a>
+<a name="ln353">                        rc = 0;</a>
+<a name="ln354">                        for (iter = list; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln355">                            rc++;</a>
+<a name="ln356">                            printf(&quot;%s\n&quot;, iter-&gt;val);</a>
+<a name="ln357">                        }</a>
+<a name="ln358">                        lrmd_list_freeall(list);</a>
+<a name="ln359"> </a>
+<a name="ln360">                    } else if (optarg) {</a>
+<a name="ln361">                        fprintf(stderr, &quot;No %s found for %s\n&quot;, text, optarg);</a>
+<a name="ln362">                    } else {</a>
+<a name="ln363">                        fprintf(stderr, &quot;No %s found\n&quot;, text);</a>
+<a name="ln364">                    }</a>
+<a name="ln365"> </a>
+<a name="ln366">                    lrmd_api_delete(lrmd_conn);</a>
+<a name="ln367">                    return crm_exit(rc);</a>
+<a name="ln368"> </a>
+<a name="ln369">                } else if (safe_str_eq(&quot;show-metadata&quot;, longname)) {</a>
+<a name="ln370">                    char standard[512];</a>
+<a name="ln371">                    char provider[512];</a>
+<a name="ln372">                    char type[512];</a>
+<a name="ln373">                    char *metadata = NULL;</a>
+<a name="ln374">                    lrmd_t *lrmd_conn = lrmd_api_new();</a>
+<a name="ln375"> </a>
+<a name="ln376">                    rc = sscanf(optarg, &quot;%[^:]:%[^:]:%s&quot;, standard, provider, type);</a>
+<a name="ln377">                    if (rc == 3) {</a>
+<a name="ln378">                        rc = lrmd_conn-&gt;cmds-&gt;get_metadata(lrmd_conn, standard, provider, type,</a>
+<a name="ln379">                                                           &amp;metadata, 0);</a>
+<a name="ln380"> </a>
+<a name="ln381">                    } else if (rc == 2) {</a>
+<a name="ln382">                        rc = lrmd_conn-&gt;cmds-&gt;get_metadata(lrmd_conn, standard, NULL, provider,</a>
+<a name="ln383">                                                           &amp;metadata, 0);</a>
+<a name="ln384"> </a>
+<a name="ln385">                    } else if (rc &lt; 2) {</a>
+<a name="ln386">                        fprintf(stderr,</a>
+<a name="ln387">                                &quot;Please specify standard:type or standard:provider:type, not %s\n&quot;,</a>
+<a name="ln388">                                optarg);</a>
+<a name="ln389">                        rc = -EINVAL;</a>
+<a name="ln390">                    }</a>
+<a name="ln391"> </a>
+<a name="ln392">                    if (metadata) {</a>
+<a name="ln393">                        printf(&quot;%s\n&quot;, metadata);</a>
+<a name="ln394">                    } else {</a>
+<a name="ln395">                        fprintf(stderr, &quot;Metadata query for %s failed: %d\n&quot;, optarg, rc);</a>
+<a name="ln396">                    }</a>
+<a name="ln397">                    lrmd_api_delete(lrmd_conn);</a>
+<a name="ln398">                    return crm_exit(rc);</a>
+<a name="ln399"> </a>
+<a name="ln400">                } else if (safe_str_eq(&quot;list-agents&quot;, longname)) {</a>
+<a name="ln401">                    lrmd_list_t *list = NULL;</a>
+<a name="ln402">                    lrmd_list_t *iter = NULL;</a>
+<a name="ln403">                    char *provider = strchr (optarg, ':');</a>
+<a name="ln404">                    lrmd_t *lrmd_conn = lrmd_api_new();</a>
+<a name="ln405"> </a>
+<a name="ln406">                    if (provider) {</a>
+<a name="ln407">                        *provider++ = 0;</a>
+<a name="ln408">                    }</a>
+<a name="ln409">                    rc = lrmd_conn-&gt;cmds-&gt;list_agents(lrmd_conn, &amp;list, optarg, provider);</a>
+<a name="ln410"> </a>
+<a name="ln411">                    if (rc &gt; 0) {</a>
+<a name="ln412">                        rc = 0;</a>
+<a name="ln413">                        for (iter = list; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln414">                            printf(&quot;%s\n&quot;, iter-&gt;val);</a>
+<a name="ln415">                            rc++;</a>
+<a name="ln416">                        }</a>
+<a name="ln417">                        lrmd_list_freeall(list);</a>
+<a name="ln418">                        rc = 0;</a>
+<a name="ln419">                    } else {</a>
+<a name="ln420">                        fprintf(stderr, &quot;No agents found for standard=%s, provider=%s\n&quot;,</a>
+<a name="ln421">                                optarg, (provider? provider : &quot;*&quot;));</a>
+<a name="ln422">                        rc = -1;</a>
+<a name="ln423">                    }</a>
+<a name="ln424">                    lrmd_api_delete(lrmd_conn);</a>
+<a name="ln425">                    return crm_exit(rc);</a>
+<a name="ln426"> </a>
+<a name="ln427">                } else {</a>
+<a name="ln428">                    crm_err(&quot;Unhandled long option: %s&quot;, longname);</a>
+<a name="ln429">                }</a>
+<a name="ln430">                break;</a>
+<a name="ln431">            case 'V':</a>
+<a name="ln432">                do_trace = TRUE;</a>
+<a name="ln433">                crm_bump_log_level(argc, argv);</a>
+<a name="ln434">                break;</a>
+<a name="ln435">            case '$':</a>
+<a name="ln436">            case '?':</a>
+<a name="ln437">                crm_help(flag, EX_OK);</a>
+<a name="ln438">                break;</a>
+<a name="ln439">            case 'x':</a>
+<a name="ln440">                xml_file = strdup(optarg);</a>
+<a name="ln441">                break;</a>
+<a name="ln442">            case 'Q':</a>
+<a name="ln443">                BE_QUIET = TRUE;</a>
+<a name="ln444">                break;</a>
+<a name="ln445">            case 'm':</a>
+<a name="ln446">                attr_set_type = XML_TAG_META_SETS;</a>
+<a name="ln447">                break;</a>
+<a name="ln448">            case 'z':</a>
+<a name="ln449">                attr_set_type = XML_TAG_UTILIZATION;</a>
+<a name="ln450">                break;</a>
+<a name="ln451">            case 'u':</a>
+<a name="ln452">                move_lifetime = strdup(optarg);</a>
+<a name="ln453">                break;</a>
+<a name="ln454">            case 'f':</a>
+<a name="ln455">                do_force = TRUE;</a>
+<a name="ln456">                crm_log_args(argc, argv);</a>
+<a name="ln457">                break;</a>
+<a name="ln458">            case 'i':</a>
+<a name="ln459">                prop_id = optarg;</a>
+<a name="ln460">                break;</a>
+<a name="ln461">            case 's':</a>
+<a name="ln462">                prop_set = optarg;</a>
+<a name="ln463">                break;</a>
+<a name="ln464">            case 'r':</a>
+<a name="ln465">                rsc_id = optarg;</a>
+<a name="ln466">                break;</a>
+<a name="ln467">            case 'v':</a>
+<a name="ln468">                prop_value = optarg;</a>
+<a name="ln469">                break;</a>
+<a name="ln470">            case 't':</a>
+<a name="ln471">                rsc_type = optarg;</a>
+<a name="ln472">                break;</a>
+<a name="ln473">            case 'T':</a>
+<a name="ln474">                timeout_ms = crm_get_msec(optarg);</a>
+<a name="ln475">                break;</a>
+<a name="ln476"> </a>
+<a name="ln477">            case 'C':</a>
+<a name="ln478">            case 'R':</a>
+<a name="ln479">            case 'P':</a>
+<a name="ln480">                crm_log_args(argc, argv);</a>
+<a name="ln481">                require_resource = FALSE;</a>
+<a name="ln482">                require_crmd = TRUE;</a>
+<a name="ln483">                rsc_cmd = 'C';</a>
+<a name="ln484">                break;</a>
+<a name="ln485"> </a>
+<a name="ln486">            case 'n':</a>
+<a name="ln487">                operation = optarg;</a>
+<a name="ln488">                break;</a>
+<a name="ln489"> </a>
+<a name="ln490">            case 'I':</a>
+<a name="ln491">                interval = optarg;</a>
+<a name="ln492">                break;</a>
+<a name="ln493"> </a>
+<a name="ln494">            case 'F':</a>
+<a name="ln495">                crm_log_args(argc, argv);</a>
+<a name="ln496">                require_crmd = TRUE;</a>
+<a name="ln497">                rsc_cmd = flag;</a>
+<a name="ln498">                break;</a>
+<a name="ln499"> </a>
+<a name="ln500">            case 'U':</a>
+<a name="ln501">            case 'B':</a>
+<a name="ln502">            case 'M':</a>
+<a name="ln503">            case 'D':</a>
+<a name="ln504">                crm_log_args(argc, argv);</a>
+<a name="ln505">                rsc_cmd = flag;</a>
+<a name="ln506">                break;</a>
+<a name="ln507"> </a>
+<a name="ln508">            case 'L':</a>
+<a name="ln509">            case 'c':</a>
+<a name="ln510">            case 'l':</a>
+<a name="ln511">            case 'q':</a>
+<a name="ln512">            case 'w':</a>
+<a name="ln513">            case 'W':</a>
+<a name="ln514">            case 'O':</a>
+<a name="ln515">            case 'o':</a>
+<a name="ln516">            case 'A':</a>
+<a name="ln517">            case 'a':</a>
+<a name="ln518">                rsc_cmd = flag;</a>
+<a name="ln519">                break;</a>
+<a name="ln520"> </a>
+<a name="ln521">            case 'j':</a>
+<a name="ln522">                print_pending = TRUE;</a>
+<a name="ln523">                break;</a>
+<a name="ln524">            case 'p':</a>
+<a name="ln525">            case 'd':</a>
+<a name="ln526">            case 'S':</a>
+<a name="ln527">                crm_log_args(argc, argv);</a>
+<a name="ln528">                prop_name = optarg;</a>
+<a name="ln529">                rsc_cmd = flag;</a>
+<a name="ln530">                break;</a>
+<a name="ln531">            case 'G':</a>
+<a name="ln532">            case 'g':</a>
+<a name="ln533">                prop_name = optarg;</a>
+<a name="ln534">                rsc_cmd = flag;</a>
+<a name="ln535">                break;</a>
+<a name="ln536">            case 'h':</a>
+<a name="ln537">            case 'H':</a>
+<a name="ln538">            case 'N':</a>
+<a name="ln539">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln540">                host_uname = optarg;</a>
+<a name="ln541">                break;</a>
+<a name="ln542"> </a>
+<a name="ln543">            default:</a>
+<a name="ln544">                CMD_ERR(&quot;Argument code 0%o (%c) is not (?yet?) supported&quot;, flag, flag);</a>
+<a name="ln545">                ++argerr;</a>
+<a name="ln546">                break;</a>
+<a name="ln547">        }</a>
+<a name="ln548">    }</a>
+<a name="ln549"> </a>
+<a name="ln550">    if (optind &lt; argc</a>
+<a name="ln551">        &amp;&amp; argv[optind] != NULL</a>
+<a name="ln552">        &amp;&amp; rsc_cmd == 0</a>
+<a name="ln553">        &amp;&amp; rsc_long_cmd) {</a>
+<a name="ln554"> </a>
+<a name="ln555">        override_params = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln556">        while (optind &lt; argc &amp;&amp; argv[optind] != NULL) {</a>
+<a name="ln557">            char *name = calloc(1, strlen(argv[optind]));</a>
+<a name="ln558">            char *value = calloc(1, strlen(argv[optind]));</a>
+<a name="ln559">            int rc = sscanf(argv[optind], &quot;%[^=]=%s&quot;, name, value);</a>
+<a name="ln560"> </a>
+<a name="ln561">            if(rc == 2) {</a>
+<a name="ln562">                g_hash_table_replace(override_params, name, value);</a>
+<a name="ln563"> </a>
+<a name="ln564">            } else {</a>
+<a name="ln565">                CMD_ERR(&quot;Error parsing '%s' as a name=value pair for --%s&quot;, argv[optind], rsc_long_cmd);</a>
+<a name="ln566">                free(value);</a>
+<a name="ln567">                free(name);</a>
+<a name="ln568">                argerr++;</a>
+<a name="ln569">            }</a>
+<a name="ln570">            optind++;</a>
+<a name="ln571">        }</a>
+<a name="ln572"> </a>
+<a name="ln573">    } else if (optind &lt; argc &amp;&amp; argv[optind] != NULL &amp;&amp; rsc_cmd == 0) {</a>
+<a name="ln574">        CMD_ERR(&quot;non-option ARGV-elements: &quot;);</a>
+<a name="ln575">        while (optind &lt; argc &amp;&amp; argv[optind] != NULL) {</a>
+<a name="ln576">            CMD_ERR(&quot;[%d of %d] %s &quot;, optind, argc, argv[optind]);</a>
+<a name="ln577">            optind++;</a>
+<a name="ln578">            argerr++;</a>
+<a name="ln579">        }</a>
+<a name="ln580">    }</a>
+<a name="ln581"> </a>
+<a name="ln582">    if (optind &gt; argc) {</a>
+<a name="ln583">        ++argerr;</a>
+<a name="ln584">    }</a>
+<a name="ln585"> </a>
+<a name="ln586">    if (argerr) {</a>
+<a name="ln587">        CMD_ERR(&quot;Invalid option(s) supplied, use --help for valid usage&quot;);</a>
+<a name="ln588">        return crm_exit(EX_USAGE);</a>
+<a name="ln589">    }</a>
+<a name="ln590"> </a>
+<a name="ln591">    our_pid = calloc(1, 11);</a>
+<a name="ln592">    if (our_pid != NULL) {</a>
+<a name="ln593">        snprintf(our_pid, 10, &quot;%d&quot;, getpid());</a>
+<a name="ln594">        our_pid[10] = '\0';</a>
+<a name="ln595">    }</a>
+<a name="ln596"> </a>
+<a name="ln597">    if (do_force) {</a>
+<a name="ln598">        crm_debug(&quot;Forcing...&quot;);</a>
+<a name="ln599">        cib_options |= cib_quorum_override;</a>
+<a name="ln600">    }</a>
+<a name="ln601"> </a>
+<a name="ln602">    data_set.input = NULL; /* make clean-up easier */</a>
+<a name="ln603"> </a>
+<a name="ln604">    /* If user specified resource, look for it, even if it's optional for command */</a>
+<a name="ln605">    if (rsc_id) {</a>
+<a name="ln606">        require_resource = TRUE;</a>
+<a name="ln607">    }</a>
+<a name="ln608"> </a>
+<a name="ln609">    /* We need a dataset to find a resource, even if command doesn't need it */</a>
+<a name="ln610">    if (require_resource) {</a>
+<a name="ln611">        require_dataset = TRUE;</a>
+<a name="ln612">    }</a>
+<a name="ln613"> </a>
+<a name="ln614">    /* Establish a connection to the CIB */</a>
+<a name="ln615">    cib_conn = cib_new();</a>
+<a name="ln616">    rc = cib_conn-&gt;cmds-&gt;signon(cib_conn, crm_system_name, cib_command);</a>
+<a name="ln617">    if (rc != pcmk_ok) {</a>
+<a name="ln618">        CMD_ERR(&quot;Error signing on to the CIB service: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln619">        return crm_exit(rc);</a>
+<a name="ln620">    }</a>
+<a name="ln621"> </a>
+<a name="ln622">    /* Populate working set from XML file if specified or CIB query otherwise */</a>
+<a name="ln623">    if (require_dataset) {</a>
+<a name="ln624">        xmlNode *cib_xml_copy = NULL;</a>
+<a name="ln625"> </a>
+<a name="ln626">        if (xml_file != NULL) {</a>
+<a name="ln627">            cib_xml_copy = filename2xml(xml_file);</a>
+<a name="ln628"> </a>
+<a name="ln629">        } else {</a>
+<a name="ln630">            rc = cib_conn-&gt;cmds-&gt;query(cib_conn, NULL, &amp;cib_xml_copy, cib_scope_local | cib_sync_call);</a>
+<a name="ln631">        }</a>
+<a name="ln632"> </a>
+<a name="ln633">        if(rc != pcmk_ok) {</a>
+<a name="ln634">            goto bail;</a>
+<a name="ln635">        }</a>
+<a name="ln636"> </a>
+<a name="ln637">        /* Populate the working set instance */</a>
+<a name="ln638">        set_working_set_defaults(&amp;data_set);</a>
+<a name="ln639">        rc = update_working_set_xml(&amp;data_set, &amp;cib_xml_copy);</a>
+<a name="ln640">        if (rc != pcmk_ok) {</a>
+<a name="ln641">            goto bail;</a>
+<a name="ln642">        }</a>
+<a name="ln643">        cluster_status(&amp;data_set);</a>
+<a name="ln644"> </a>
+<a name="ln645">        /* Set rc to -ENXIO if no resource matching rsc_id is found.</a>
+<a name="ln646">         * This does not bail, but is handled later for certain commands.</a>
+<a name="ln647">         * That handling could be done here instead if all flags above set</a>
+<a name="ln648">         * require_resource appropriately. */</a>
+<a name="ln649">        if (require_resource &amp;&amp; rsc_id &amp;&amp; (find_rsc_or_clone(rsc_id, &amp;data_set) == NULL)) {</a>
+<a name="ln650">            rc = -ENXIO;</a>
+<a name="ln651">        }</a>
+<a name="ln652">    }</a>
+<a name="ln653"> </a>
+<a name="ln654">    /* Establish a connection to the CRMd if needed */</a>
+<a name="ln655">    if (require_crmd) {</a>
+<a name="ln656">        xmlNode *xml = NULL;</a>
+<a name="ln657">        mainloop_io_t *source =</a>
+<a name="ln658">            mainloop_add_ipc_client(CRM_SYSTEM_CRMD, G_PRIORITY_DEFAULT, 0, NULL, &amp;crm_callbacks);</a>
+<a name="ln659">        crmd_channel = mainloop_get_ipc_client(source);</a>
+<a name="ln660"> </a>
+<a name="ln661">        if (crmd_channel == NULL) {</a>
+<a name="ln662">            CMD_ERR(&quot;Error signing on to the CRMd service&quot;);</a>
+<a name="ln663">            rc = -ENOTCONN;</a>
+<a name="ln664">            goto bail;</a>
+<a name="ln665">        }</a>
+<a name="ln666"> </a>
+<a name="ln667">        xml = create_hello_message(our_pid, crm_system_name, &quot;0&quot;, &quot;1&quot;);</a>
+<a name="ln668">        crm_ipc_send(crmd_channel, xml, 0, 0, NULL);</a>
+<a name="ln669">        free_xml(xml);</a>
+<a name="ln670">    }</a>
+<a name="ln671"> </a>
+<a name="ln672">    /* Handle rsc_cmd appropriately */</a>
+<a name="ln673">    if (rsc_cmd == 'L') {</a>
+<a name="ln674">        rc = pcmk_ok;</a>
+<a name="ln675">        cli_resource_print_list(&amp;data_set, FALSE);</a>
+<a name="ln676"> </a>
+<a name="ln677">    } else if (rsc_cmd == 'l') {</a>
+<a name="ln678">        int found = 0;</a>
+<a name="ln679">        GListPtr lpc = NULL;</a>
+<a name="ln680"> </a>
+<a name="ln681">        rc = pcmk_ok;</a>
+<a name="ln682">        for (lpc = data_set.resources; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln683">            resource_t *rsc = (resource_t *) lpc-&gt;data;</a>
+<a name="ln684"> </a>
+<a name="ln685">            found++;</a>
+<a name="ln686">            cli_resource_print_raw(rsc);</a>
+<a name="ln687">        }</a>
+<a name="ln688"> </a>
+<a name="ln689">        if (found == 0) {</a>
+<a name="ln690">            printf(&quot;NO resources configured\n&quot;);</a>
+<a name="ln691">            rc = -ENXIO;</a>
+<a name="ln692">        }</a>
+<a name="ln693"> </a>
+<a name="ln694">    } else if (rsc_cmd == 0 &amp;&amp; rsc_long_cmd &amp;&amp; safe_str_eq(rsc_long_cmd, &quot;restart&quot;)) {</a>
+<a name="ln695">        resource_t *rsc = NULL;</a>
+<a name="ln696"> </a>
+<a name="ln697">        rc = -ENXIO;</a>
+<a name="ln698">        if (rsc_id == NULL) {</a>
+<a name="ln699">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln700">            goto bail;</a>
+<a name="ln701">        }</a>
+<a name="ln702"> </a>
+<a name="ln703">        rsc = pe_find_resource(data_set.resources, rsc_id);</a>
+<a name="ln704"> </a>
+<a name="ln705">        rc = -EINVAL;</a>
+<a name="ln706">        if (rsc == NULL) {</a>
+<a name="ln707">            CMD_ERR(&quot;Resource '%s' not restarted: unknown&quot;, rsc_id);</a>
+<a name="ln708">            goto bail;</a>
+<a name="ln709">        }</a>
+<a name="ln710"> </a>
+<a name="ln711">        rc = cli_resource_restart(rsc, host_uname, timeout_ms, cib_conn);</a>
+<a name="ln712"> </a>
+<a name="ln713">    } else if (rsc_cmd == 0 &amp;&amp; rsc_long_cmd &amp;&amp; safe_str_eq(rsc_long_cmd, &quot;wait&quot;)) {</a>
+<a name="ln714">        rc = wait_till_stable(timeout_ms, cib_conn);</a>
+<a name="ln715"> </a>
+<a name="ln716">    } else if (rsc_cmd == 0 &amp;&amp; rsc_long_cmd) { /* validate or force-(stop|start|check) */</a>
+<a name="ln717">        rc = cli_resource_execute(rsc_id, rsc_long_cmd, override_params, cib_conn, &amp;data_set);</a>
+<a name="ln718"> </a>
+<a name="ln719">    } else if (rsc_cmd == 'A' || rsc_cmd == 'a') {</a>
+<a name="ln720">        GListPtr lpc = NULL;</a>
+<a name="ln721">        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);</a>
+<a name="ln722">        xmlNode *cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set.input);</a>
+<a name="ln723"> </a>
+<a name="ln724">        if (rsc == NULL) {</a>
+<a name="ln725">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln726">            rc = -ENXIO;</a>
+<a name="ln727">            goto bail;</a>
+<a name="ln728">        }</a>
+<a name="ln729"> </a>
+<a name="ln730">        unpack_constraints(cib_constraints, &amp;data_set);</a>
+<a name="ln731"> </a>
+<a name="ln732">        for (lpc = data_set.resources; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln733">            resource_t *r = (resource_t *) lpc-&gt;data;</a>
+<a name="ln734"> </a>
+<a name="ln735">            clear_bit(r-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln736">        }</a>
+<a name="ln737"> </a>
+<a name="ln738">        cli_resource_print_colocation(rsc, TRUE, rsc_cmd == 'A', 1);</a>
+<a name="ln739"> </a>
+<a name="ln740">        fprintf(stdout, &quot;* %s\n&quot;, rsc-&gt;id);</a>
+<a name="ln741">        cli_resource_print_location(rsc, NULL);</a>
+<a name="ln742"> </a>
+<a name="ln743">        for (lpc = data_set.resources; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln744">            resource_t *r = (resource_t *) lpc-&gt;data;</a>
+<a name="ln745"> </a>
+<a name="ln746">            clear_bit(r-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln747">        }</a>
+<a name="ln748"> </a>
+<a name="ln749">        cli_resource_print_colocation(rsc, FALSE, rsc_cmd == 'A', 1);</a>
+<a name="ln750"> </a>
+<a name="ln751">    } else if (rsc_cmd == 'c') {</a>
+<a name="ln752">        int found = 0;</a>
+<a name="ln753">        GListPtr lpc = NULL;</a>
+<a name="ln754"> </a>
+<a name="ln755">        rc = pcmk_ok;</a>
+<a name="ln756">        for (lpc = data_set.resources; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln757">            resource_t *rsc = (resource_t *) lpc-&gt;data;</a>
+<a name="ln758"> </a>
+<a name="ln759">            cli_resource_print_cts(rsc);</a>
+<a name="ln760">            found++;</a>
+<a name="ln761">        }</a>
+<a name="ln762">        cli_resource_print_cts_constraints(&amp;data_set);</a>
+<a name="ln763"> </a>
+<a name="ln764">    } else if (rsc_cmd == 'F') {</a>
+<a name="ln765">        rc = cli_resource_fail(crmd_channel, host_uname, rsc_id, &amp;data_set);</a>
+<a name="ln766">        if (rc == pcmk_ok) {</a>
+<a name="ln767">            start_mainloop();</a>
+<a name="ln768">        }</a>
+<a name="ln769"> </a>
+<a name="ln770">    } else if (rsc_cmd == 'O') {</a>
+<a name="ln771">        rc = cli_resource_print_operations(rsc_id, host_uname, TRUE, &amp;data_set);</a>
+<a name="ln772"> </a>
+<a name="ln773">    } else if (rsc_cmd == 'o') {</a>
+<a name="ln774">        rc = cli_resource_print_operations(rsc_id, host_uname, FALSE, &amp;data_set);</a>
+<a name="ln775"> </a>
+<a name="ln776">    /* All remaining commands require that resource exist */</a>
+<a name="ln777">    } else if (rc == -ENXIO) {</a>
+<a name="ln778">        CMD_ERR(&quot;Resource '%s' not found: %s&quot;, crm_str(rsc_id), pcmk_strerror(rc));</a>
+<a name="ln779"> </a>
+<a name="ln780">    } else if (rsc_cmd == 'W') {</a>
+<a name="ln781">        if (rsc_id == NULL) {</a>
+<a name="ln782">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln783">            rc = -ENXIO;</a>
+<a name="ln784">            goto bail;</a>
+<a name="ln785">        }</a>
+<a name="ln786">        rc = cli_resource_search(rsc_id, &amp;data_set);</a>
+<a name="ln787">        if (rc &gt;= 0) {</a>
+<a name="ln788">            rc = pcmk_ok;</a>
+<a name="ln789">        }</a>
+<a name="ln790"> </a>
+<a name="ln791">    } else if (rsc_cmd == 'q') {</a>
+<a name="ln792">        if (rsc_id == NULL) {</a>
+<a name="ln793">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln794">            rc = -ENXIO;</a>
+<a name="ln795">            goto bail;</a>
+<a name="ln796">        }</a>
+<a name="ln797">        rc = cli_resource_print(rsc_id, &amp;data_set, TRUE);</a>
+<a name="ln798"> </a>
+<a name="ln799">    } else if (rsc_cmd == 'w') {</a>
+<a name="ln800">        if (rsc_id == NULL) {</a>
+<a name="ln801">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln802">            rc = -ENXIO;</a>
+<a name="ln803">            goto bail;</a>
+<a name="ln804">        }</a>
+<a name="ln805">        rc = cli_resource_print(rsc_id, &amp;data_set, FALSE);</a>
+<a name="ln806"> </a>
+<a name="ln807">    } else if (rsc_cmd == 'U') {</a>
+<a name="ln808">        node_t *dest = NULL;</a>
+<a name="ln809"> </a>
+<a name="ln810">        if (rsc_id == NULL) {</a>
+<a name="ln811">            CMD_ERR(&quot;No value specified for --resource&quot;);</a>
+<a name="ln812">            rc = -ENXIO;</a>
+<a name="ln813">            goto bail;</a>
+<a name="ln814">        }</a>
+<a name="ln815"> </a>
+<a name="ln816">        if (host_uname) {</a>
+<a name="ln817">            dest = pe_find_node(data_set.nodes, host_uname);</a>
+<a name="ln818">            if (dest == NULL) {</a>
+<a name="ln819">                CMD_ERR(&quot;Unknown node: %s&quot;, host_uname);</a>
+<a name="ln820">                rc = -ENXIO;</a>
+<a name="ln821">                goto bail;</a>
+<a name="ln822">            }</a>
+<a name="ln823">            rc = cli_resource_clear(rsc_id, dest-&gt;details-&gt;uname, NULL, cib_conn);</a>
+<a name="ln824"> </a>
+<a name="ln825">        } else {</a>
+<a name="ln826">            rc = cli_resource_clear(rsc_id, NULL, data_set.nodes, cib_conn);</a>
+<a name="ln827">        }</a>
+<a name="ln828"> </a>
+<a name="ln829">    } else if (rsc_cmd == 'M' &amp;&amp; host_uname) {</a>
+<a name="ln830">        rc = cli_resource_move(rsc_id, host_uname, cib_conn, &amp;data_set);</a>
+<a name="ln831"> </a>
+<a name="ln832">    } else if (rsc_cmd == 'B' &amp;&amp; host_uname) {</a>
+<a name="ln833">        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);</a>
+<a name="ln834">        node_t *dest = pe_find_node(data_set.nodes, host_uname);</a>
+<a name="ln835"> </a>
+<a name="ln836">        rc = -ENXIO;</a>
+<a name="ln837">        if (rsc_id == NULL) {</a>
+<a name="ln838">            CMD_ERR(&quot;No value specified for --resource&quot;);</a>
+<a name="ln839">            goto bail;</a>
+<a name="ln840">        } else if(rsc == NULL) {</a>
+<a name="ln841">            CMD_ERR(&quot;Resource '%s' not moved: unknown&quot;, rsc_id);</a>
+<a name="ln842"> </a>
+<a name="ln843">        } else if (dest == NULL) {</a>
+<a name="ln844">            CMD_ERR(&quot;Error performing operation: node '%s' is unknown&quot;, host_uname);</a>
+<a name="ln845">            goto bail;</a>
+<a name="ln846">        }</a>
+<a name="ln847">        rc = cli_resource_ban(rsc_id, dest-&gt;details-&gt;uname, NULL, cib_conn);</a>
+<a name="ln848"> </a>
+<a name="ln849">    } else if (rsc_cmd == 'B' || rsc_cmd == 'M') {</a>
+<a name="ln850">        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);</a>
+<a name="ln851"> </a>
+<a name="ln852">        rc = -ENXIO;</a>
+<a name="ln853">        if (rsc_id == NULL) {</a>
+<a name="ln854">            CMD_ERR(&quot;No value specified for --resource&quot;);</a>
+<a name="ln855">            goto bail;</a>
+<a name="ln856">        }</a>
+<a name="ln857"> </a>
+<a name="ln858">        rc = -EINVAL;</a>
+<a name="ln859">        if(rsc == NULL) {</a>
+<a name="ln860">            CMD_ERR(&quot;Resource '%s' not moved: unknown&quot;, rsc_id);</a>
+<a name="ln861"> </a>
+<a name="ln862">        } else if(g_list_length(rsc-&gt;running_on) == 1) {</a>
+<a name="ln863">            node_t *current = rsc-&gt;running_on-&gt;data;</a>
+<a name="ln864">            rc = cli_resource_ban(rsc_id, current-&gt;details-&gt;uname, NULL, cib_conn);</a>
+<a name="ln865"> </a>
+<a name="ln866">        } else if(rsc-&gt;variant == pe_master) {</a>
+<a name="ln867">            int count = 0;</a>
+<a name="ln868">            GListPtr iter = NULL;</a>
+<a name="ln869">            node_t *current = NULL;</a>
+<a name="ln870"> </a>
+<a name="ln871">            for(iter = rsc-&gt;children; iter; iter = iter-&gt;next) {</a>
+<a name="ln872">                resource_t *child = (resource_t *)iter-&gt;data;</a>
+<a name="ln873">                enum rsc_role_e child_role = child-&gt;fns-&gt;state(child, TRUE);</a>
+<a name="ln874"> </a>
+<a name="ln875">                if(child_role == RSC_ROLE_MASTER) {</a>
+<a name="ln876">                    count++;</a>
+<a name="ln877">                    current = child-&gt;running_on-&gt;data;</a>
+<a name="ln878">                }</a>
+<a name="ln879">            }</a>
+<a name="ln880"> </a>
+<a name="ln881">            if(count == 1 &amp;&amp; current) {</a>
+<a name="ln882">                rc = cli_resource_ban(rsc_id, current-&gt;details-&gt;uname, NULL, cib_conn);</a>
+<a name="ln883"> </a>
+<a name="ln884">            } else {</a>
+<a name="ln885">                CMD_ERR(&quot;Resource '%s' not moved: active in %d locations (promoted in %d).&quot;, rsc_id, g_list_length(rsc-&gt;running_on), count);</a>
+<a name="ln886">                CMD_ERR(&quot;You can prevent '%s' from running on a specific location with: --ban --host &lt;name&gt;&quot;, rsc_id);</a>
+<a name="ln887">                CMD_ERR(&quot;You can prevent '%s' from being promoted at a specific location with:&quot;</a>
+<a name="ln888">                        &quot; --ban --master --host &lt;name&gt;&quot;, rsc_id);</a>
+<a name="ln889">            }</a>
+<a name="ln890"> </a>
+<a name="ln891">        } else {</a>
+<a name="ln892">            CMD_ERR(&quot;Resource '%s' not moved: active in %d locations.&quot;, rsc_id, g_list_length(rsc-&gt;running_on));</a>
+<a name="ln893">            CMD_ERR(&quot;You can prevent '%s' from running on a specific location with: --ban --host &lt;name&gt;&quot;, rsc_id);</a>
+<a name="ln894">        }</a>
+<a name="ln895"> </a>
+<a name="ln896">    } else if (rsc_cmd == 'G') {</a>
+<a name="ln897">        if (rsc_id == NULL) {</a>
+<a name="ln898">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln899">            rc = -ENXIO;</a>
+<a name="ln900">            goto bail;</a>
+<a name="ln901">        }</a>
+<a name="ln902">        rc = cli_resource_print_property(rsc_id, prop_name, &amp;data_set);</a>
+<a name="ln903"> </a>
+<a name="ln904">    } else if (rsc_cmd == 'S') {</a>
+<a name="ln905">        xmlNode *msg_data = NULL;</a>
+<a name="ln906"> </a>
+<a name="ln907">        if ((rsc_id == NULL) || !strlen(rsc_id)) {</a>
+<a name="ln908">            CMD_ERR(&quot;Must specify -r with resource id&quot;);</a>
+<a name="ln909">            rc = -ENXIO;</a>
+<a name="ln910">            goto bail;</a>
+<a name="ln911"> </a>
+<a name="ln912">        } else if ((rsc_type == NULL) || !strlen(rsc_type)) {</a>
+<a name="ln913">            CMD_ERR(&quot;Must specify -t with resource type&quot;);</a>
+<a name="ln914">            rc = -ENXIO;</a>
+<a name="ln915">            goto bail;</a>
+<a name="ln916"> </a>
+<a name="ln917">        } else if ((prop_value == NULL) || !strlen(prop_value)) {</a>
+<a name="ln918">            CMD_ERR(&quot;Must supply -v with new value&quot;);</a>
+<a name="ln919">            rc = -EINVAL;</a>
+<a name="ln920">            goto bail;</a>
+<a name="ln921"> </a>
+<a name="ln922">        } else if (cib_conn == NULL) {</a>
+<a name="ln923">            rc = -ENOTCONN;</a>
+<a name="ln924">            goto bail;</a>
+<a name="ln925">        }</a>
+<a name="ln926"> </a>
+<a name="ln927">        CRM_LOG_ASSERT(prop_name != NULL);</a>
+<a name="ln928"> </a>
+<a name="ln929">        msg_data = create_xml_node(NULL, rsc_type);</a>
+<a name="ln930">        crm_xml_add(msg_data, XML_ATTR_ID, rsc_id);</a>
+<a name="ln931">        crm_xml_add(msg_data, prop_name, prop_value);</a>
+<a name="ln932"> </a>
+<a name="ln933">        rc = cib_conn-&gt;cmds-&gt;modify(cib_conn, XML_CIB_TAG_RESOURCES, msg_data, cib_options);</a>
+<a name="ln934">        free_xml(msg_data);</a>
+<a name="ln935"> </a>
+<a name="ln936">    } else if (rsc_cmd == 'g') {</a>
+<a name="ln937">        if (rsc_id == NULL) {</a>
+<a name="ln938">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln939">            rc = -ENXIO;</a>
+<a name="ln940">            goto bail;</a>
+<a name="ln941">        }</a>
+<a name="ln942"> </a>
+<a name="ln943">        rc = cli_resource_print_attribute(rsc_id, prop_name, &amp;data_set);</a>
+<a name="ln944"> </a>
+<a name="ln945">    } else if (rsc_cmd == 'p') {</a>
+<a name="ln946">        if (rsc_id == NULL) {</a>
+<a name="ln947">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln948">            rc = -ENXIO;</a>
+<a name="ln949">            goto bail;</a>
+<a name="ln950">        }</a>
+<a name="ln951">        if (prop_value == NULL || strlen(prop_value) == 0) {</a>
+<a name="ln952">            CMD_ERR(&quot;You need to supply a value with the -v option&quot;);</a>
+<a name="ln953">            rc = -EINVAL;</a>
+<a name="ln954">            goto bail;</a>
+<a name="ln955">        }</a>
+<a name="ln956"> </a>
+<a name="ln957">        /* coverity[var_deref_model] False positive */</a>
+<a name="ln958">        rc = cli_resource_update_attribute(rsc_id, prop_set, prop_id, prop_name,</a>
+<a name="ln959">                               prop_value, recursive, cib_conn, &amp;data_set);</a>
+<a name="ln960"> </a>
+<a name="ln961">    } else if (rsc_cmd == 'd') {</a>
+<a name="ln962">        if (rsc_id == NULL) {</a>
+<a name="ln963">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln964">            rc = -ENXIO;</a>
+<a name="ln965">            goto bail;</a>
+<a name="ln966">        }</a>
+<a name="ln967">        /* coverity[var_deref_model] False positive */</a>
+<a name="ln968">        rc = cli_resource_delete_attribute(rsc_id, prop_set, prop_id, prop_name, cib_conn, &amp;data_set);</a>
+<a name="ln969"> </a>
+<a name="ln970">    } else if (rsc_cmd == 'C' &amp;&amp; rsc_id) {</a>
+<a name="ln971">        resource_t *rsc = pe_find_resource(data_set.resources, rsc_id);</a>
+<a name="ln972"> </a>
+<a name="ln973">        if(do_force == FALSE) {</a>
+<a name="ln974">            rsc = uber_parent(rsc);</a>
+<a name="ln975">        }</a>
+<a name="ln976"> </a>
+<a name="ln977">        if(rsc) {</a>
+<a name="ln978">            crm_debug(&quot;Re-checking the state of %s (%s requested) on %s&quot;,</a>
+<a name="ln979">                      rsc-&gt;id, rsc_id, host_uname);</a>
+<a name="ln980">            crmd_replies_needed = 0;</a>
+<a name="ln981">            rc = cli_resource_delete(crmd_channel, host_uname, rsc, operation,</a>
+<a name="ln982">                                     interval, &amp;data_set);</a>
+<a name="ln983">        } else {</a>
+<a name="ln984">            rc = -ENODEV;</a>
+<a name="ln985">        }</a>
+<a name="ln986"> </a>
+<a name="ln987">        if(rc == pcmk_ok &amp;&amp; BE_QUIET == FALSE) {</a>
+<a name="ln988">            /* Now check XML_RSC_ATTR_TARGET_ROLE and XML_RSC_ATTR_MANAGED */</a>
+<a name="ln989">            cli_resource_check(cib_conn, rsc);</a>
+<a name="ln990">        }</a>
+<a name="ln991"> </a>
+<a name="ln992">        if (rc == pcmk_ok) {</a>
+<a name="ln993">            start_mainloop();</a>
+<a name="ln994">        }</a>
+<a name="ln995"> </a>
+<a name="ln996">    } else if (rsc_cmd == 'C') {</a>
+<a name="ln997">#if HAVE_ATOMIC_ATTRD</a>
+<a name="ln998">        const char *router_node = host_uname;</a>
+<a name="ln999">        xmlNode *msg_data = NULL;</a>
+<a name="ln1000">        xmlNode *cmd = NULL;</a>
+<a name="ln1001">        int attr_options = attrd_opt_none;</a>
+<a name="ln1002"> </a>
+<a name="ln1003">        if (host_uname) {</a>
+<a name="ln1004">            node_t *node = pe_find_node(data_set.nodes, host_uname);</a>
+<a name="ln1005"> </a>
+<a name="ln1006">            if (node &amp;&amp; is_remote_node(node)) {</a>
+<a name="ln1007">                if (node-&gt;details-&gt;remote_rsc == NULL || node-&gt;details-&gt;remote_rsc-&gt;running_on == NULL) {</a>
+<a name="ln1008">                    CMD_ERR(&quot;No lrmd connection detected to remote node %s&quot;, host_uname);</a>
+<a name="ln1009">                    return -ENXIO;</a>
+<a name="ln1010">                }</a>
+<a name="ln1011">                node = node-&gt;details-&gt;remote_rsc-&gt;running_on-&gt;data;</a>
+<a name="ln1012">                router_node = node-&gt;details-&gt;uname;</a>
+<a name="ln1013">                attr_options |= attrd_opt_remote;</a>
+<a name="ln1014">            }</a>
+<a name="ln1015">        }</a>
+<a name="ln1016"> </a>
+<a name="ln1017">        msg_data = create_xml_node(NULL, &quot;crm-resource-reprobe-op&quot;);</a>
+<a name="ln1018">        crm_xml_add(msg_data, XML_LRM_ATTR_TARGET, host_uname);</a>
+<a name="ln1019">        if (safe_str_neq(router_node, host_uname)) {</a>
+<a name="ln1020">            crm_xml_add(msg_data, XML_LRM_ATTR_ROUTER_NODE, router_node);</a>
+<a name="ln1021">        }</a>
+<a name="ln1022"> </a>
+<a name="ln1023">        cmd = create_request(CRM_OP_REPROBE, msg_data, router_node,</a>
+<a name="ln1024">                             CRM_SYSTEM_CRMD, crm_system_name, our_pid);</a>
+<a name="ln1025">        free_xml(msg_data);</a>
+<a name="ln1026"> </a>
+<a name="ln1027">        crm_debug(&quot;Re-checking the state of all resources on %s&quot;, host_uname?host_uname:&quot;all nodes&quot;);</a>
+<a name="ln1028"> </a>
+<a name="ln1029">        rc = attrd_clear_delegate(NULL, host_uname, NULL, NULL, NULL, NULL,</a>
+<a name="ln1030">                                  attr_options);</a>
+<a name="ln1031"> </a>
+<a name="ln1032">        if (crm_ipc_send(crmd_channel, cmd, 0, 0, NULL) &gt; 0) {</a>
+<a name="ln1033">            start_mainloop();</a>
+<a name="ln1034">        }</a>
+<a name="ln1035"> </a>
+<a name="ln1036">        free_xml(cmd);</a>
+<a name="ln1037">#else</a>
+<a name="ln1038">        GListPtr rIter = NULL;</a>
+<a name="ln1039"> </a>
+<a name="ln1040">        crmd_replies_needed = 0;</a>
+<a name="ln1041">        for (rIter = data_set.resources; rIter; rIter = rIter-&gt;next) {</a>
+<a name="ln1042">            resource_t *rsc = rIter-&gt;data;</a>
+<a name="ln1043">            cli_resource_delete(crmd_channel, host_uname, rsc, NULL, NULL,</a>
+<a name="ln1044">                                &amp;data_set);</a>
+<a name="ln1045">        }</a>
+<a name="ln1046"> </a>
+<a name="ln1047">        start_mainloop();</a>
+<a name="ln1048">#endif</a>
+<a name="ln1049"> </a>
+<a name="ln1050">    } else if (rsc_cmd == 'D') {</a>
+<a name="ln1051">        xmlNode *msg_data = NULL;</a>
+<a name="ln1052"> </a>
+<a name="ln1053">        if (rsc_id == NULL) {</a>
+<a name="ln1054">            CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln1055">            rc = -ENXIO;</a>
+<a name="ln1056">            goto bail;</a>
+<a name="ln1057"> </a>
+<a name="ln1058">        }</a>
+<a name="ln1059">        if (rsc_type == NULL) {</a>
+<a name="ln1060">            CMD_ERR(&quot;You need to specify a resource type with -t&quot;);</a>
+<a name="ln1061">            rc = -ENXIO;</a>
+<a name="ln1062">            goto bail;</a>
+<a name="ln1063"> </a>
+<a name="ln1064">        } else if (cib_conn == NULL) {</a>
+<a name="ln1065">            rc = -ENOTCONN;</a>
+<a name="ln1066">            goto bail;</a>
+<a name="ln1067">        }</a>
+<a name="ln1068"> </a>
+<a name="ln1069">        msg_data = create_xml_node(NULL, rsc_type);</a>
+<a name="ln1070">        crm_xml_add(msg_data, XML_ATTR_ID, rsc_id);</a>
+<a name="ln1071"> </a>
+<a name="ln1072">        rc = cib_conn-&gt;cmds-&gt;delete(cib_conn, XML_CIB_TAG_RESOURCES, msg_data, cib_options);</a>
+<a name="ln1073">        free_xml(msg_data);</a>
+<a name="ln1074"> </a>
+<a name="ln1075">    } else {</a>
+<a name="ln1076">        CMD_ERR(&quot;Unknown command: %c&quot;, rsc_cmd);</a>
+<a name="ln1077">    }</a>
+<a name="ln1078"> </a>
+<a name="ln1079">  bail:</a>
+<a name="ln1080"> </a>
+<a name="ln1081">    if (data_set.input != NULL) {</a>
+<a name="ln1082">        cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln1083">    }</a>
+<a name="ln1084">    if (cib_conn != NULL) {</a>
+<a name="ln1085">        cib_conn-&gt;cmds-&gt;signoff(cib_conn);</a>
+<a name="ln1086">        cib_delete(cib_conn);</a>
+<a name="ln1087">    }</a>
+<a name="ln1088"> </a>
+<a name="ln1089">    if (rc == -pcmk_err_no_quorum) {</a>
+<a name="ln1090">        CMD_ERR(&quot;Error performing operation: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln1091">        CMD_ERR(&quot;Try using -f&quot;);</a>
+<a name="ln1092"> </a>
+<a name="ln1093">    } else if (rc != pcmk_ok) {</a>
+<a name="ln1094">        CMD_ERR(&quot;Error performing operation: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln1095">    }</a>
+<a name="ln1096"> </a>
+<a name="ln1097">    return crm_exit(rc);</a>
+<a name="ln1098">}</a>
+
+</code></pre>
+<div class="balloon" rel="376"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="376"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fourth actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="376"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fifth actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="562"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 562, 557.</p></div>
+<div class="balloon" rel="559"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="559"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fourth actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="682"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V614/" target="_blank">V614</a> Potentially uninitialized pointer 'data_set.resources' used.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

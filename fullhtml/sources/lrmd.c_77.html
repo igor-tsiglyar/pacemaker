@@ -1,0 +1,1772 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2012 David Vossel &lt;davidvossel@gmail.com&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;glib.h&gt;</a>
+<a name="ln27">#include &lt;unistd.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;crm/crm.h&gt;</a>
+<a name="ln30">#include &lt;crm/services.h&gt;</a>
+<a name="ln31">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln32">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln33">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln34">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;lrmd_private.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln39">#  include &lt;sys/timeb.h&gt;</a>
+<a name="ln40">#endif</a>
+<a name="ln41"> </a>
+<a name="ln42">#define EXIT_REASON_MAX_LEN 128</a>
+<a name="ln43"> </a>
+<a name="ln44">GHashTable *rsc_list = NULL;</a>
+<a name="ln45"> </a>
+<a name="ln46">typedef struct lrmd_cmd_s {</a>
+<a name="ln47">    int timeout;</a>
+<a name="ln48">    int interval;</a>
+<a name="ln49">    int start_delay;</a>
+<a name="ln50">    int timeout_orig;</a>
+<a name="ln51"> </a>
+<a name="ln52">    int call_id;</a>
+<a name="ln53">    int exec_rc;</a>
+<a name="ln54">    int lrmd_op_status;</a>
+<a name="ln55"> </a>
+<a name="ln56">    int call_opts;</a>
+<a name="ln57">    /* Timer ids, must be removed on cmd destruction. */</a>
+<a name="ln58">    int delay_id;</a>
+<a name="ln59">    int stonith_recurring_id;</a>
+<a name="ln60"> </a>
+<a name="ln61">    int rsc_deleted;</a>
+<a name="ln62"> </a>
+<a name="ln63">    int service_flags;</a>
+<a name="ln64"> </a>
+<a name="ln65">    char *client_id;</a>
+<a name="ln66">    char *origin;</a>
+<a name="ln67">    char *rsc_id;</a>
+<a name="ln68">    char *action;</a>
+<a name="ln69">    char *real_action;</a>
+<a name="ln70">    char *exit_reason;</a>
+<a name="ln71">    char *output;</a>
+<a name="ln72">    char *userdata_str;</a>
+<a name="ln73"> </a>
+<a name="ln74">    /* when set, this cmd should go through a container wrapper */</a>
+<a name="ln75">    const char *isolation_wrapper;</a>
+<a name="ln76"> </a>
+<a name="ln77">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln78">    /* recurring and systemd operations may involve more than one lrmd command</a>
+<a name="ln79">     * per operation, so they need info about original and most recent</a>
+<a name="ln80">     */</a>
+<a name="ln81">    struct timeb t_first_run;   /* Timestamp of when op first ran */</a>
+<a name="ln82">    struct timeb t_run;         /* Timestamp of when op most recently ran */</a>
+<a name="ln83">    struct timeb t_first_queue; /* Timestamp of when op first was queued */</a>
+<a name="ln84">    struct timeb t_queue;       /* Timestamp of when op most recently was queued */</a>
+<a name="ln85">    struct timeb t_rcchange;    /* Timestamp of last rc change */</a>
+<a name="ln86">#endif</a>
+<a name="ln87"> </a>
+<a name="ln88">    int first_notify_sent;</a>
+<a name="ln89">    int last_notify_rc;</a>
+<a name="ln90">    int last_notify_op_status;</a>
+<a name="ln91">    int last_pid;</a>
+<a name="ln92"> </a>
+<a name="ln93">    GHashTable *params;</a>
+<a name="ln94">} lrmd_cmd_t;</a>
+<a name="ln95"> </a>
+<a name="ln96">static void cmd_finalize(lrmd_cmd_t * cmd, lrmd_rsc_t * rsc);</a>
+<a name="ln97">static gboolean lrmd_rsc_dispatch(gpointer user_data);</a>
+<a name="ln98">static void cancel_all_recurring(lrmd_rsc_t * rsc, const char *client_id);</a>
+<a name="ln99"> </a>
+<a name="ln100">static void</a>
+<a name="ln101">log_finished(lrmd_cmd_t * cmd, int exec_time, int queue_time)</a>
+<a name="ln102">{</a>
+<a name="ln103">    char pid_str[32] = { 0, };</a>
+<a name="ln104">    int log_level = LOG_INFO;</a>
+<a name="ln105"> </a>
+<a name="ln106">    if (cmd-&gt;last_pid) {</a>
+<a name="ln107">        snprintf(pid_str, 32, &quot;%d&quot;, cmd-&gt;last_pid);</a>
+<a name="ln108">    }</a>
+<a name="ln109"> </a>
+<a name="ln110">    if (safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln111">        log_level = LOG_DEBUG;</a>
+<a name="ln112">    }</a>
+<a name="ln113">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln114">    do_crm_log(log_level,</a>
+<a name="ln115">               &quot;finished - rsc:%s action:%s call_id:%d %s%s exit-code:%d exec-time:%dms queue-time:%dms&quot;,</a>
+<a name="ln116">               cmd-&gt;rsc_id, cmd-&gt;action, cmd-&gt;call_id, cmd-&gt;last_pid ? &quot;pid:&quot; : &quot;&quot;, pid_str,</a>
+<a name="ln117">               cmd-&gt;exec_rc, exec_time, queue_time);</a>
+<a name="ln118">#else</a>
+<a name="ln119">    do_crm_log(log_level, &quot;finished - rsc:%s action:%s call_id:%d %s%s exit-code:%d&quot;,</a>
+<a name="ln120">               cmd-&gt;rsc_id,</a>
+<a name="ln121">               cmd-&gt;action, cmd-&gt;call_id, cmd-&gt;last_pid ? &quot;pid:&quot; : &quot;&quot;, pid_str, cmd-&gt;exec_rc);</a>
+<a name="ln122">#endif</a>
+<a name="ln123">}</a>
+<a name="ln124"> </a>
+<a name="ln125">static void</a>
+<a name="ln126">log_execute(lrmd_cmd_t * cmd)</a>
+<a name="ln127">{</a>
+<a name="ln128">    int log_level = LOG_INFO;</a>
+<a name="ln129"> </a>
+<a name="ln130">    if (safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln131">        log_level = LOG_DEBUG;</a>
+<a name="ln132">    }</a>
+<a name="ln133"> </a>
+<a name="ln134">    do_crm_log(log_level, &quot;executing - rsc:%s action:%s call_id:%d&quot;,</a>
+<a name="ln135">               cmd-&gt;rsc_id, cmd-&gt;action, cmd-&gt;call_id);</a>
+<a name="ln136">}</a>
+<a name="ln137"> </a>
+<a name="ln138">static const char *</a>
+<a name="ln139">normalize_action_name(lrmd_rsc_t * rsc, const char *action)</a>
+<a name="ln140">{</a>
+<a name="ln141">    if (safe_str_eq(action, &quot;monitor&quot;) &amp;&amp;</a>
+<a name="ln142">        (safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_LSB) ||</a>
+<a name="ln143">         safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_SERVICE)</a>
+<a name="ln144">         || safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_SYSTEMD))) {</a>
+<a name="ln145">        return &quot;status&quot;;</a>
+<a name="ln146">    }</a>
+<a name="ln147">    return action;</a>
+<a name="ln148">}</a>
+<a name="ln149"> </a>
+<a name="ln150">static lrmd_rsc_t *</a>
+<a name="ln151">build_rsc_from_xml(xmlNode * msg)</a>
+<a name="ln152">{</a>
+<a name="ln153">    xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, msg, LOG_ERR);</a>
+<a name="ln154">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln155"> </a>
+<a name="ln156">    rsc = calloc(1, sizeof(lrmd_rsc_t));</a>
+<a name="ln157"> </a>
+<a name="ln158">    crm_element_value_int(msg, F_LRMD_CALLOPTS, &amp;rsc-&gt;call_opts);</a>
+<a name="ln159"> </a>
+<a name="ln160">    rsc-&gt;rsc_id = crm_element_value_copy(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln161">    rsc-&gt;class = crm_element_value_copy(rsc_xml, F_LRMD_CLASS);</a>
+<a name="ln162">    rsc-&gt;provider = crm_element_value_copy(rsc_xml, F_LRMD_PROVIDER);</a>
+<a name="ln163">    rsc-&gt;type = crm_element_value_copy(rsc_xml, F_LRMD_TYPE);</a>
+<a name="ln164">    rsc-&gt;work = mainloop_add_trigger(G_PRIORITY_HIGH, lrmd_rsc_dispatch, rsc);</a>
+<a name="ln165">    return rsc;</a>
+<a name="ln166">}</a>
+<a name="ln167"> </a>
+<a name="ln168">static void</a>
+<a name="ln169">dup_attr(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln170">{</a>
+<a name="ln171">    g_hash_table_replace(user_data, strdup(key), strdup(value));</a>
+<a name="ln172">}</a>
+<a name="ln173"> </a>
+<a name="ln174">static lrmd_cmd_t *</a>
+<a name="ln175">create_lrmd_cmd(xmlNode * msg, crm_client_t * client, lrmd_rsc_t *rsc)</a>
+<a name="ln176">{</a>
+<a name="ln177">    int call_options = 0;</a>
+<a name="ln178">    xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, msg, LOG_ERR);</a>
+<a name="ln179">    lrmd_cmd_t *cmd = NULL;</a>
+<a name="ln180"> </a>
+<a name="ln181">    cmd = calloc(1, sizeof(lrmd_cmd_t));</a>
+<a name="ln182"> </a>
+<a name="ln183">    crm_element_value_int(msg, F_LRMD_CALLOPTS, &amp;call_options);</a>
+<a name="ln184">    cmd-&gt;call_opts = call_options;</a>
+<a name="ln185">    cmd-&gt;client_id = strdup(client-&gt;id);</a>
+<a name="ln186"> </a>
+<a name="ln187">    crm_element_value_int(msg, F_LRMD_CALLID, &amp;cmd-&gt;call_id);</a>
+<a name="ln188">    crm_element_value_int(rsc_xml, F_LRMD_RSC_INTERVAL, &amp;cmd-&gt;interval);</a>
+<a name="ln189">    crm_element_value_int(rsc_xml, F_LRMD_TIMEOUT, &amp;cmd-&gt;timeout);</a>
+<a name="ln190">    crm_element_value_int(rsc_xml, F_LRMD_RSC_START_DELAY, &amp;cmd-&gt;start_delay);</a>
+<a name="ln191">    cmd-&gt;timeout_orig = cmd-&gt;timeout;</a>
+<a name="ln192"> </a>
+<a name="ln193">    cmd-&gt;origin = crm_element_value_copy(rsc_xml, F_LRMD_ORIGIN);</a>
+<a name="ln194">    cmd-&gt;action = crm_element_value_copy(rsc_xml, F_LRMD_RSC_ACTION);</a>
+<a name="ln195">    cmd-&gt;userdata_str = crm_element_value_copy(rsc_xml, F_LRMD_RSC_USERDATA_STR);</a>
+<a name="ln196">    cmd-&gt;rsc_id = crm_element_value_copy(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln197"> </a>
+<a name="ln198">    cmd-&gt;params = xml2list(rsc_xml);</a>
+<a name="ln199">    cmd-&gt;isolation_wrapper = g_hash_table_lookup(cmd-&gt;params, &quot;CRM_meta_isolation_wrapper&quot;);</a>
+<a name="ln200"> </a>
+<a name="ln201">    if (cmd-&gt;isolation_wrapper) {</a>
+<a name="ln202">        if (g_hash_table_lookup(cmd-&gt;params, &quot;CRM_meta_isolation_instance&quot;) == NULL) {</a>
+<a name="ln203">            g_hash_table_insert(cmd-&gt;params, strdup(&quot;CRM_meta_isolation_instance&quot;), strdup(rsc-&gt;rsc_id));</a>
+<a name="ln204">        }</a>
+<a name="ln205">        if (rsc-&gt;provider) {</a>
+<a name="ln206">            g_hash_table_insert(cmd-&gt;params, strdup(&quot;CRM_meta_provider&quot;), strdup(rsc-&gt;provider));</a>
+<a name="ln207">        }</a>
+<a name="ln208">        g_hash_table_insert(cmd-&gt;params, strdup(&quot;CRM_meta_class&quot;), strdup(rsc-&gt;class));</a>
+<a name="ln209">        g_hash_table_insert(cmd-&gt;params, strdup(&quot;CRM_meta_type&quot;), strdup(rsc-&gt;type));</a>
+<a name="ln210">    }</a>
+<a name="ln211"> </a>
+<a name="ln212">    if (safe_str_eq(g_hash_table_lookup(cmd-&gt;params, &quot;CRM_meta_on_fail&quot;), &quot;block&quot;)) {</a>
+<a name="ln213">        crm_debug(&quot;Setting flag to leave pid group on timeout and only kill action pid for %s_%s_%d&quot;, cmd-&gt;rsc_id, cmd-&gt;action, cmd-&gt;interval);</a>
+<a name="ln214">        cmd-&gt;service_flags |= SVC_ACTION_LEAVE_GROUP;</a>
+<a name="ln215">    }</a>
+<a name="ln216">    return cmd;</a>
+<a name="ln217">}</a>
+<a name="ln218"> </a>
+<a name="ln219">static void</a>
+<a name="ln220">free_lrmd_cmd(lrmd_cmd_t * cmd)</a>
+<a name="ln221">{</a>
+<a name="ln222">    if (cmd-&gt;stonith_recurring_id) {</a>
+<a name="ln223">        g_source_remove(cmd-&gt;stonith_recurring_id);</a>
+<a name="ln224">    }</a>
+<a name="ln225">    if (cmd-&gt;delay_id) {</a>
+<a name="ln226">        g_source_remove(cmd-&gt;delay_id);</a>
+<a name="ln227">    }</a>
+<a name="ln228">    if (cmd-&gt;params) {</a>
+<a name="ln229">        g_hash_table_destroy(cmd-&gt;params);</a>
+<a name="ln230">    }</a>
+<a name="ln231">    free(cmd-&gt;origin);</a>
+<a name="ln232">    free(cmd-&gt;action);</a>
+<a name="ln233">    free(cmd-&gt;real_action);</a>
+<a name="ln234">    free(cmd-&gt;userdata_str);</a>
+<a name="ln235">    free(cmd-&gt;rsc_id);</a>
+<a name="ln236">    free(cmd-&gt;output);</a>
+<a name="ln237">    free(cmd-&gt;exit_reason);</a>
+<a name="ln238">    free(cmd-&gt;client_id);</a>
+<a name="ln239">    free(cmd);</a>
+<a name="ln240">}</a>
+<a name="ln241"> </a>
+<a name="ln242">static gboolean</a>
+<a name="ln243">stonith_recurring_op_helper(gpointer data)</a>
+<a name="ln244">{</a>
+<a name="ln245">    lrmd_cmd_t *cmd = data;</a>
+<a name="ln246">    lrmd_rsc_t *rsc;</a>
+<a name="ln247"> </a>
+<a name="ln248">    cmd-&gt;stonith_recurring_id = 0;</a>
+<a name="ln249"> </a>
+<a name="ln250">    if (!cmd-&gt;rsc_id) {</a>
+<a name="ln251">        return FALSE;</a>
+<a name="ln252">    }</a>
+<a name="ln253"> </a>
+<a name="ln254">    rsc = g_hash_table_lookup(rsc_list, cmd-&gt;rsc_id);</a>
+<a name="ln255"> </a>
+<a name="ln256">    CRM_ASSERT(rsc != NULL);</a>
+<a name="ln257">    /* take it out of recurring_ops list, and put it in the pending ops</a>
+<a name="ln258">     * to be executed */</a>
+<a name="ln259">    rsc-&gt;recurring_ops = g_list_remove(rsc-&gt;recurring_ops, cmd);</a>
+<a name="ln260">    rsc-&gt;pending_ops = g_list_append(rsc-&gt;pending_ops, cmd);</a>
+<a name="ln261">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln262">    ftime(&amp;cmd-&gt;t_queue);</a>
+<a name="ln263">    if (cmd-&gt;t_first_queue.time == 0) {</a>
+<a name="ln264">        cmd-&gt;t_first_queue = cmd-&gt;t_queue;</a>
+<a name="ln265">    }</a>
+<a name="ln266">#endif</a>
+<a name="ln267">    mainloop_set_trigger(rsc-&gt;work);</a>
+<a name="ln268"> </a>
+<a name="ln269">    return FALSE;</a>
+<a name="ln270">}</a>
+<a name="ln271"> </a>
+<a name="ln272">static gboolean</a>
+<a name="ln273">start_delay_helper(gpointer data)</a>
+<a name="ln274">{</a>
+<a name="ln275">    lrmd_cmd_t *cmd = data;</a>
+<a name="ln276">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln277"> </a>
+<a name="ln278">    cmd-&gt;delay_id = 0;</a>
+<a name="ln279">    rsc = cmd-&gt;rsc_id ? g_hash_table_lookup(rsc_list, cmd-&gt;rsc_id) : NULL;</a>
+<a name="ln280"> </a>
+<a name="ln281">    if (rsc) {</a>
+<a name="ln282">        mainloop_set_trigger(rsc-&gt;work);</a>
+<a name="ln283">    }</a>
+<a name="ln284"> </a>
+<a name="ln285">    return FALSE;</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">static gboolean</a>
+<a name="ln289">merge_recurring_duplicate(lrmd_rsc_t * rsc, lrmd_cmd_t * cmd)</a>
+<a name="ln290">{</a>
+<a name="ln291">    GListPtr gIter = NULL;</a>
+<a name="ln292">    lrmd_cmd_t * dup = NULL;</a>
+<a name="ln293">    gboolean dup_pending = FALSE;</a>
+<a name="ln294"> </a>
+<a name="ln295">    if (cmd-&gt;interval == 0) {</a>
+<a name="ln296">        return 0;</a>
+<a name="ln297">    }</a>
+<a name="ln298"> </a>
+<a name="ln299">    for (gIter = rsc-&gt;pending_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln300">        dup = gIter-&gt;data;</a>
+<a name="ln301">        if (safe_str_eq(cmd-&gt;action, dup-&gt;action) &amp;&amp; cmd-&gt;interval == dup-&gt;interval) {</a>
+<a name="ln302">            dup_pending = TRUE;</a>
+<a name="ln303">            goto merge_dup;</a>
+<a name="ln304">        }</a>
+<a name="ln305">    }</a>
+<a name="ln306"> </a>
+<a name="ln307">    /* if dup is in recurring_ops list, that means it has already executed</a>
+<a name="ln308">     * and is in the interval loop. we can't just remove it in this case. */</a>
+<a name="ln309">    for (gIter = rsc-&gt;recurring_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln310">        dup = gIter-&gt;data;</a>
+<a name="ln311">        if (safe_str_eq(cmd-&gt;action, dup-&gt;action) &amp;&amp; cmd-&gt;interval == dup-&gt;interval) {</a>
+<a name="ln312">            goto merge_dup;</a>
+<a name="ln313">        }</a>
+<a name="ln314">    }</a>
+<a name="ln315"> </a>
+<a name="ln316">    return FALSE;</a>
+<a name="ln317">merge_dup:</a>
+<a name="ln318"> </a>
+<a name="ln319"> </a>
+<a name="ln320">    /* This should not occur, if it does we need to investigate in the crmd</a>
+<a name="ln321">     * how something like this is possible */</a>
+<a name="ln322">    crm_warn(&quot;Duplicate recurring op entry detected (%s_%s_%d), merging with previous op entry&quot;,</a>
+<a name="ln323">            rsc-&gt;rsc_id,</a>
+<a name="ln324">            normalize_action_name(rsc, dup-&gt;action),</a>
+<a name="ln325">            dup-&gt;interval);</a>
+<a name="ln326"> </a>
+<a name="ln327">    /* merge */</a>
+<a name="ln328">    dup-&gt;first_notify_sent = 0;</a>
+<a name="ln329">    free(dup-&gt;userdata_str);</a>
+<a name="ln330">    dup-&gt;userdata_str = cmd-&gt;userdata_str;</a>
+<a name="ln331">    cmd-&gt;userdata_str = NULL;</a>
+<a name="ln332">    dup-&gt;call_id = cmd-&gt;call_id;</a>
+<a name="ln333"> </a>
+<a name="ln334">    if (safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln335">        /* if we are waiting for the next interval, kick it off now */</a>
+<a name="ln336">        if (dup_pending == TRUE) {</a>
+<a name="ln337">            g_source_remove(cmd-&gt;stonith_recurring_id);</a>
+<a name="ln338">            cmd-&gt;stonith_recurring_id = 0;</a>
+<a name="ln339">            stonith_recurring_op_helper(cmd);</a>
+<a name="ln340">        }</a>
+<a name="ln341"> </a>
+<a name="ln342">    } else if (dup_pending == FALSE) {</a>
+<a name="ln343">        /* if we've already handed this to the service lib, kick off an early execution */</a>
+<a name="ln344">        services_action_kick(rsc-&gt;rsc_id, normalize_action_name(rsc, dup-&gt;action), dup-&gt;interval);</a>
+<a name="ln345">    }</a>
+<a name="ln346">    free_lrmd_cmd(cmd);</a>
+<a name="ln347"> </a>
+<a name="ln348">    return TRUE;</a>
+<a name="ln349">}</a>
+<a name="ln350"> </a>
+<a name="ln351">static void</a>
+<a name="ln352">schedule_lrmd_cmd(lrmd_rsc_t * rsc, lrmd_cmd_t * cmd)</a>
+<a name="ln353">{</a>
+<a name="ln354">    gboolean dup_processed = FALSE;</a>
+<a name="ln355">    CRM_CHECK(cmd != NULL, return);</a>
+<a name="ln356">    CRM_CHECK(rsc != NULL, return);</a>
+<a name="ln357"> </a>
+<a name="ln358">    crm_trace(&quot;Scheduling %s on %s&quot;, cmd-&gt;action, rsc-&gt;rsc_id);</a>
+<a name="ln359"> </a>
+<a name="ln360">    dup_processed = merge_recurring_duplicate(rsc, cmd);</a>
+<a name="ln361">    if (dup_processed) {</a>
+<a name="ln362">        /* duplicate recurring cmd found, cmds merged */</a>
+<a name="ln363">        return;</a>
+<a name="ln364">    }</a>
+<a name="ln365"> </a>
+<a name="ln366">    /* crmd expects lrmd to automatically cancel recurring ops before rsc stops. */</a>
+<a name="ln367">    if (rsc &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln368">        cancel_all_recurring(rsc, NULL);</a>
+<a name="ln369">    }</a>
+<a name="ln370"> </a>
+<a name="ln371">    rsc-&gt;pending_ops = g_list_append(rsc-&gt;pending_ops, cmd);</a>
+<a name="ln372">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln373">    ftime(&amp;cmd-&gt;t_queue);</a>
+<a name="ln374">    if (cmd-&gt;t_first_queue.time == 0) {</a>
+<a name="ln375">        cmd-&gt;t_first_queue = cmd-&gt;t_queue;</a>
+<a name="ln376">    }</a>
+<a name="ln377">#endif</a>
+<a name="ln378">    mainloop_set_trigger(rsc-&gt;work);</a>
+<a name="ln379"> </a>
+<a name="ln380">    if (cmd-&gt;start_delay) {</a>
+<a name="ln381">        cmd-&gt;delay_id = g_timeout_add(cmd-&gt;start_delay, start_delay_helper, cmd);</a>
+<a name="ln382">    }</a>
+<a name="ln383">}</a>
+<a name="ln384"> </a>
+<a name="ln385">static void</a>
+<a name="ln386">send_reply(crm_client_t * client, int rc, uint32_t id, int call_id)</a>
+<a name="ln387">{</a>
+<a name="ln388">    int send_rc = 0;</a>
+<a name="ln389">    xmlNode *reply = NULL;</a>
+<a name="ln390"> </a>
+<a name="ln391">    reply = create_xml_node(NULL, T_LRMD_REPLY);</a>
+<a name="ln392">    crm_xml_add(reply, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln393">    crm_xml_add_int(reply, F_LRMD_RC, rc);</a>
+<a name="ln394">    crm_xml_add_int(reply, F_LRMD_CALLID, call_id);</a>
+<a name="ln395"> </a>
+<a name="ln396">    send_rc = lrmd_server_send_reply(client, id, reply);</a>
+<a name="ln397"> </a>
+<a name="ln398">    free_xml(reply);</a>
+<a name="ln399">    if (send_rc &lt; 0) {</a>
+<a name="ln400">        crm_warn(&quot;LRMD reply to %s failed: %d&quot;, client-&gt;name, send_rc);</a>
+<a name="ln401">    }</a>
+<a name="ln402">}</a>
+<a name="ln403"> </a>
+<a name="ln404">static void</a>
+<a name="ln405">send_client_notify(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln406">{</a>
+<a name="ln407">    xmlNode *update_msg = user_data;</a>
+<a name="ln408">    crm_client_t *client = value;</a>
+<a name="ln409"> </a>
+<a name="ln410">    if (client == NULL) {</a>
+<a name="ln411">        crm_err(&quot;Asked to send event to  NULL client&quot;);</a>
+<a name="ln412">        return;</a>
+<a name="ln413">    } else if (client-&gt;name == NULL) {</a>
+<a name="ln414">        crm_trace(&quot;Asked to send event to client with no name&quot;);</a>
+<a name="ln415">        return;</a>
+<a name="ln416">    }</a>
+<a name="ln417"> </a>
+<a name="ln418">    if (lrmd_server_send_notify(client, update_msg) &lt;= 0) {</a>
+<a name="ln419">        crm_warn(&quot;Notification of client %s/%s failed&quot;, client-&gt;name, client-&gt;id);</a>
+<a name="ln420">    }</a>
+<a name="ln421">}</a>
+<a name="ln422"> </a>
+<a name="ln423">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln424">/*!</a>
+<a name="ln425"> * \internal</a>
+<a name="ln426"> * \brief Return difference between two times in milliseconds</a>
+<a name="ln427"> *</a>
+<a name="ln428"> * \param[in] now  More recent time (or NULL to use current time)</a>
+<a name="ln429"> * \param[in] old  Earlier time</a>
+<a name="ln430"> *</a>
+<a name="ln431"> * \return milliseconds difference (or 0 if old is NULL or has time zero)</a>
+<a name="ln432"> */</a>
+<a name="ln433">static int</a>
+<a name="ln434">time_diff_ms(struct timeb *now, struct timeb *old)</a>
+<a name="ln435">{</a>
+<a name="ln436">    struct timeb local_now = { 0, };</a>
+<a name="ln437"> </a>
+<a name="ln438">    if (now == NULL) {</a>
+<a name="ln439">        ftime(&amp;local_now);</a>
+<a name="ln440">        now = &amp;local_now;</a>
+<a name="ln441">    }</a>
+<a name="ln442">    if ((old == NULL) || (old-&gt;time == 0)) {</a>
+<a name="ln443">        return 0;</a>
+<a name="ln444">    }</a>
+<a name="ln445">    return difftime(now-&gt;time, old-&gt;time) * 1000 + now-&gt;millitm - old-&gt;millitm;</a>
+<a name="ln446">}</a>
+<a name="ln447"> </a>
+<a name="ln448">/*!</a>
+<a name="ln449"> * \internal</a>
+<a name="ln450"> * \brief Reset a command's operation times to their original values.</a>
+<a name="ln451"> *</a>
+<a name="ln452"> * Reset a command's run and queued timestamps to the timestamps of the original</a>
+<a name="ln453"> * command, so we report the entire time since then and not just the time since</a>
+<a name="ln454"> * the most recent command (for recurring and systemd operations).</a>
+<a name="ln455"> *</a>
+<a name="ln456"> * /param[in] cmd  LRMD command object to reset</a>
+<a name="ln457"> *</a>
+<a name="ln458"> * /note It's not obvious what the queued time should be for a systemd</a>
+<a name="ln459"> * start/stop operation, which might go like this:</a>
+<a name="ln460"> *   initial command queued 5ms, runs 3s</a>
+<a name="ln461"> *   monitor command queued 10ms, runs 10s</a>
+<a name="ln462"> *   monitor command queued 10ms, runs 10s</a>
+<a name="ln463"> * Is the queued time for that operation 5ms, 10ms or 25ms? The current</a>
+<a name="ln464"> * implementation will report 5ms. If it's 25ms, then we need to</a>
+<a name="ln465"> * subtract 20ms from the total exec time so as not to count it twice.</a>
+<a name="ln466"> * We can implement that later if it matters to anyone ...</a>
+<a name="ln467"> */</a>
+<a name="ln468">static void</a>
+<a name="ln469">cmd_original_times(lrmd_cmd_t * cmd)</a>
+<a name="ln470">{</a>
+<a name="ln471">    cmd-&gt;t_run = cmd-&gt;t_first_run;</a>
+<a name="ln472">    cmd-&gt;t_queue = cmd-&gt;t_first_queue;</a>
+<a name="ln473">}</a>
+<a name="ln474">#endif</a>
+<a name="ln475"> </a>
+<a name="ln476">static void</a>
+<a name="ln477">send_cmd_complete_notify(lrmd_cmd_t * cmd)</a>
+<a name="ln478">{</a>
+<a name="ln479">    int exec_time = 0;</a>
+<a name="ln480">    int queue_time = 0;</a>
+<a name="ln481">    xmlNode *notify = NULL;</a>
+<a name="ln482"> </a>
+<a name="ln483">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln484">    exec_time = time_diff_ms(NULL, &amp;cmd-&gt;t_run);</a>
+<a name="ln485">    queue_time = time_diff_ms(&amp;cmd-&gt;t_run, &amp;cmd-&gt;t_queue);</a>
+<a name="ln486">#endif</a>
+<a name="ln487"> </a>
+<a name="ln488">    log_finished(cmd, exec_time, queue_time);</a>
+<a name="ln489"> </a>
+<a name="ln490">    /* if the first notify result for a cmd has already been sent earlier, and the</a>
+<a name="ln491">     * the option to only send notifies on result changes is set. Check to see</a>
+<a name="ln492">     * if the last result is the same as the new one. If so, suppress this update */</a>
+<a name="ln493">    if (cmd-&gt;first_notify_sent &amp;&amp; (cmd-&gt;call_opts &amp; lrmd_opt_notify_changes_only)) {</a>
+<a name="ln494">        if (cmd-&gt;last_notify_rc == cmd-&gt;exec_rc &amp;&amp;</a>
+<a name="ln495">            cmd-&gt;last_notify_op_status == cmd-&gt;lrmd_op_status) {</a>
+<a name="ln496"> </a>
+<a name="ln497">            /* only send changes */</a>
+<a name="ln498">            return;</a>
+<a name="ln499">        }</a>
+<a name="ln500"> </a>
+<a name="ln501">    }</a>
+<a name="ln502"> </a>
+<a name="ln503">    cmd-&gt;first_notify_sent = 1;</a>
+<a name="ln504">    cmd-&gt;last_notify_rc = cmd-&gt;exec_rc;</a>
+<a name="ln505">    cmd-&gt;last_notify_op_status = cmd-&gt;lrmd_op_status;</a>
+<a name="ln506"> </a>
+<a name="ln507">    notify = create_xml_node(NULL, T_LRMD_NOTIFY);</a>
+<a name="ln508"> </a>
+<a name="ln509">    crm_xml_add(notify, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln510">    crm_xml_add_int(notify, F_LRMD_TIMEOUT, cmd-&gt;timeout);</a>
+<a name="ln511">    crm_xml_add_int(notify, F_LRMD_RSC_INTERVAL, cmd-&gt;interval);</a>
+<a name="ln512">    crm_xml_add_int(notify, F_LRMD_RSC_START_DELAY, cmd-&gt;start_delay);</a>
+<a name="ln513">    crm_xml_add_int(notify, F_LRMD_EXEC_RC, cmd-&gt;exec_rc);</a>
+<a name="ln514">    crm_xml_add_int(notify, F_LRMD_OP_STATUS, cmd-&gt;lrmd_op_status);</a>
+<a name="ln515">    crm_xml_add_int(notify, F_LRMD_CALLID, cmd-&gt;call_id);</a>
+<a name="ln516">    crm_xml_add_int(notify, F_LRMD_RSC_DELETED, cmd-&gt;rsc_deleted);</a>
+<a name="ln517"> </a>
+<a name="ln518">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln519">    crm_xml_add_int(notify, F_LRMD_RSC_RUN_TIME, cmd-&gt;t_run.time);</a>
+<a name="ln520">    crm_xml_add_int(notify, F_LRMD_RSC_RCCHANGE_TIME, cmd-&gt;t_rcchange.time);</a>
+<a name="ln521">    crm_xml_add_int(notify, F_LRMD_RSC_EXEC_TIME, exec_time);</a>
+<a name="ln522">    crm_xml_add_int(notify, F_LRMD_RSC_QUEUE_TIME, queue_time);</a>
+<a name="ln523">#endif</a>
+<a name="ln524"> </a>
+<a name="ln525">    crm_xml_add(notify, F_LRMD_OPERATION, LRMD_OP_RSC_EXEC);</a>
+<a name="ln526">    crm_xml_add(notify, F_LRMD_RSC_ID, cmd-&gt;rsc_id);</a>
+<a name="ln527">    if(cmd-&gt;real_action) {</a>
+<a name="ln528">        crm_xml_add(notify, F_LRMD_RSC_ACTION, cmd-&gt;real_action);</a>
+<a name="ln529">    } else {</a>
+<a name="ln530">        crm_xml_add(notify, F_LRMD_RSC_ACTION, cmd-&gt;action);</a>
+<a name="ln531">    }</a>
+<a name="ln532">    crm_xml_add(notify, F_LRMD_RSC_USERDATA_STR, cmd-&gt;userdata_str);</a>
+<a name="ln533">    crm_xml_add(notify, F_LRMD_RSC_OUTPUT, cmd-&gt;output);</a>
+<a name="ln534">    crm_xml_add(notify, F_LRMD_RSC_EXIT_REASON, cmd-&gt;exit_reason);</a>
+<a name="ln535"> </a>
+<a name="ln536">    if (cmd-&gt;params) {</a>
+<a name="ln537">        char *key = NULL;</a>
+<a name="ln538">        char *value = NULL;</a>
+<a name="ln539">        GHashTableIter iter;</a>
+<a name="ln540"> </a>
+<a name="ln541">        xmlNode *args = create_xml_node(notify, XML_TAG_ATTRS);</a>
+<a name="ln542"> </a>
+<a name="ln543">        g_hash_table_iter_init(&amp;iter, cmd-&gt;params);</a>
+<a name="ln544">        while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln545">            hash2smartfield((gpointer) key, (gpointer) value, args);</a>
+<a name="ln546">        }</a>
+<a name="ln547">    }</a>
+<a name="ln548">    if (cmd-&gt;client_id &amp;&amp; (cmd-&gt;call_opts &amp; lrmd_opt_notify_orig_only)) {</a>
+<a name="ln549">        crm_client_t *client = crm_client_get_by_id(cmd-&gt;client_id);</a>
+<a name="ln550"> </a>
+<a name="ln551">        if (client) {</a>
+<a name="ln552">            send_client_notify(client-&gt;id, client, notify);</a>
+<a name="ln553">        }</a>
+<a name="ln554">    } else if (client_connections != NULL) {</a>
+<a name="ln555">        g_hash_table_foreach(client_connections, send_client_notify, notify);</a>
+<a name="ln556">    }</a>
+<a name="ln557"> </a>
+<a name="ln558">    free_xml(notify);</a>
+<a name="ln559">}</a>
+<a name="ln560"> </a>
+<a name="ln561">static void</a>
+<a name="ln562">send_generic_notify(int rc, xmlNode * request)</a>
+<a name="ln563">{</a>
+<a name="ln564">    if (client_connections != NULL) {</a>
+<a name="ln565">        int call_id = 0;</a>
+<a name="ln566">        xmlNode *notify = NULL;</a>
+<a name="ln567">        xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, request, LOG_ERR);</a>
+<a name="ln568">        const char *rsc_id = crm_element_value(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln569">        const char *op = crm_element_value(request, F_LRMD_OPERATION);</a>
+<a name="ln570"> </a>
+<a name="ln571">        crm_element_value_int(request, F_LRMD_CALLID, &amp;call_id);</a>
+<a name="ln572"> </a>
+<a name="ln573">        notify = create_xml_node(NULL, T_LRMD_NOTIFY);</a>
+<a name="ln574">        crm_xml_add(notify, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln575">        crm_xml_add_int(notify, F_LRMD_RC, rc);</a>
+<a name="ln576">        crm_xml_add_int(notify, F_LRMD_CALLID, call_id);</a>
+<a name="ln577">        crm_xml_add(notify, F_LRMD_OPERATION, op);</a>
+<a name="ln578">        crm_xml_add(notify, F_LRMD_RSC_ID, rsc_id);</a>
+<a name="ln579"> </a>
+<a name="ln580">        g_hash_table_foreach(client_connections, send_client_notify, notify);</a>
+<a name="ln581"> </a>
+<a name="ln582">        free_xml(notify);</a>
+<a name="ln583">    }</a>
+<a name="ln584">}</a>
+<a name="ln585"> </a>
+<a name="ln586">static void</a>
+<a name="ln587">cmd_reset(lrmd_cmd_t * cmd)</a>
+<a name="ln588">{</a>
+<a name="ln589">    cmd-&gt;lrmd_op_status = 0;</a>
+<a name="ln590">    cmd-&gt;last_pid = 0;</a>
+<a name="ln591">    memset(&amp;cmd-&gt;t_run, 0, sizeof(cmd-&gt;t_run));</a>
+<a name="ln592">    memset(&amp;cmd-&gt;t_queue, 0, sizeof(cmd-&gt;t_queue));</a>
+<a name="ln593">    free(cmd-&gt;exit_reason);</a>
+<a name="ln594">    cmd-&gt;exit_reason = NULL;</a>
+<a name="ln595">    free(cmd-&gt;output);</a>
+<a name="ln596">    cmd-&gt;output = NULL;</a>
+<a name="ln597"> </a>
+<a name="ln598">}</a>
+<a name="ln599"> </a>
+<a name="ln600">static void</a>
+<a name="ln601">cmd_finalize(lrmd_cmd_t * cmd, lrmd_rsc_t * rsc)</a>
+<a name="ln602">{</a>
+<a name="ln603">    crm_trace(&quot;Resource operation rsc:%s action:%s completed (%p %p)&quot;, cmd-&gt;rsc_id, cmd-&gt;action,</a>
+<a name="ln604">              rsc ? rsc-&gt;active : NULL, cmd);</a>
+<a name="ln605"> </a>
+<a name="ln606">    if (rsc &amp;&amp; (rsc-&gt;active == cmd)) {</a>
+<a name="ln607">        rsc-&gt;active = NULL;</a>
+<a name="ln608">        mainloop_set_trigger(rsc-&gt;work);</a>
+<a name="ln609">    }</a>
+<a name="ln610"> </a>
+<a name="ln611">    if (!rsc) {</a>
+<a name="ln612">        cmd-&gt;rsc_deleted = 1;</a>
+<a name="ln613">    }</a>
+<a name="ln614"> </a>
+<a name="ln615">    /* reset original timeout so client notification has correct information */</a>
+<a name="ln616">    cmd-&gt;timeout = cmd-&gt;timeout_orig;</a>
+<a name="ln617"> </a>
+<a name="ln618">    send_cmd_complete_notify(cmd);</a>
+<a name="ln619"> </a>
+<a name="ln620">    if (cmd-&gt;interval &amp;&amp; (cmd-&gt;lrmd_op_status == PCMK_LRM_OP_CANCELLED)) {</a>
+<a name="ln621">        if (rsc) {</a>
+<a name="ln622">            rsc-&gt;recurring_ops = g_list_remove(rsc-&gt;recurring_ops, cmd);</a>
+<a name="ln623">            rsc-&gt;pending_ops = g_list_remove(rsc-&gt;pending_ops, cmd);</a>
+<a name="ln624">        }</a>
+<a name="ln625">        free_lrmd_cmd(cmd);</a>
+<a name="ln626">    } else if (cmd-&gt;interval == 0) {</a>
+<a name="ln627">        if (rsc) {</a>
+<a name="ln628">            rsc-&gt;pending_ops = g_list_remove(rsc-&gt;pending_ops, cmd);</a>
+<a name="ln629">        }</a>
+<a name="ln630">        free_lrmd_cmd(cmd);</a>
+<a name="ln631">    } else {</a>
+<a name="ln632">        /* Clear all the values pertaining just to the last iteration of a recurring op. */</a>
+<a name="ln633">        cmd_reset(cmd);</a>
+<a name="ln634">    }</a>
+<a name="ln635">}</a>
+<a name="ln636"> </a>
+<a name="ln637">#if SUPPORT_HEARTBEAT</a>
+<a name="ln638">static int pattern_matched(const char *pat, const char *str)</a>
+<a name="ln639">{</a>
+<a name="ln640">    if (g_pattern_match_simple(pat, str)) {</a>
+<a name="ln641">        crm_debug(&quot;RA output matched stopped pattern [%s]&quot;, pat);</a>
+<a name="ln642">        return TRUE;</a>
+<a name="ln643">    }</a>
+<a name="ln644">    return FALSE;</a>
+<a name="ln645">}</a>
+<a name="ln646"> </a>
+<a name="ln647">static int</a>
+<a name="ln648">hb2uniform_rc(const char *action, int rc, const char *stdout_data)</a>
+<a name="ln649">{</a>
+<a name="ln650">    const char *stop_pattern[] = { &quot;*stopped*&quot;, &quot;*not*running*&quot; };</a>
+<a name="ln651">    const char *running_pattern[] = { &quot;*running*&quot;, &quot;*OK*&quot; };</a>
+<a name="ln652">    char *lower_std_output = NULL;</a>
+<a name="ln653">    int result;</a>
+<a name="ln654"> </a>
+<a name="ln655"> </a>
+<a name="ln656">    if (rc &lt; 0) {</a>
+<a name="ln657">        return PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln658">    }</a>
+<a name="ln659"> </a>
+<a name="ln660">    /* Treat class heartbeat the same as class lsb. */</a>
+<a name="ln661">    if (!safe_str_eq(action, &quot;status&quot;) &amp;&amp; !safe_str_eq(action, &quot;monitor&quot;)) {</a>
+<a name="ln662">        return services_get_ocf_exitcode(action, rc);</a>
+<a name="ln663">    }</a>
+<a name="ln664"> </a>
+<a name="ln665">    /* for status though, exit code is ignored,</a>
+<a name="ln666">     * and the stdout is scanned for specific strings */</a>
+<a name="ln667">    if (stdout_data == NULL) {</a>
+<a name="ln668">        crm_warn(&quot;No status output from the (hb) resource agent, assuming stopped&quot;);</a>
+<a name="ln669">        return PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln670">    }</a>
+<a name="ln671"> </a>
+<a name="ln672">    lower_std_output = g_ascii_strdown(stdout_data, -1);</a>
+<a name="ln673"> </a>
+<a name="ln674">    if (pattern_matched(stop_pattern[0], lower_std_output) ||</a>
+<a name="ln675">        pattern_matched(stop_pattern[1], lower_std_output)) {</a>
+<a name="ln676">        result = PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln677">    } else if (pattern_matched(running_pattern[0], lower_std_output) ||</a>
+<a name="ln678">        pattern_matched(running_pattern[1], stdout_data)) {</a>
+<a name="ln679">            /* &quot;OK&quot; is matched case sensitive */</a>
+<a name="ln680">        result = PCMK_OCF_OK;</a>
+<a name="ln681">    } else {</a>
+<a name="ln682">        /* It didn't say it was running - must be stopped */</a>
+<a name="ln683">        crm_debug(&quot;RA output did not match any pattern, assuming stopped&quot;);</a>
+<a name="ln684">        result = PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln685">    }</a>
+<a name="ln686">    free(lower_std_output);</a>
+<a name="ln687">    return result;</a>
+<a name="ln688">}</a>
+<a name="ln689">#endif</a>
+<a name="ln690"> </a>
+<a name="ln691">static int</a>
+<a name="ln692">ocf2uniform_rc(int rc)</a>
+<a name="ln693">{</a>
+<a name="ln694">    if (rc &lt; 0 || rc &gt; PCMK_OCF_FAILED_MASTER) {</a>
+<a name="ln695">        return PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln696">    }</a>
+<a name="ln697"> </a>
+<a name="ln698">    return rc;</a>
+<a name="ln699">}</a>
+<a name="ln700"> </a>
+<a name="ln701">static int</a>
+<a name="ln702">stonith2uniform_rc(const char *action, int rc)</a>
+<a name="ln703">{</a>
+<a name="ln704">    if (rc == -ENODEV) {</a>
+<a name="ln705">        if (safe_str_eq(action, &quot;stop&quot;)) {</a>
+<a name="ln706">            rc = PCMK_OCF_OK;</a>
+<a name="ln707">        } else if (safe_str_eq(action, &quot;start&quot;)) {</a>
+<a name="ln708">            rc = PCMK_OCF_NOT_INSTALLED;</a>
+<a name="ln709">        } else {</a>
+<a name="ln710">            rc = PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln711">        }</a>
+<a name="ln712">    } else if (rc != 0) {</a>
+<a name="ln713">        rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln714">    }</a>
+<a name="ln715">    return rc;</a>
+<a name="ln716">}</a>
+<a name="ln717"> </a>
+<a name="ln718">#if SUPPORT_NAGIOS</a>
+<a name="ln719">static int</a>
+<a name="ln720">nagios2uniform_rc(const char *action, int rc)</a>
+<a name="ln721">{</a>
+<a name="ln722">    if (rc &lt; 0) {</a>
+<a name="ln723">        return PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln724">    }</a>
+<a name="ln725"> </a>
+<a name="ln726">    switch (rc) {</a>
+<a name="ln727">        case NAGIOS_STATE_OK:</a>
+<a name="ln728">            return PCMK_OCF_OK;</a>
+<a name="ln729">        case NAGIOS_INSUFFICIENT_PRIV:</a>
+<a name="ln730">            return PCMK_OCF_INSUFFICIENT_PRIV;</a>
+<a name="ln731">        case NAGIOS_NOT_INSTALLED:</a>
+<a name="ln732">            return PCMK_OCF_NOT_INSTALLED;</a>
+<a name="ln733">        case NAGIOS_STATE_WARNING:</a>
+<a name="ln734">        case NAGIOS_STATE_CRITICAL:</a>
+<a name="ln735">        case NAGIOS_STATE_UNKNOWN:</a>
+<a name="ln736">        case NAGIOS_STATE_DEPENDENT:</a>
+<a name="ln737">        default:</a>
+<a name="ln738">            return PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln739">    }</a>
+<a name="ln740"> </a>
+<a name="ln741">    return PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln742">}</a>
+<a name="ln743">#endif</a>
+<a name="ln744"> </a>
+<a name="ln745">static int</a>
+<a name="ln746">get_uniform_rc(const char *standard, const char *action, int rc)</a>
+<a name="ln747">{</a>
+<a name="ln748">    if (safe_str_eq(standard, PCMK_RESOURCE_CLASS_OCF)) {</a>
+<a name="ln749">        return ocf2uniform_rc(rc);</a>
+<a name="ln750">    } else if (safe_str_eq(standard, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln751">        return stonith2uniform_rc(action, rc);</a>
+<a name="ln752">    } else if (safe_str_eq(standard, PCMK_RESOURCE_CLASS_SYSTEMD)) {</a>
+<a name="ln753">        return rc;</a>
+<a name="ln754">    } else if (safe_str_eq(standard, PCMK_RESOURCE_CLASS_UPSTART)) {</a>
+<a name="ln755">        return rc;</a>
+<a name="ln756">#if SUPPORT_NAGIOS</a>
+<a name="ln757">    } else if (safe_str_eq(standard, PCMK_RESOURCE_CLASS_NAGIOS)) {</a>
+<a name="ln758">        return nagios2uniform_rc(action, rc);</a>
+<a name="ln759">#endif</a>
+<a name="ln760">    } else {</a>
+<a name="ln761">        return services_get_ocf_exitcode(action, rc);</a>
+<a name="ln762">    }</a>
+<a name="ln763">}</a>
+<a name="ln764"> </a>
+<a name="ln765">static int</a>
+<a name="ln766">action_get_uniform_rc(svc_action_t * action)</a>
+<a name="ln767">{</a>
+<a name="ln768">    lrmd_cmd_t *cmd = action-&gt;cb_data;</a>
+<a name="ln769">#if SUPPORT_HEARTBEAT</a>
+<a name="ln770">    if (safe_str_eq(action-&gt;standard, PCMK_RESOURCE_CLASS_HB)) {</a>
+<a name="ln771">        return hb2uniform_rc(cmd-&gt;action, action-&gt;rc, action-&gt;stdout_data);</a>
+<a name="ln772">    }</a>
+<a name="ln773">#endif</a>
+<a name="ln774">    return get_uniform_rc(action-&gt;standard, cmd-&gt;action, action-&gt;rc);</a>
+<a name="ln775">}</a>
+<a name="ln776"> </a>
+<a name="ln777">void</a>
+<a name="ln778">notify_of_new_client(crm_client_t *new_client)</a>
+<a name="ln779">{</a>
+<a name="ln780">    crm_client_t *client = NULL;</a>
+<a name="ln781">    GHashTableIter iter;</a>
+<a name="ln782">    xmlNode *notify = NULL;</a>
+<a name="ln783">    char *key = NULL;</a>
+<a name="ln784"> </a>
+<a name="ln785">    notify = create_xml_node(NULL, T_LRMD_NOTIFY);</a>
+<a name="ln786">    crm_xml_add(notify, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln787">    crm_xml_add(notify, F_LRMD_OPERATION, LRMD_OP_NEW_CLIENT);</a>
+<a name="ln788"> </a>
+<a name="ln789">    g_hash_table_iter_init(&amp;iter, client_connections);</a>
+<a name="ln790">    while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; client)) {</a>
+<a name="ln791"> </a>
+<a name="ln792">        if (safe_str_eq(client-&gt;id, new_client-&gt;id)) {</a>
+<a name="ln793">            continue;</a>
+<a name="ln794">        }</a>
+<a name="ln795"> </a>
+<a name="ln796">        send_client_notify((gpointer) key, (gpointer) client, (gpointer) notify);</a>
+<a name="ln797">    }</a>
+<a name="ln798">    free_xml(notify);</a>
+<a name="ln799">}</a>
+<a name="ln800"> </a>
+<a name="ln801">static char *</a>
+<a name="ln802">parse_exit_reason(const char *output)</a>
+<a name="ln803">{</a>
+<a name="ln804">    const char *cur = NULL;</a>
+<a name="ln805">    const char *last = NULL;</a>
+<a name="ln806">    char *reason = NULL;</a>
+<a name="ln807">    static int cookie_len = 0;</a>
+<a name="ln808">    char *eol = NULL;</a>
+<a name="ln809"> </a>
+<a name="ln810">    if (output == NULL) {</a>
+<a name="ln811">        return NULL;</a>
+<a name="ln812">    }</a>
+<a name="ln813"> </a>
+<a name="ln814">    if (!cookie_len) {</a>
+<a name="ln815">        cookie_len = strlen(PCMK_OCF_REASON_PREFIX);</a>
+<a name="ln816">    }</a>
+<a name="ln817"> </a>
+<a name="ln818">    cur = strstr(output, PCMK_OCF_REASON_PREFIX);</a>
+<a name="ln819">    for (; cur != NULL; cur = strstr(cur, PCMK_OCF_REASON_PREFIX)) {</a>
+<a name="ln820">        /* skip over the cookie delimiter string */</a>
+<a name="ln821">        cur += cookie_len;</a>
+<a name="ln822">        last = cur;</a>
+<a name="ln823">    }</a>
+<a name="ln824">    if (last == NULL) {</a>
+<a name="ln825">        return NULL;</a>
+<a name="ln826">    }</a>
+<a name="ln827"> </a>
+<a name="ln828">    /* make our own copy */</a>
+<a name="ln829">    reason = calloc(1, (EXIT_REASON_MAX_LEN+1));</a>
+<a name="ln830">    CRM_ASSERT(reason);</a>
+<a name="ln831"> </a>
+<a name="ln832">    /* limit reason string size */</a>
+<a name="ln833">    strncpy(reason, last, EXIT_REASON_MAX_LEN);</a>
+<a name="ln834"> </a>
+<a name="ln835">    /* truncate everything after a new line */</a>
+<a name="ln836">    eol = strchr(reason, '\n');</a>
+<a name="ln837">    if (eol != NULL) {</a>
+<a name="ln838">        *eol = '\0';</a>
+<a name="ln839">    }</a>
+<a name="ln840"> </a>
+<a name="ln841">    return reason;</a>
+<a name="ln842">}</a>
+<a name="ln843"> </a>
+<a name="ln844">void</a>
+<a name="ln845">client_disconnect_cleanup(const char *client_id)</a>
+<a name="ln846">{</a>
+<a name="ln847">    GHashTableIter iter;</a>
+<a name="ln848">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln849">    char *key = NULL;</a>
+<a name="ln850"> </a>
+<a name="ln851">    g_hash_table_iter_init(&amp;iter, rsc_list);</a>
+<a name="ln852">    while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; rsc)) {</a>
+<a name="ln853">        if (rsc-&gt;call_opts &amp; lrmd_opt_drop_recurring) {</a>
+<a name="ln854">            /* This client is disconnecting, drop any recurring operations</a>
+<a name="ln855">             * it may have initiated on the resource */</a>
+<a name="ln856">            cancel_all_recurring(rsc, client_id);</a>
+<a name="ln857">        }</a>
+<a name="ln858">    }</a>
+<a name="ln859">}</a>
+<a name="ln860"> </a>
+<a name="ln861">static void</a>
+<a name="ln862">action_complete(svc_action_t * action)</a>
+<a name="ln863">{</a>
+<a name="ln864">    lrmd_rsc_t *rsc;</a>
+<a name="ln865">    lrmd_cmd_t *cmd = action-&gt;cb_data;</a>
+<a name="ln866">    const char *rclass = NULL;</a>
+<a name="ln867"> </a>
+<a name="ln868">    bool goagain = false;</a>
+<a name="ln869"> </a>
+<a name="ln870">    if (!cmd) {</a>
+<a name="ln871">        crm_err(&quot;LRMD action (%s) completed does not match any known operations.&quot;, action-&gt;id);</a>
+<a name="ln872">        return;</a>
+<a name="ln873">    }</a>
+<a name="ln874">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln875">    if (cmd-&gt;exec_rc != action-&gt;rc) {</a>
+<a name="ln876">        ftime(&amp;cmd-&gt;t_rcchange);</a>
+<a name="ln877">    }</a>
+<a name="ln878">#endif</a>
+<a name="ln879"> </a>
+<a name="ln880">    cmd-&gt;last_pid = action-&gt;pid;</a>
+<a name="ln881">    cmd-&gt;exec_rc = action_get_uniform_rc(action);</a>
+<a name="ln882">    cmd-&gt;lrmd_op_status = action-&gt;status;</a>
+<a name="ln883">    rsc = cmd-&gt;rsc_id ? g_hash_table_lookup(rsc_list, cmd-&gt;rsc_id) : NULL;</a>
+<a name="ln884"> </a>
+<a name="ln885">    if (rsc &amp;&amp; safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_SERVICE)) {</a>
+<a name="ln886">        rclass = resources_find_service_class(rsc-&gt;class);</a>
+<a name="ln887">    } else if(rsc) {</a>
+<a name="ln888">        rclass = rsc-&gt;class;</a>
+<a name="ln889">    }</a>
+<a name="ln890"> </a>
+<a name="ln891">    if (safe_str_eq(rclass, PCMK_RESOURCE_CLASS_SYSTEMD)) {</a>
+<a name="ln892">        if(cmd-&gt;exec_rc == PCMK_OCF_OK &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;start&quot;)) {</a>
+<a name="ln893">            /* systemd I curse thee!</a>
+<a name="ln894">             *</a>
+<a name="ln895">             * systemd returns from start actions after the start _begins_</a>
+<a name="ln896">             * not after it completes.</a>
+<a name="ln897">             *</a>
+<a name="ln898">             * So we have to jump through a few hoops so that we don't</a>
+<a name="ln899">             * report 'complete' to the rest of pacemaker until, you know,</a>
+<a name="ln900">             * it's actually done.</a>
+<a name="ln901">             */</a>
+<a name="ln902">            goagain = true;</a>
+<a name="ln903">            cmd-&gt;real_action = cmd-&gt;action;</a>
+<a name="ln904">            cmd-&gt;action = strdup(&quot;monitor&quot;);</a>
+<a name="ln905"> </a>
+<a name="ln906">        } else if(cmd-&gt;exec_rc == PCMK_OCF_OK &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln907">            goagain = true;</a>
+<a name="ln908">            cmd-&gt;real_action = cmd-&gt;action;</a>
+<a name="ln909">            cmd-&gt;action = strdup(&quot;monitor&quot;);</a>
+<a name="ln910"> </a>
+<a name="ln911">        } else if(cmd-&gt;real_action) {</a>
+<a name="ln912">            /* Ok, so this is the follow up monitor action to check if start actually completed */</a>
+<a name="ln913">            if(cmd-&gt;lrmd_op_status == PCMK_LRM_OP_DONE &amp;&amp; cmd-&gt;exec_rc == PCMK_OCF_PENDING) {</a>
+<a name="ln914">                goagain = true;</a>
+<a name="ln915">            } else if(cmd-&gt;exec_rc == PCMK_OCF_OK &amp;&amp; safe_str_eq(cmd-&gt;real_action, &quot;stop&quot;)) {</a>
+<a name="ln916">                goagain = true;</a>
+<a name="ln917"> </a>
+<a name="ln918">            } else {</a>
+<a name="ln919">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln920">                int time_sum = time_diff_ms(NULL, &amp;cmd-&gt;t_first_run);</a>
+<a name="ln921">                int timeout_left = cmd-&gt;timeout_orig - time_sum;</a>
+<a name="ln922"> </a>
+<a name="ln923">                crm_debug(&quot;%s %s is now complete (elapsed=%dms, remaining=%dms): %s (%d)&quot;,</a>
+<a name="ln924">                          cmd-&gt;rsc_id, cmd-&gt;real_action, time_sum, timeout_left, services_ocf_exitcode_str(cmd-&gt;exec_rc), cmd-&gt;exec_rc);</a>
+<a name="ln925">                cmd_original_times(cmd);</a>
+<a name="ln926">#endif</a>
+<a name="ln927"> </a>
+<a name="ln928">                if(cmd-&gt;lrmd_op_status == PCMK_LRM_OP_DONE &amp;&amp; cmd-&gt;exec_rc == PCMK_OCF_NOT_RUNNING &amp;&amp; safe_str_eq(cmd-&gt;real_action, &quot;stop&quot;)) {</a>
+<a name="ln929">                    cmd-&gt;exec_rc = PCMK_OCF_OK;</a>
+<a name="ln930">                }</a>
+<a name="ln931">            }</a>
+<a name="ln932">        }</a>
+<a name="ln933">    }</a>
+<a name="ln934"> </a>
+<a name="ln935">#if SUPPORT_NAGIOS</a>
+<a name="ln936">    if (rsc &amp;&amp; safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_NAGIOS)) {</a>
+<a name="ln937">        if (safe_str_eq(cmd-&gt;action, &quot;monitor&quot;) &amp;&amp;</a>
+<a name="ln938">            cmd-&gt;interval == 0 &amp;&amp; cmd-&gt;exec_rc == PCMK_OCF_OK) {</a>
+<a name="ln939">            /* Successfully executed --version for the nagios plugin */</a>
+<a name="ln940">            cmd-&gt;exec_rc = PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln941"> </a>
+<a name="ln942">        } else if (safe_str_eq(cmd-&gt;action, &quot;start&quot;) &amp;&amp; cmd-&gt;exec_rc != PCMK_OCF_OK) {</a>
+<a name="ln943">            goagain = true;</a>
+<a name="ln944">        }</a>
+<a name="ln945">    }</a>
+<a name="ln946">#endif</a>
+<a name="ln947"> </a>
+<a name="ln948">    /* Wrapping this section in ifdef implies that systemd resources are not</a>
+<a name="ln949">     * fully supported on platforms without sys/timeb.h. Since timeb is</a>
+<a name="ln950">     * obsolete, we should eventually prefer a clock_gettime() implementation</a>
+<a name="ln951">     * (wrapped in its own ifdef) with timeb as a fallback.</a>
+<a name="ln952">     */</a>
+<a name="ln953">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln954">    if(goagain) {</a>
+<a name="ln955">        int time_sum = time_diff_ms(NULL, &amp;cmd-&gt;t_first_run);</a>
+<a name="ln956">        int timeout_left = cmd-&gt;timeout_orig - time_sum;</a>
+<a name="ln957">        int delay = cmd-&gt;timeout_orig / 10;</a>
+<a name="ln958"> </a>
+<a name="ln959">        if(delay &gt;= timeout_left &amp;&amp; timeout_left &gt; 20) {</a>
+<a name="ln960">            delay = timeout_left/2;</a>
+<a name="ln961">        }</a>
+<a name="ln962"> </a>
+<a name="ln963">        delay = QB_MIN(2000, delay);</a>
+<a name="ln964">        if (delay &lt; timeout_left) {</a>
+<a name="ln965">            cmd-&gt;start_delay = delay;</a>
+<a name="ln966">            cmd-&gt;timeout = timeout_left;</a>
+<a name="ln967"> </a>
+<a name="ln968">            if(cmd-&gt;exec_rc == PCMK_OCF_OK) {</a>
+<a name="ln969">                crm_debug(&quot;%s %s may still be in progress: re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)&quot;,</a>
+<a name="ln970">                          cmd-&gt;rsc_id, cmd-&gt;real_action, time_sum, timeout_left, delay);</a>
+<a name="ln971"> </a>
+<a name="ln972">            } else if(cmd-&gt;exec_rc == PCMK_OCF_PENDING) {</a>
+<a name="ln973">                crm_info(&quot;%s %s is still in progress: re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)&quot;,</a>
+<a name="ln974">                         cmd-&gt;rsc_id, cmd-&gt;action, time_sum, timeout_left, delay);</a>
+<a name="ln975"> </a>
+<a name="ln976">            } else {</a>
+<a name="ln977">                crm_notice(&quot;%s %s failed '%s' (%d): re-scheduling (elapsed=%dms, remaining=%dms, start_delay=%dms)&quot;,</a>
+<a name="ln978">                           cmd-&gt;rsc_id, cmd-&gt;action, services_ocf_exitcode_str(cmd-&gt;exec_rc), cmd-&gt;exec_rc, time_sum, timeout_left, delay);</a>
+<a name="ln979">            }</a>
+<a name="ln980"> </a>
+<a name="ln981">            cmd_reset(cmd);</a>
+<a name="ln982">            if(rsc) {</a>
+<a name="ln983">                rsc-&gt;active = NULL;</a>
+<a name="ln984">            }</a>
+<a name="ln985">            schedule_lrmd_cmd(rsc, cmd);</a>
+<a name="ln986"> </a>
+<a name="ln987">            /* Don't finalize cmd, we're not done with it yet */</a>
+<a name="ln988">            return;</a>
+<a name="ln989"> </a>
+<a name="ln990">        } else {</a>
+<a name="ln991">            crm_notice(&quot;Giving up on %s %s (rc=%d): timeout (elapsed=%dms, remaining=%dms)&quot;,</a>
+<a name="ln992">                       cmd-&gt;rsc_id, cmd-&gt;real_action?cmd-&gt;real_action:cmd-&gt;action, cmd-&gt;exec_rc, time_sum, timeout_left);</a>
+<a name="ln993">            cmd-&gt;lrmd_op_status = PCMK_LRM_OP_TIMEOUT;</a>
+<a name="ln994">            cmd-&gt;exec_rc = PCMK_OCF_TIMEOUT;</a>
+<a name="ln995">            cmd_original_times(cmd);</a>
+<a name="ln996">        }</a>
+<a name="ln997">    }</a>
+<a name="ln998">#endif</a>
+<a name="ln999"> </a>
+<a name="ln1000">    if (action-&gt;stderr_data) {</a>
+<a name="ln1001">        cmd-&gt;output = strdup(action-&gt;stderr_data);</a>
+<a name="ln1002">        cmd-&gt;exit_reason = parse_exit_reason(action-&gt;stderr_data);</a>
+<a name="ln1003"> </a>
+<a name="ln1004">    } else if (action-&gt;stdout_data) {</a>
+<a name="ln1005">        cmd-&gt;output = strdup(action-&gt;stdout_data);</a>
+<a name="ln1006">    }</a>
+<a name="ln1007"> </a>
+<a name="ln1008">    cmd_finalize(cmd, rsc);</a>
+<a name="ln1009">}</a>
+<a name="ln1010"> </a>
+<a name="ln1011">static void</a>
+<a name="ln1012">stonith_action_complete(lrmd_cmd_t * cmd, int rc)</a>
+<a name="ln1013">{</a>
+<a name="ln1014">    int recurring = cmd-&gt;interval;</a>
+<a name="ln1015">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln1016"> </a>
+<a name="ln1017">    cmd-&gt;exec_rc = get_uniform_rc(PCMK_RESOURCE_CLASS_STONITH, cmd-&gt;action, rc);</a>
+<a name="ln1018"> </a>
+<a name="ln1019">    rsc = g_hash_table_lookup(rsc_list, cmd-&gt;rsc_id);</a>
+<a name="ln1020"> </a>
+<a name="ln1021">    if (cmd-&gt;lrmd_op_status == PCMK_LRM_OP_CANCELLED) {</a>
+<a name="ln1022">        recurring = 0;</a>
+<a name="ln1023">        /* do nothing */</a>
+<a name="ln1024"> </a>
+<a name="ln1025">    } else if (rc == -ENODEV &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln1026">        /* Not registered == inactive */</a>
+<a name="ln1027">        cmd-&gt;lrmd_op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln1028">        cmd-&gt;exec_rc = PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln1029"> </a>
+<a name="ln1030">    } else if (rc) {</a>
+<a name="ln1031">        /* Attempt to map return codes to op status if possible */</a>
+<a name="ln1032">        switch (rc) {</a>
+<a name="ln1033">            case -EPROTONOSUPPORT:</a>
+<a name="ln1034">                cmd-&gt;lrmd_op_status = PCMK_LRM_OP_NOTSUPPORTED;</a>
+<a name="ln1035">                break;</a>
+<a name="ln1036">            case -ETIME:</a>
+<a name="ln1037">                cmd-&gt;lrmd_op_status = PCMK_LRM_OP_TIMEOUT;</a>
+<a name="ln1038">                break;</a>
+<a name="ln1039">            default:</a>
+<a name="ln1040">                /* TODO: This looks wrong.  Status should be _DONE and exec_rc set to an error */</a>
+<a name="ln1041">                cmd-&gt;lrmd_op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln1042">        }</a>
+<a name="ln1043">    } else {</a>
+<a name="ln1044">        /* command successful */</a>
+<a name="ln1045">        cmd-&gt;lrmd_op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln1046">        if (safe_str_eq(cmd-&gt;action, &quot;start&quot;) &amp;&amp; rsc) {</a>
+<a name="ln1047">            rsc-&gt;stonith_started = 1;</a>
+<a name="ln1048">        }</a>
+<a name="ln1049">    }</a>
+<a name="ln1050"> </a>
+<a name="ln1051">    if (recurring &amp;&amp; rsc) {</a>
+<a name="ln1052">        if (cmd-&gt;stonith_recurring_id) {</a>
+<a name="ln1053">            g_source_remove(cmd-&gt;stonith_recurring_id);</a>
+<a name="ln1054">        }</a>
+<a name="ln1055">        cmd-&gt;stonith_recurring_id = g_timeout_add(cmd-&gt;interval, stonith_recurring_op_helper, cmd);</a>
+<a name="ln1056">    }</a>
+<a name="ln1057"> </a>
+<a name="ln1058">    cmd_finalize(cmd, rsc);</a>
+<a name="ln1059">}</a>
+<a name="ln1060"> </a>
+<a name="ln1061">static void</a>
+<a name="ln1062">lrmd_stonith_callback(stonith_t * stonith, stonith_callback_data_t * data)</a>
+<a name="ln1063">{</a>
+<a name="ln1064">    stonith_action_complete(data-&gt;userdata, data-&gt;rc);</a>
+<a name="ln1065">}</a>
+<a name="ln1066"> </a>
+<a name="ln1067">void</a>
+<a name="ln1068">stonith_connection_failed(void)</a>
+<a name="ln1069">{</a>
+<a name="ln1070">    GHashTableIter iter;</a>
+<a name="ln1071">    GList *cmd_list = NULL;</a>
+<a name="ln1072">    GList *cmd_iter = NULL;</a>
+<a name="ln1073">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln1074">    char *key = NULL;</a>
+<a name="ln1075"> </a>
+<a name="ln1076">    g_hash_table_iter_init(&amp;iter, rsc_list);</a>
+<a name="ln1077">    while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; rsc)) {</a>
+<a name="ln1078">        if (safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln1079">            if (rsc-&gt;active) {</a>
+<a name="ln1080">                cmd_list = g_list_append(cmd_list, rsc-&gt;active);</a>
+<a name="ln1081">            }</a>
+<a name="ln1082">            if (rsc-&gt;recurring_ops) {</a>
+<a name="ln1083">                cmd_list = g_list_concat(cmd_list, rsc-&gt;recurring_ops);</a>
+<a name="ln1084">            }</a>
+<a name="ln1085">            if (rsc-&gt;pending_ops) {</a>
+<a name="ln1086">                cmd_list = g_list_concat(cmd_list, rsc-&gt;pending_ops);</a>
+<a name="ln1087">            }</a>
+<a name="ln1088">            rsc-&gt;pending_ops = rsc-&gt;recurring_ops = NULL;</a>
+<a name="ln1089">        }</a>
+<a name="ln1090">    }</a>
+<a name="ln1091"> </a>
+<a name="ln1092">    if (!cmd_list) {</a>
+<a name="ln1093">        return;</a>
+<a name="ln1094">    }</a>
+<a name="ln1095"> </a>
+<a name="ln1096">    crm_err(&quot;STONITH connection failed, finalizing %d pending operations.&quot;,</a>
+<a name="ln1097">            g_list_length(cmd_list));</a>
+<a name="ln1098">    for (cmd_iter = cmd_list; cmd_iter; cmd_iter = cmd_iter-&gt;next) {</a>
+<a name="ln1099">        stonith_action_complete(cmd_iter-&gt;data, -ENOTCONN);</a>
+<a name="ln1100">    }</a>
+<a name="ln1101">    g_list_free(cmd_list);</a>
+<a name="ln1102">}</a>
+<a name="ln1103"> </a>
+<a name="ln1104">static int</a>
+<a name="ln1105">lrmd_rsc_execute_stonith(lrmd_rsc_t * rsc, lrmd_cmd_t * cmd)</a>
+<a name="ln1106">{</a>
+<a name="ln1107">    int rc = 0;</a>
+<a name="ln1108">    int do_monitor = 0;</a>
+<a name="ln1109"> </a>
+<a name="ln1110">    stonith_t *stonith_api = get_stonith_connection();</a>
+<a name="ln1111"> </a>
+<a name="ln1112">    if (!stonith_api) {</a>
+<a name="ln1113">        cmd-&gt;exec_rc = get_uniform_rc(PCMK_RESOURCE_CLASS_STONITH, cmd-&gt;action,</a>
+<a name="ln1114">                                      -ENOTCONN);</a>
+<a name="ln1115">        cmd-&gt;lrmd_op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln1116">        cmd_finalize(cmd, rsc);</a>
+<a name="ln1117">        return -EUNATCH;</a>
+<a name="ln1118">    }</a>
+<a name="ln1119"> </a>
+<a name="ln1120">    if (safe_str_eq(cmd-&gt;action, &quot;start&quot;)) {</a>
+<a name="ln1121">        char *key = NULL;</a>
+<a name="ln1122">        char *value = NULL;</a>
+<a name="ln1123">        stonith_key_value_t *device_params = NULL;</a>
+<a name="ln1124"> </a>
+<a name="ln1125">        if (cmd-&gt;params) {</a>
+<a name="ln1126">            GHashTableIter iter;</a>
+<a name="ln1127"> </a>
+<a name="ln1128">            g_hash_table_iter_init(&amp;iter, cmd-&gt;params);</a>
+<a name="ln1129">            while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln1130">                device_params = stonith_key_value_add(device_params, key, value);</a>
+<a name="ln1131">            }</a>
+<a name="ln1132">        }</a>
+<a name="ln1133"> </a>
+<a name="ln1134">        /* Stonith automatically registers devices from the IPC when changes occur,</a>
+<a name="ln1135">         * but to avoid a possible race condition between stonith receiving the IPC update</a>
+<a name="ln1136">         * and the lrmd requesting that resource, the lrmd still registers the device as well.</a>
+<a name="ln1137">         * Stonith knows how to handle duplicate device registrations correctly. */</a>
+<a name="ln1138">        rc = stonith_api-&gt;cmds-&gt;register_device(stonith_api,</a>
+<a name="ln1139">                                                st_opt_sync_call,</a>
+<a name="ln1140">                                                cmd-&gt;rsc_id,</a>
+<a name="ln1141">                                                rsc-&gt;provider, rsc-&gt;type, device_params);</a>
+<a name="ln1142"> </a>
+<a name="ln1143">        stonith_key_value_freeall(device_params, 1, 1);</a>
+<a name="ln1144">        if (rc == 0) {</a>
+<a name="ln1145">            do_monitor = 1;</a>
+<a name="ln1146">        }</a>
+<a name="ln1147">    } else if (safe_str_eq(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln1148">        rc = stonith_api-&gt;cmds-&gt;remove_device(stonith_api, st_opt_sync_call, cmd-&gt;rsc_id);</a>
+<a name="ln1149">        rsc-&gt;stonith_started = 0;</a>
+<a name="ln1150">    } else if (safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln1151">        if (cmd-&gt;interval) {</a>
+<a name="ln1152">            do_monitor = 1;</a>
+<a name="ln1153">        } else {</a>
+<a name="ln1154">            rc = rsc-&gt;stonith_started ? 0 : -ENODEV;</a>
+<a name="ln1155">        }</a>
+<a name="ln1156">    }</a>
+<a name="ln1157"> </a>
+<a name="ln1158">    if (!do_monitor) {</a>
+<a name="ln1159">        goto cleanup_stonith_exec;</a>
+<a name="ln1160">    }</a>
+<a name="ln1161"> </a>
+<a name="ln1162">    rc = stonith_api-&gt;cmds-&gt;monitor(stonith_api, 0, cmd-&gt;rsc_id, cmd-&gt;timeout / 1000);</a>
+<a name="ln1163"> </a>
+<a name="ln1164">    rc = stonith_api-&gt;cmds-&gt;register_callback(stonith_api,</a>
+<a name="ln1165">                                              rc,</a>
+<a name="ln1166">                                              0,</a>
+<a name="ln1167">                                              0,</a>
+<a name="ln1168">                                              cmd, &quot;lrmd_stonith_callback&quot;, lrmd_stonith_callback);</a>
+<a name="ln1169"> </a>
+<a name="ln1170">    /* don't cleanup yet, we will find out the result of the monitor later */</a>
+<a name="ln1171">    if (rc &gt; 0) {</a>
+<a name="ln1172">        rsc-&gt;active = cmd;</a>
+<a name="ln1173">        return rc;</a>
+<a name="ln1174">    } else if (rc == 0) {</a>
+<a name="ln1175">        rc = -1;</a>
+<a name="ln1176">    }</a>
+<a name="ln1177"> </a>
+<a name="ln1178">  cleanup_stonith_exec:</a>
+<a name="ln1179">    stonith_action_complete(cmd, rc);</a>
+<a name="ln1180">    return rc;</a>
+<a name="ln1181">}</a>
+<a name="ln1182"> </a>
+<a name="ln1183">static int</a>
+<a name="ln1184">lrmd_rsc_execute_service_lib(lrmd_rsc_t * rsc, lrmd_cmd_t * cmd)</a>
+<a name="ln1185">{</a>
+<a name="ln1186">    svc_action_t *action = NULL;</a>
+<a name="ln1187">    GHashTable *params_copy = NULL;</a>
+<a name="ln1188"> </a>
+<a name="ln1189">    CRM_ASSERT(rsc);</a>
+<a name="ln1190">    CRM_ASSERT(cmd);</a>
+<a name="ln1191"> </a>
+<a name="ln1192">    crm_trace(&quot;Creating action, resource:%s action:%s class:%s provider:%s agent:%s&quot;,</a>
+<a name="ln1193">              rsc-&gt;rsc_id, cmd-&gt;action, rsc-&gt;class, rsc-&gt;provider, rsc-&gt;type);</a>
+<a name="ln1194"> </a>
+<a name="ln1195">#if SUPPORT_NAGIOS</a>
+<a name="ln1196">    /* Recurring operations are cancelled anyway for a stop operation */</a>
+<a name="ln1197">    if (safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_NAGIOS)</a>
+<a name="ln1198">        &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln1199"> </a>
+<a name="ln1200">        cmd-&gt;exec_rc = PCMK_OCF_OK;</a>
+<a name="ln1201">        goto exec_done;</a>
+<a name="ln1202">    }</a>
+<a name="ln1203">#endif</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    if (cmd-&gt;params) {</a>
+<a name="ln1206">        params_copy = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln1207">                                            g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln1208"> </a>
+<a name="ln1209">        if (params_copy != NULL) {</a>
+<a name="ln1210">            g_hash_table_foreach(cmd-&gt;params, dup_attr, params_copy);</a>
+<a name="ln1211">        }</a>
+<a name="ln1212">    }</a>
+<a name="ln1213"> </a>
+<a name="ln1214">    if (cmd-&gt;isolation_wrapper) {</a>
+<a name="ln1215">        g_hash_table_remove(params_copy, &quot;CRM_meta_isolation_wrapper&quot;);</a>
+<a name="ln1216">        action = resources_action_create(rsc-&gt;rsc_id,</a>
+<a name="ln1217">                                         PCMK_RESOURCE_CLASS_OCF,</a>
+<a name="ln1218">                                         LRMD_ISOLATION_PROVIDER,</a>
+<a name="ln1219">                                         cmd-&gt;isolation_wrapper,</a>
+<a name="ln1220">                                         cmd-&gt;action, /*action will be normalized in wrapper*/</a>
+<a name="ln1221">                                         cmd-&gt;interval,</a>
+<a name="ln1222">                                         cmd-&gt;timeout,</a>
+<a name="ln1223">                                         params_copy,</a>
+<a name="ln1224">                                         cmd-&gt;service_flags);</a>
+<a name="ln1225">    } else {</a>
+<a name="ln1226">        action = resources_action_create(rsc-&gt;rsc_id,</a>
+<a name="ln1227">                                         rsc-&gt;class,</a>
+<a name="ln1228">                                         rsc-&gt;provider,</a>
+<a name="ln1229">                                         rsc-&gt;type,</a>
+<a name="ln1230">                                         normalize_action_name(rsc, cmd-&gt;action),</a>
+<a name="ln1231">                                         cmd-&gt;interval,</a>
+<a name="ln1232">                                         cmd-&gt;timeout,</a>
+<a name="ln1233">                                         params_copy,</a>
+<a name="ln1234">                                         cmd-&gt;service_flags);</a>
+<a name="ln1235">    }</a>
+<a name="ln1236"> </a>
+<a name="ln1237">    if (!action) {</a>
+<a name="ln1238">        crm_err(&quot;Failed to create action, action:%s on resource %s&quot;, cmd-&gt;action, rsc-&gt;rsc_id);</a>
+<a name="ln1239">        cmd-&gt;lrmd_op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln1240">        goto exec_done;</a>
+<a name="ln1241">    }</a>
+<a name="ln1242"> </a>
+<a name="ln1243">    action-&gt;cb_data = cmd;</a>
+<a name="ln1244"> </a>
+<a name="ln1245">    /* 'cmd' may not be valid after this point if</a>
+<a name="ln1246">     * services_action_async() returned TRUE</a>
+<a name="ln1247">     *</a>
+<a name="ln1248">     * Upstart and systemd both synchronously determine monitor/status</a>
+<a name="ln1249">     * results and call action_complete (which may free 'cmd') if necessary.</a>
+<a name="ln1250">     */</a>
+<a name="ln1251">    if (services_action_async(action, action_complete)) {</a>
+<a name="ln1252">        return TRUE;</a>
+<a name="ln1253">    }</a>
+<a name="ln1254"> </a>
+<a name="ln1255">    cmd-&gt;exec_rc = action-&gt;rc;</a>
+<a name="ln1256">    if(action-&gt;status != PCMK_LRM_OP_DONE) {</a>
+<a name="ln1257">        cmd-&gt;lrmd_op_status = action-&gt;status;</a>
+<a name="ln1258">    } else {</a>
+<a name="ln1259">        cmd-&gt;lrmd_op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln1260">    }</a>
+<a name="ln1261">    services_action_free(action);</a>
+<a name="ln1262">    action = NULL;</a>
+<a name="ln1263"> </a>
+<a name="ln1264">  exec_done:</a>
+<a name="ln1265">    cmd_finalize(cmd, rsc);</a>
+<a name="ln1266">    return TRUE;</a>
+<a name="ln1267">}</a>
+<a name="ln1268"> </a>
+<a name="ln1269">static gboolean</a>
+<a name="ln1270">lrmd_rsc_execute(lrmd_rsc_t * rsc)</a>
+<a name="ln1271">{</a>
+<a name="ln1272">    lrmd_cmd_t *cmd = NULL;</a>
+<a name="ln1273"> </a>
+<a name="ln1274">    CRM_CHECK(rsc != NULL, return FALSE);</a>
+<a name="ln1275"> </a>
+<a name="ln1276">    if (rsc-&gt;active) {</a>
+<a name="ln1277">        crm_trace(&quot;%s is still active&quot;, rsc-&gt;rsc_id);</a>
+<a name="ln1278">        return TRUE;</a>
+<a name="ln1279">    }</a>
+<a name="ln1280"> </a>
+<a name="ln1281">    if (rsc-&gt;pending_ops) {</a>
+<a name="ln1282">        GList *first = rsc-&gt;pending_ops;</a>
+<a name="ln1283"> </a>
+<a name="ln1284">        cmd = first-&gt;data;</a>
+<a name="ln1285">        if (cmd-&gt;delay_id) {</a>
+<a name="ln1286">            crm_trace</a>
+<a name="ln1287">                (&quot;Command %s %s was asked to run too early, waiting for start_delay timeout of %dms&quot;,</a>
+<a name="ln1288">                 cmd-&gt;rsc_id, cmd-&gt;action, cmd-&gt;start_delay);</a>
+<a name="ln1289">            return TRUE;</a>
+<a name="ln1290">        }</a>
+<a name="ln1291">        rsc-&gt;pending_ops = g_list_remove_link(rsc-&gt;pending_ops, first);</a>
+<a name="ln1292">        g_list_free_1(first);</a>
+<a name="ln1293"> </a>
+<a name="ln1294">#ifdef HAVE_SYS_TIMEB_H</a>
+<a name="ln1295">        if (cmd-&gt;t_first_run.time == 0) {</a>
+<a name="ln1296">            ftime(&amp;cmd-&gt;t_first_run);</a>
+<a name="ln1297">        }</a>
+<a name="ln1298">        ftime(&amp;cmd-&gt;t_run);</a>
+<a name="ln1299">#endif</a>
+<a name="ln1300">    }</a>
+<a name="ln1301"> </a>
+<a name="ln1302">    if (!cmd) {</a>
+<a name="ln1303">        crm_trace(&quot;Nothing further to do for %s&quot;, rsc-&gt;rsc_id);</a>
+<a name="ln1304">        return TRUE;</a>
+<a name="ln1305">    }</a>
+<a name="ln1306"> </a>
+<a name="ln1307">    rsc-&gt;active = cmd;          /* only one op at a time for a rsc */</a>
+<a name="ln1308">    if (cmd-&gt;interval) {</a>
+<a name="ln1309">        rsc-&gt;recurring_ops = g_list_append(rsc-&gt;recurring_ops, cmd);</a>
+<a name="ln1310">    }</a>
+<a name="ln1311"> </a>
+<a name="ln1312">    log_execute(cmd);</a>
+<a name="ln1313"> </a>
+<a name="ln1314">    if (safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln1315">        lrmd_rsc_execute_stonith(rsc, cmd);</a>
+<a name="ln1316">    } else {</a>
+<a name="ln1317">        lrmd_rsc_execute_service_lib(rsc, cmd);</a>
+<a name="ln1318">    }</a>
+<a name="ln1319"> </a>
+<a name="ln1320">    return TRUE;</a>
+<a name="ln1321">}</a>
+<a name="ln1322"> </a>
+<a name="ln1323">static gboolean</a>
+<a name="ln1324">lrmd_rsc_dispatch(gpointer user_data)</a>
+<a name="ln1325">{</a>
+<a name="ln1326">    return lrmd_rsc_execute(user_data);</a>
+<a name="ln1327">}</a>
+<a name="ln1328"> </a>
+<a name="ln1329">void</a>
+<a name="ln1330">free_rsc(gpointer data)</a>
+<a name="ln1331">{</a>
+<a name="ln1332">    GListPtr gIter = NULL;</a>
+<a name="ln1333">    lrmd_rsc_t *rsc = data;</a>
+<a name="ln1334">    int is_stonith = safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_STONITH);</a>
+<a name="ln1335"> </a>
+<a name="ln1336">    gIter = rsc-&gt;pending_ops;</a>
+<a name="ln1337">    while (gIter != NULL) {</a>
+<a name="ln1338">        GListPtr next = gIter-&gt;next;</a>
+<a name="ln1339">        lrmd_cmd_t *cmd = gIter-&gt;data;</a>
+<a name="ln1340"> </a>
+<a name="ln1341">        /* command was never executed */</a>
+<a name="ln1342">        cmd-&gt;lrmd_op_status = PCMK_LRM_OP_CANCELLED;</a>
+<a name="ln1343">        cmd_finalize(cmd, NULL);</a>
+<a name="ln1344"> </a>
+<a name="ln1345">        gIter = next;</a>
+<a name="ln1346">    }</a>
+<a name="ln1347">    /* frees list, but not list elements. */</a>
+<a name="ln1348">    g_list_free(rsc-&gt;pending_ops);</a>
+<a name="ln1349"> </a>
+<a name="ln1350">    gIter = rsc-&gt;recurring_ops;</a>
+<a name="ln1351">    while (gIter != NULL) {</a>
+<a name="ln1352">        GListPtr next = gIter-&gt;next;</a>
+<a name="ln1353">        lrmd_cmd_t *cmd = gIter-&gt;data;</a>
+<a name="ln1354"> </a>
+<a name="ln1355">        if (is_stonith) {</a>
+<a name="ln1356">            cmd-&gt;lrmd_op_status = PCMK_LRM_OP_CANCELLED;</a>
+<a name="ln1357">            /* If a stonith command is in-flight, just mark it as cancelled;</a>
+<a name="ln1358">             * it is not safe to finalize/free the cmd until the stonith api</a>
+<a name="ln1359">             * says it has either completed or timed out.</a>
+<a name="ln1360">             */</a>
+<a name="ln1361">            if (rsc-&gt;active != cmd) {</a>
+<a name="ln1362">                cmd_finalize(cmd, NULL);</a>
+<a name="ln1363">            }</a>
+<a name="ln1364">        } else {</a>
+<a name="ln1365">            /* This command is already handed off to service library,</a>
+<a name="ln1366">             * let service library cancel it and tell us via the callback</a>
+<a name="ln1367">             * when it is cancelled. The rsc can be safely destroyed</a>
+<a name="ln1368">             * even if we are waiting for the cancel result */</a>
+<a name="ln1369">            services_action_cancel(rsc-&gt;rsc_id, normalize_action_name(rsc, cmd-&gt;action), cmd-&gt;interval);</a>
+<a name="ln1370">        }</a>
+<a name="ln1371"> </a>
+<a name="ln1372">        gIter = next;</a>
+<a name="ln1373">    }</a>
+<a name="ln1374">    /* frees list, but not list elements. */</a>
+<a name="ln1375">    g_list_free(rsc-&gt;recurring_ops);</a>
+<a name="ln1376"> </a>
+<a name="ln1377">    free(rsc-&gt;rsc_id);</a>
+<a name="ln1378">    free(rsc-&gt;class);</a>
+<a name="ln1379">    free(rsc-&gt;provider);</a>
+<a name="ln1380">    free(rsc-&gt;type);</a>
+<a name="ln1381">    mainloop_destroy_trigger(rsc-&gt;work);</a>
+<a name="ln1382"> </a>
+<a name="ln1383">    free(rsc);</a>
+<a name="ln1384">}</a>
+<a name="ln1385"> </a>
+<a name="ln1386">static int</a>
+<a name="ln1387">process_lrmd_signon(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1388">{</a>
+<a name="ln1389">    xmlNode *reply = create_xml_node(NULL, &quot;reply&quot;);</a>
+<a name="ln1390">    const char *is_ipc_provider = crm_element_value(request, F_LRMD_IS_IPC_PROVIDER);</a>
+<a name="ln1391">    const char *protocol_version = crm_element_value(request, F_LRMD_PROTOCOL_VERSION);</a>
+<a name="ln1392"> </a>
+<a name="ln1393">    if (compare_version(protocol_version, LRMD_PROTOCOL_VERSION) &lt; 0) {</a>
+<a name="ln1394">        crm_err(&quot;Cluster API version must be greater than or equal to %s, not %s&quot;,</a>
+<a name="ln1395">                LRMD_PROTOCOL_VERSION, protocol_version);</a>
+<a name="ln1396">        crm_xml_add_int(reply, F_LRMD_RC, -EPROTO);</a>
+<a name="ln1397">        crm_xml_add(reply, F_LRMD_PROTOCOL_VERSION, LRMD_PROTOCOL_VERSION);</a>
+<a name="ln1398">    }</a>
+<a name="ln1399"> </a>
+<a name="ln1400">    crm_xml_add(reply, F_LRMD_OPERATION, CRM_OP_REGISTER);</a>
+<a name="ln1401">    crm_xml_add(reply, F_LRMD_CLIENTID, client-&gt;id);</a>
+<a name="ln1402">    crm_xml_add(reply, F_LRMD_PROTOCOL_VERSION, LRMD_PROTOCOL_VERSION);</a>
+<a name="ln1403">    lrmd_server_send_reply(client, id, reply);</a>
+<a name="ln1404"> </a>
+<a name="ln1405">    if (crm_is_true(is_ipc_provider)) {</a>
+<a name="ln1406">        /* this is a remote connection from a cluster nodes crmd */</a>
+<a name="ln1407">#ifdef SUPPORT_REMOTE</a>
+<a name="ln1408">        ipc_proxy_add_provider(client);</a>
+<a name="ln1409">#endif</a>
+<a name="ln1410">    }</a>
+<a name="ln1411"> </a>
+<a name="ln1412">    free_xml(reply);</a>
+<a name="ln1413">    return pcmk_ok;</a>
+<a name="ln1414">}</a>
+<a name="ln1415"> </a>
+<a name="ln1416">static int</a>
+<a name="ln1417">process_lrmd_rsc_register(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1418">{</a>
+<a name="ln1419">    int rc = pcmk_ok;</a>
+<a name="ln1420">    lrmd_rsc_t *rsc = build_rsc_from_xml(request);</a>
+<a name="ln1421">    lrmd_rsc_t *dup = g_hash_table_lookup(rsc_list, rsc-&gt;rsc_id);</a>
+<a name="ln1422"> </a>
+<a name="ln1423">    if (dup &amp;&amp;</a>
+<a name="ln1424">        safe_str_eq(rsc-&gt;class, dup-&gt;class) &amp;&amp;</a>
+<a name="ln1425">        safe_str_eq(rsc-&gt;provider, dup-&gt;provider) &amp;&amp; safe_str_eq(rsc-&gt;type, dup-&gt;type)) {</a>
+<a name="ln1426"> </a>
+<a name="ln1427">        crm_warn(&quot;Can't add, RSC '%s' already present in the rsc list (%d active resources)&quot;,</a>
+<a name="ln1428">                 rsc-&gt;rsc_id, g_hash_table_size(rsc_list));</a>
+<a name="ln1429"> </a>
+<a name="ln1430">        free_rsc(rsc);</a>
+<a name="ln1431">        return rc;</a>
+<a name="ln1432">    }</a>
+<a name="ln1433"> </a>
+<a name="ln1434">    g_hash_table_replace(rsc_list, rsc-&gt;rsc_id, rsc);</a>
+<a name="ln1435">    crm_info(&quot;Added '%s' to the rsc list (%d active resources)&quot;,</a>
+<a name="ln1436">             rsc-&gt;rsc_id, g_hash_table_size(rsc_list));</a>
+<a name="ln1437"> </a>
+<a name="ln1438">    return rc;</a>
+<a name="ln1439">}</a>
+<a name="ln1440"> </a>
+<a name="ln1441">static void</a>
+<a name="ln1442">process_lrmd_get_rsc_info(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1443">{</a>
+<a name="ln1444">    int rc = pcmk_ok;</a>
+<a name="ln1445">    int send_rc = 0;</a>
+<a name="ln1446">    int call_id = 0;</a>
+<a name="ln1447">    xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, request, LOG_ERR);</a>
+<a name="ln1448">    const char *rsc_id = crm_element_value(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln1449">    xmlNode *reply = NULL;</a>
+<a name="ln1450">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln1451"> </a>
+<a name="ln1452">    crm_element_value_int(request, F_LRMD_CALLID, &amp;call_id);</a>
+<a name="ln1453"> </a>
+<a name="ln1454">    if (!rsc_id) {</a>
+<a name="ln1455">        rc = -ENODEV;</a>
+<a name="ln1456">        goto get_rsc_done;</a>
+<a name="ln1457">    }</a>
+<a name="ln1458"> </a>
+<a name="ln1459">    if (!(rsc = g_hash_table_lookup(rsc_list, rsc_id))) {</a>
+<a name="ln1460">        crm_info(&quot;Resource '%s' not found (%d active resources)&quot;,</a>
+<a name="ln1461">                 rsc_id, g_hash_table_size(rsc_list));</a>
+<a name="ln1462">        rc = -ENODEV;</a>
+<a name="ln1463">        goto get_rsc_done;</a>
+<a name="ln1464">    }</a>
+<a name="ln1465"> </a>
+<a name="ln1466">  get_rsc_done:</a>
+<a name="ln1467"> </a>
+<a name="ln1468">    reply = create_xml_node(NULL, T_LRMD_REPLY);</a>
+<a name="ln1469">    crm_xml_add(reply, F_LRMD_ORIGIN, __FUNCTION__);</a>
+<a name="ln1470">    crm_xml_add_int(reply, F_LRMD_RC, rc);</a>
+<a name="ln1471">    crm_xml_add_int(reply, F_LRMD_CALLID, call_id);</a>
+<a name="ln1472"> </a>
+<a name="ln1473">    if (rsc) {</a>
+<a name="ln1474">        crm_xml_add(reply, F_LRMD_RSC_ID, rsc-&gt;rsc_id);</a>
+<a name="ln1475">        crm_xml_add(reply, F_LRMD_CLASS, rsc-&gt;class);</a>
+<a name="ln1476">        crm_xml_add(reply, F_LRMD_PROVIDER, rsc-&gt;provider);</a>
+<a name="ln1477">        crm_xml_add(reply, F_LRMD_TYPE, rsc-&gt;type);</a>
+<a name="ln1478">    }</a>
+<a name="ln1479"> </a>
+<a name="ln1480">    send_rc = lrmd_server_send_reply(client, id, reply);</a>
+<a name="ln1481"> </a>
+<a name="ln1482">    if (send_rc &lt; 0) {</a>
+<a name="ln1483">        crm_warn(&quot;LRMD reply to %s failed: %d&quot;, client-&gt;name, send_rc);</a>
+<a name="ln1484">    }</a>
+<a name="ln1485"> </a>
+<a name="ln1486">    free_xml(reply);</a>
+<a name="ln1487">}</a>
+<a name="ln1488"> </a>
+<a name="ln1489">static int</a>
+<a name="ln1490">process_lrmd_rsc_unregister(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1491">{</a>
+<a name="ln1492">    int rc = pcmk_ok;</a>
+<a name="ln1493">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln1494">    xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, request, LOG_ERR);</a>
+<a name="ln1495">    const char *rsc_id = crm_element_value(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln1496"> </a>
+<a name="ln1497">    if (!rsc_id) {</a>
+<a name="ln1498">        return -ENODEV;</a>
+<a name="ln1499">    }</a>
+<a name="ln1500"> </a>
+<a name="ln1501">    if (!(rsc = g_hash_table_lookup(rsc_list, rsc_id))) {</a>
+<a name="ln1502">        crm_info(&quot;Resource '%s' not found (%d active resources)&quot;,</a>
+<a name="ln1503">                 rsc_id, g_hash_table_size(rsc_list));</a>
+<a name="ln1504">        return pcmk_ok;</a>
+<a name="ln1505">    }</a>
+<a name="ln1506"> </a>
+<a name="ln1507">    if (rsc-&gt;active) {</a>
+<a name="ln1508">        /* let the caller know there are still active ops on this rsc to watch for */</a>
+<a name="ln1509">        crm_trace(&quot;Operation still in progress: %p&quot;, rsc-&gt;active);</a>
+<a name="ln1510">        rc = -EINPROGRESS;</a>
+<a name="ln1511">    }</a>
+<a name="ln1512"> </a>
+<a name="ln1513">    g_hash_table_remove(rsc_list, rsc_id);</a>
+<a name="ln1514"> </a>
+<a name="ln1515">    return rc;</a>
+<a name="ln1516">}</a>
+<a name="ln1517"> </a>
+<a name="ln1518">static int</a>
+<a name="ln1519">process_lrmd_rsc_exec(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1520">{</a>
+<a name="ln1521">    lrmd_rsc_t *rsc = NULL;</a>
+<a name="ln1522">    lrmd_cmd_t *cmd = NULL;</a>
+<a name="ln1523">    xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, request, LOG_ERR);</a>
+<a name="ln1524">    const char *rsc_id = crm_element_value(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln1525">    int call_id;</a>
+<a name="ln1526"> </a>
+<a name="ln1527">    if (!rsc_id) {</a>
+<a name="ln1528">        return -EINVAL;</a>
+<a name="ln1529">    }</a>
+<a name="ln1530">    if (!(rsc = g_hash_table_lookup(rsc_list, rsc_id))) {</a>
+<a name="ln1531">        crm_info(&quot;Resource '%s' not found (%d active resources)&quot;,</a>
+<a name="ln1532">                 rsc_id, g_hash_table_size(rsc_list));</a>
+<a name="ln1533">        return -ENODEV;</a>
+<a name="ln1534">    }</a>
+<a name="ln1535"> </a>
+<a name="ln1536">    cmd = create_lrmd_cmd(request, client, rsc);</a>
+<a name="ln1537">    call_id = cmd-&gt;call_id;</a>
+<a name="ln1538"> </a>
+<a name="ln1539">    /* Don't reference cmd after handing it off to be scheduled.</a>
+<a name="ln1540">     * The cmd could get merged and freed. */</a>
+<a name="ln1541">    schedule_lrmd_cmd(rsc, cmd);</a>
+<a name="ln1542"> </a>
+<a name="ln1543">    return call_id;</a>
+<a name="ln1544">}</a>
+<a name="ln1545"> </a>
+<a name="ln1546">static int</a>
+<a name="ln1547">cancel_op(const char *rsc_id, const char *action, int interval)</a>
+<a name="ln1548">{</a>
+<a name="ln1549">    GListPtr gIter = NULL;</a>
+<a name="ln1550">    lrmd_rsc_t *rsc = g_hash_table_lookup(rsc_list, rsc_id);</a>
+<a name="ln1551"> </a>
+<a name="ln1552">    /* How to cancel an action.</a>
+<a name="ln1553">     * 1. Check pending ops list, if it hasn't been handed off</a>
+<a name="ln1554">     *    to the service library or stonith recurring list remove</a>
+<a name="ln1555">     *    it there and that will stop it.</a>
+<a name="ln1556">     * 2. If it isn't in the pending ops list, then it's either a</a>
+<a name="ln1557">     *    recurring op in the stonith recurring list, or the service</a>
+<a name="ln1558">     *    library's recurring list.  Stop it there</a>
+<a name="ln1559">     * 3. If not found in any lists, then this operation has either</a>
+<a name="ln1560">     *    been executed already and is not a recurring operation, or</a>
+<a name="ln1561">     *    never existed.</a>
+<a name="ln1562">     */</a>
+<a name="ln1563">    if (!rsc) {</a>
+<a name="ln1564">        return -ENODEV;</a>
+<a name="ln1565">    }</a>
+<a name="ln1566"> </a>
+<a name="ln1567">    for (gIter = rsc-&gt;pending_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1568">        lrmd_cmd_t *cmd = gIter-&gt;data;</a>
+<a name="ln1569"> </a>
+<a name="ln1570">        if (safe_str_eq(cmd-&gt;action, action) &amp;&amp; cmd-&gt;interval == interval) {</a>
+<a name="ln1571">            cmd-&gt;lrmd_op_status = PCMK_LRM_OP_CANCELLED;</a>
+<a name="ln1572">            cmd_finalize(cmd, rsc);</a>
+<a name="ln1573">            return pcmk_ok;</a>
+<a name="ln1574">        }</a>
+<a name="ln1575">    }</a>
+<a name="ln1576"> </a>
+<a name="ln1577">    if (safe_str_eq(rsc-&gt;class, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln1578">        /* The service library does not handle stonith operations.</a>
+<a name="ln1579">         * We have to handle recurring stonith operations ourselves. */</a>
+<a name="ln1580">        for (gIter = rsc-&gt;recurring_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1581">            lrmd_cmd_t *cmd = gIter-&gt;data;</a>
+<a name="ln1582"> </a>
+<a name="ln1583">            if (safe_str_eq(cmd-&gt;action, action) &amp;&amp; cmd-&gt;interval == interval) {</a>
+<a name="ln1584">                cmd-&gt;lrmd_op_status = PCMK_LRM_OP_CANCELLED;</a>
+<a name="ln1585">                if (rsc-&gt;active != cmd) {</a>
+<a name="ln1586">                    cmd_finalize(cmd, rsc);</a>
+<a name="ln1587">                }</a>
+<a name="ln1588">                return pcmk_ok;</a>
+<a name="ln1589">            }</a>
+<a name="ln1590">        }</a>
+<a name="ln1591">    } else if (services_action_cancel(rsc_id, normalize_action_name(rsc, action), interval) == TRUE) {</a>
+<a name="ln1592">        /* The service library will tell the action_complete callback function</a>
+<a name="ln1593">         * this action was cancelled, which will destroy the cmd and remove</a>
+<a name="ln1594">         * it from the recurring_op list. Do not do that in this function</a>
+<a name="ln1595">         * if the service library says it cancelled it. */</a>
+<a name="ln1596">        return pcmk_ok;</a>
+<a name="ln1597">    }</a>
+<a name="ln1598"> </a>
+<a name="ln1599">    return -EOPNOTSUPP;</a>
+<a name="ln1600">}</a>
+<a name="ln1601"> </a>
+<a name="ln1602">static void</a>
+<a name="ln1603">cancel_all_recurring(lrmd_rsc_t * rsc, const char *client_id)</a>
+<a name="ln1604">{</a>
+<a name="ln1605">    GList *cmd_list = NULL;</a>
+<a name="ln1606">    GList *cmd_iter = NULL;</a>
+<a name="ln1607"> </a>
+<a name="ln1608">    /* Notice a copy of each list is created when concat is called.</a>
+<a name="ln1609">     * This prevents odd behavior from occurring when the cmd_list</a>
+<a name="ln1610">     * is iterated through later on.  It is possible the cancel_op</a>
+<a name="ln1611">     * function may end up modifying the recurring_ops and pending_ops</a>
+<a name="ln1612">     * lists.  If we did not copy those lists, our cmd_list iteration</a>
+<a name="ln1613">     * could get messed up.*/</a>
+<a name="ln1614">    if (rsc-&gt;recurring_ops) {</a>
+<a name="ln1615">        cmd_list = g_list_concat(cmd_list, g_list_copy(rsc-&gt;recurring_ops));</a>
+<a name="ln1616">    }</a>
+<a name="ln1617">    if (rsc-&gt;pending_ops) {</a>
+<a name="ln1618">        cmd_list = g_list_concat(cmd_list, g_list_copy(rsc-&gt;pending_ops));</a>
+<a name="ln1619">    }</a>
+<a name="ln1620">    if (!cmd_list) {</a>
+<a name="ln1621">        return;</a>
+<a name="ln1622">    }</a>
+<a name="ln1623"> </a>
+<a name="ln1624">    for (cmd_iter = cmd_list; cmd_iter; cmd_iter = cmd_iter-&gt;next) {</a>
+<a name="ln1625">        lrmd_cmd_t *cmd = cmd_iter-&gt;data;</a>
+<a name="ln1626"> </a>
+<a name="ln1627">        if (cmd-&gt;interval == 0) {</a>
+<a name="ln1628">            continue;</a>
+<a name="ln1629">        }</a>
+<a name="ln1630"> </a>
+<a name="ln1631">        if (client_id &amp;&amp; safe_str_neq(cmd-&gt;client_id, client_id)) {</a>
+<a name="ln1632">            continue;</a>
+<a name="ln1633">        }</a>
+<a name="ln1634"> </a>
+<a name="ln1635">        cancel_op(rsc-&gt;rsc_id, cmd-&gt;action, cmd-&gt;interval);</a>
+<a name="ln1636">    }</a>
+<a name="ln1637">    /* frees only the copied list data, not the cmds */</a>
+<a name="ln1638">    g_list_free(cmd_list);</a>
+<a name="ln1639">}</a>
+<a name="ln1640"> </a>
+<a name="ln1641">static int</a>
+<a name="ln1642">process_lrmd_rsc_cancel(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1643">{</a>
+<a name="ln1644">    xmlNode *rsc_xml = get_xpath_object(&quot;//&quot; F_LRMD_RSC, request, LOG_ERR);</a>
+<a name="ln1645">    const char *rsc_id = crm_element_value(rsc_xml, F_LRMD_RSC_ID);</a>
+<a name="ln1646">    const char *action = crm_element_value(rsc_xml, F_LRMD_RSC_ACTION);</a>
+<a name="ln1647">    int interval = 0;</a>
+<a name="ln1648"> </a>
+<a name="ln1649">    crm_element_value_int(rsc_xml, F_LRMD_RSC_INTERVAL, &amp;interval);</a>
+<a name="ln1650"> </a>
+<a name="ln1651">    if (!rsc_id || !action) {</a>
+<a name="ln1652">        return -EINVAL;</a>
+<a name="ln1653">    }</a>
+<a name="ln1654"> </a>
+<a name="ln1655">    return cancel_op(rsc_id, action, interval);</a>
+<a name="ln1656">}</a>
+<a name="ln1657"> </a>
+<a name="ln1658">void</a>
+<a name="ln1659">process_lrmd_message(crm_client_t * client, uint32_t id, xmlNode * request)</a>
+<a name="ln1660">{</a>
+<a name="ln1661">    int rc = pcmk_ok;</a>
+<a name="ln1662">    int call_id = 0;</a>
+<a name="ln1663">    const char *op = crm_element_value(request, F_LRMD_OPERATION);</a>
+<a name="ln1664">    int do_reply = 0;</a>
+<a name="ln1665">    int do_notify = 0;</a>
+<a name="ln1666"> </a>
+<a name="ln1667">    crm_trace(&quot;Processing %s operation from %s&quot;, op, client-&gt;id);</a>
+<a name="ln1668">    crm_element_value_int(request, F_LRMD_CALLID, &amp;call_id);</a>
+<a name="ln1669"> </a>
+<a name="ln1670">    if (crm_str_eq(op, CRM_OP_IPC_FWD, TRUE)) {</a>
+<a name="ln1671">#ifdef SUPPORT_REMOTE</a>
+<a name="ln1672">        ipc_proxy_forward_client(client, request);</a>
+<a name="ln1673">#endif</a>
+<a name="ln1674">        do_reply = 1;</a>
+<a name="ln1675">    } else if (crm_str_eq(op, CRM_OP_REGISTER, TRUE)) {</a>
+<a name="ln1676">        rc = process_lrmd_signon(client, id, request);</a>
+<a name="ln1677">    } else if (crm_str_eq(op, LRMD_OP_RSC_REG, TRUE)) {</a>
+<a name="ln1678">        rc = process_lrmd_rsc_register(client, id, request);</a>
+<a name="ln1679">        do_notify = 1;</a>
+<a name="ln1680">        do_reply = 1;</a>
+<a name="ln1681">    } else if (crm_str_eq(op, LRMD_OP_RSC_INFO, TRUE)) {</a>
+<a name="ln1682">        process_lrmd_get_rsc_info(client, id, request);</a>
+<a name="ln1683">    } else if (crm_str_eq(op, LRMD_OP_RSC_UNREG, TRUE)) {</a>
+<a name="ln1684">        rc = process_lrmd_rsc_unregister(client, id, request);</a>
+<a name="ln1685">        /* don't notify anyone about failed un-registers */</a>
+<a name="ln1686">        if (rc == pcmk_ok || rc == -EINPROGRESS) {</a>
+<a name="ln1687">            do_notify = 1;</a>
+<a name="ln1688">        }</a>
+<a name="ln1689">        do_reply = 1;</a>
+<a name="ln1690">    } else if (crm_str_eq(op, LRMD_OP_RSC_EXEC, TRUE)) {</a>
+<a name="ln1691">        rc = process_lrmd_rsc_exec(client, id, request);</a>
+<a name="ln1692">        do_reply = 1;</a>
+<a name="ln1693">    } else if (crm_str_eq(op, LRMD_OP_RSC_CANCEL, TRUE)) {</a>
+<a name="ln1694">        rc = process_lrmd_rsc_cancel(client, id, request);</a>
+<a name="ln1695">        do_reply = 1;</a>
+<a name="ln1696">    } else if (crm_str_eq(op, LRMD_OP_POKE, TRUE)) {</a>
+<a name="ln1697">        do_notify = 1;</a>
+<a name="ln1698">        do_reply = 1;</a>
+<a name="ln1699">    } else if (crm_str_eq(op, LRMD_OP_CHECK, TRUE)) {</a>
+<a name="ln1700">        xmlNode *data = get_message_xml(request, F_LRMD_CALLDATA); </a>
+<a name="ln1701">        const char *timeout = crm_element_value(data, F_LRMD_WATCHDOG);</a>
+<a name="ln1702">        CRM_LOG_ASSERT(data != NULL);</a>
+<a name="ln1703">        check_sbd_timeout(timeout);</a>
+<a name="ln1704">    } else {</a>
+<a name="ln1705">        rc = -EOPNOTSUPP;</a>
+<a name="ln1706">        do_reply = 1;</a>
+<a name="ln1707">        crm_err(&quot;Unknown %s from %s&quot;, op, client-&gt;name);</a>
+<a name="ln1708">        crm_log_xml_warn(request, &quot;UnknownOp&quot;);</a>
+<a name="ln1709">    }</a>
+<a name="ln1710"> </a>
+<a name="ln1711">    crm_debug(&quot;Processed %s operation from %s: rc=%d, reply=%d, notify=%d&quot;,</a>
+<a name="ln1712">              op, client-&gt;id, rc, do_reply, do_notify);</a>
+<a name="ln1713"> </a>
+<a name="ln1714">    if (do_reply) {</a>
+<a name="ln1715">        send_reply(client, rc, id, call_id);</a>
+<a name="ln1716">    }</a>
+<a name="ln1717"> </a>
+<a name="ln1718">    if (do_notify) {</a>
+<a name="ln1719">        send_generic_notify(rc, request);</a>
+<a name="ln1720">    }</a>
+<a name="ln1721">}</a>
+
+</code></pre>
+<div class="balloon" rel="158"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'rsc'. Check lines: 158, 156.</p></div>
+<div class="balloon" rel="171"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 171, 171.</p></div>
+<div class="balloon" rel="184"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cmd'. Check lines: 184, 181.</p></div>
+<div class="balloon" rel="203"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 203, 203.</p></div>
+<div class="balloon" rel="206"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 206, 206.</p></div>
+<div class="balloon" rel="208"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 208, 208.</p></div>
+<div class="balloon" rel="209"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 209, 209.</p></div>
+<div class="balloon" rel="371"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V1004/" target="_blank">V1004</a> The 'rsc' pointer was used unsafely after it was verified against nullptr. Check lines: 367, 371.</p></div>
+<div class="balloon" rel="1421"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'rsc'. Check lines: 1421, 156.</p></div>
+<div class="balloon" rel="1537"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cmd'. Check lines: 1537, 181.</p></div>
+<div class="balloon" rel="1615"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'g_list_concat' function. Inspect the first argument.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

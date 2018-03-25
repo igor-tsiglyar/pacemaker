@@ -1,0 +1,1297 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#ifndef _GNU_SOURCE</a>
+<a name="ln26">#  define _GNU_SOURCE</a>
+<a name="ln27">#endif</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;stdlib.h&gt;</a>
+<a name="ln30">#include &lt;signal.h&gt;</a>
+<a name="ln31">#include &lt;errno.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;sys/wait.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;crm/crm.h&gt;</a>
+<a name="ln36">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln37">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln38">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln39"> </a>
+<a name="ln40">#include &lt;qb/qbarray.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">struct mainloop_child_s {</a>
+<a name="ln43">    pid_t pid;</a>
+<a name="ln44">    char *desc;</a>
+<a name="ln45">    unsigned timerid;</a>
+<a name="ln46">    unsigned watchid;</a>
+<a name="ln47">    gboolean timeout;</a>
+<a name="ln48">    void *privatedata;</a>
+<a name="ln49"> </a>
+<a name="ln50">    enum mainloop_child_flags flags;</a>
+<a name="ln51"> </a>
+<a name="ln52">    /* Called when a process dies */</a>
+<a name="ln53">    void (*callback) (mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode);</a>
+<a name="ln54">};</a>
+<a name="ln55"> </a>
+<a name="ln56">struct trigger_s {</a>
+<a name="ln57">    GSource source;</a>
+<a name="ln58">    gboolean running;</a>
+<a name="ln59">    gboolean trigger;</a>
+<a name="ln60">    void *user_data;</a>
+<a name="ln61">    guint id;</a>
+<a name="ln62"> </a>
+<a name="ln63">};</a>
+<a name="ln64"> </a>
+<a name="ln65">static gboolean</a>
+<a name="ln66">crm_trigger_prepare(GSource * source, gint * timeout)</a>
+<a name="ln67">{</a>
+<a name="ln68">    crm_trigger_t *trig = (crm_trigger_t *) source;</a>
+<a name="ln69"> </a>
+<a name="ln70">    /* cluster-glue's FD and IPC related sources make use of</a>
+<a name="ln71">     * g_source_add_poll() but do not set a timeout in their prepare</a>
+<a name="ln72">     * functions</a>
+<a name="ln73">     *</a>
+<a name="ln74">     * This means mainloop's poll() will block until an event for one</a>
+<a name="ln75">     * of these sources occurs - any /other/ type of source, such as</a>
+<a name="ln76">     * this one or g_idle_*, that doesn't use g_source_add_poll() is</a>
+<a name="ln77">     * S-O-L and won't be processed until there is something fd-based</a>
+<a name="ln78">     * happens.</a>
+<a name="ln79">     *</a>
+<a name="ln80">     * Luckily the timeout we can set here affects all sources and</a>
+<a name="ln81">     * puts an upper limit on how long poll() can take.</a>
+<a name="ln82">     *</a>
+<a name="ln83">     * So unconditionally set a small-ish timeout, not too small that</a>
+<a name="ln84">     * we're in constant motion, which will act as an upper bound on</a>
+<a name="ln85">     * how long the signal handling might be delayed for.</a>
+<a name="ln86">     */</a>
+<a name="ln87">    *timeout = 500;             /* Timeout in ms */</a>
+<a name="ln88"> </a>
+<a name="ln89">    return trig-&gt;trigger;</a>
+<a name="ln90">}</a>
+<a name="ln91"> </a>
+<a name="ln92">static gboolean</a>
+<a name="ln93">crm_trigger_check(GSource * source)</a>
+<a name="ln94">{</a>
+<a name="ln95">    crm_trigger_t *trig = (crm_trigger_t *) source;</a>
+<a name="ln96"> </a>
+<a name="ln97">    return trig-&gt;trigger;</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">static gboolean</a>
+<a name="ln101">crm_trigger_dispatch(GSource * source, GSourceFunc callback, gpointer userdata)</a>
+<a name="ln102">{</a>
+<a name="ln103">    int rc = TRUE;</a>
+<a name="ln104">    crm_trigger_t *trig = (crm_trigger_t *) source;</a>
+<a name="ln105"> </a>
+<a name="ln106">    if (trig-&gt;running) {</a>
+<a name="ln107">        /* Wait until the existing job is complete before starting the next one */</a>
+<a name="ln108">        return TRUE;</a>
+<a name="ln109">    }</a>
+<a name="ln110">    trig-&gt;trigger = FALSE;</a>
+<a name="ln111"> </a>
+<a name="ln112">    if (callback) {</a>
+<a name="ln113">        rc = callback(trig-&gt;user_data);</a>
+<a name="ln114">        if (rc &lt; 0) {</a>
+<a name="ln115">            crm_trace(&quot;Trigger handler %p not yet complete&quot;, trig);</a>
+<a name="ln116">            trig-&gt;running = TRUE;</a>
+<a name="ln117">            rc = TRUE;</a>
+<a name="ln118">        }</a>
+<a name="ln119">    }</a>
+<a name="ln120">    return rc;</a>
+<a name="ln121">}</a>
+<a name="ln122"> </a>
+<a name="ln123">static void</a>
+<a name="ln124">crm_trigger_finalize(GSource * source)</a>
+<a name="ln125">{</a>
+<a name="ln126">    crm_trace(&quot;Trigger %p destroyed&quot;, source);</a>
+<a name="ln127">}</a>
+<a name="ln128"> </a>
+<a name="ln129">#if 0</a>
+<a name="ln130">struct _GSourceCopy</a>
+<a name="ln131">{</a>
+<a name="ln132">  gpointer callback_data;</a>
+<a name="ln133">  GSourceCallbackFuncs *callback_funcs;</a>
+<a name="ln134"> </a>
+<a name="ln135">  const GSourceFuncs *source_funcs;</a>
+<a name="ln136">  guint ref_count;</a>
+<a name="ln137"> </a>
+<a name="ln138">  GMainContext *context;</a>
+<a name="ln139"> </a>
+<a name="ln140">  gint priority;</a>
+<a name="ln141">  guint flags;</a>
+<a name="ln142">  guint source_id;</a>
+<a name="ln143"> </a>
+<a name="ln144">  GSList *poll_fds;</a>
+<a name="ln145">  </a>
+<a name="ln146">  GSource *prev;</a>
+<a name="ln147">  GSource *next;</a>
+<a name="ln148"> </a>
+<a name="ln149">  char    *name;</a>
+<a name="ln150"> </a>
+<a name="ln151">  void *priv;</a>
+<a name="ln152">};</a>
+<a name="ln153"> </a>
+<a name="ln154">static int</a>
+<a name="ln155">g_source_refcount(GSource * source)</a>
+<a name="ln156">{</a>
+<a name="ln157">    /* Duplicating the contents of private header files is a necessary evil */</a>
+<a name="ln158">    if (source) {</a>
+<a name="ln159">        struct _GSourceCopy *evil = (struct _GSourceCopy*)source;</a>
+<a name="ln160">        return evil-&gt;ref_count;</a>
+<a name="ln161">    }</a>
+<a name="ln162">    return 0;</a>
+<a name="ln163">}</a>
+<a name="ln164">#else</a>
+<a name="ln165">static int g_source_refcount(GSource * source)</a>
+<a name="ln166">{</a>
+<a name="ln167">    return 0;</a>
+<a name="ln168">}</a>
+<a name="ln169">#endif</a>
+<a name="ln170"> </a>
+<a name="ln171">static GSourceFuncs crm_trigger_funcs = {</a>
+<a name="ln172">    crm_trigger_prepare,</a>
+<a name="ln173">    crm_trigger_check,</a>
+<a name="ln174">    crm_trigger_dispatch,</a>
+<a name="ln175">    crm_trigger_finalize,</a>
+<a name="ln176">};</a>
+<a name="ln177"> </a>
+<a name="ln178">static crm_trigger_t *</a>
+<a name="ln179">mainloop_setup_trigger(GSource * source, int priority, int (*dispatch) (gpointer user_data),</a>
+<a name="ln180">                       gpointer userdata)</a>
+<a name="ln181">{</a>
+<a name="ln182">    crm_trigger_t *trigger = NULL;</a>
+<a name="ln183"> </a>
+<a name="ln184">    trigger = (crm_trigger_t *) source;</a>
+<a name="ln185"> </a>
+<a name="ln186">    trigger-&gt;id = 0;</a>
+<a name="ln187">    trigger-&gt;trigger = FALSE;</a>
+<a name="ln188">    trigger-&gt;user_data = userdata;</a>
+<a name="ln189"> </a>
+<a name="ln190">    if (dispatch) {</a>
+<a name="ln191">        g_source_set_callback(source, dispatch, trigger, NULL);</a>
+<a name="ln192">    }</a>
+<a name="ln193"> </a>
+<a name="ln194">    g_source_set_priority(source, priority);</a>
+<a name="ln195">    g_source_set_can_recurse(source, FALSE);</a>
+<a name="ln196"> </a>
+<a name="ln197">    crm_trace(&quot;Setup %p with ref-count=%u&quot;, source, g_source_refcount(source));</a>
+<a name="ln198">    trigger-&gt;id = g_source_attach(source, NULL);</a>
+<a name="ln199">    crm_trace(&quot;Attached %p with ref-count=%u&quot;, source, g_source_refcount(source));</a>
+<a name="ln200"> </a>
+<a name="ln201">    return trigger;</a>
+<a name="ln202">}</a>
+<a name="ln203"> </a>
+<a name="ln204">void</a>
+<a name="ln205">mainloop_trigger_complete(crm_trigger_t * trig)</a>
+<a name="ln206">{</a>
+<a name="ln207">    crm_trace(&quot;Trigger handler %p complete&quot;, trig);</a>
+<a name="ln208">    trig-&gt;running = FALSE;</a>
+<a name="ln209">}</a>
+<a name="ln210"> </a>
+<a name="ln211">/* If dispatch returns:</a>
+<a name="ln212"> *  -1: Job running but not complete</a>
+<a name="ln213"> *   0: Remove the trigger from mainloop</a>
+<a name="ln214"> *   1: Leave the trigger in mainloop</a>
+<a name="ln215"> */</a>
+<a name="ln216">crm_trigger_t *</a>
+<a name="ln217">mainloop_add_trigger(int priority, int (*dispatch) (gpointer user_data), gpointer userdata)</a>
+<a name="ln218">{</a>
+<a name="ln219">    GSource *source = NULL;</a>
+<a name="ln220"> </a>
+<a name="ln221">    CRM_ASSERT(sizeof(crm_trigger_t) &gt; sizeof(GSource));</a>
+<a name="ln222">    source = g_source_new(&amp;crm_trigger_funcs, sizeof(crm_trigger_t));</a>
+<a name="ln223">    CRM_ASSERT(source != NULL);</a>
+<a name="ln224"> </a>
+<a name="ln225">    return mainloop_setup_trigger(source, priority, dispatch, userdata);</a>
+<a name="ln226">}</a>
+<a name="ln227"> </a>
+<a name="ln228">void</a>
+<a name="ln229">mainloop_set_trigger(crm_trigger_t * source)</a>
+<a name="ln230">{</a>
+<a name="ln231">    if(source) {</a>
+<a name="ln232">        source-&gt;trigger = TRUE;</a>
+<a name="ln233">    }</a>
+<a name="ln234">}</a>
+<a name="ln235"> </a>
+<a name="ln236">gboolean</a>
+<a name="ln237">mainloop_destroy_trigger(crm_trigger_t * source)</a>
+<a name="ln238">{</a>
+<a name="ln239">    GSource *gs = NULL;</a>
+<a name="ln240"> </a>
+<a name="ln241">    if(source == NULL) {</a>
+<a name="ln242">        return TRUE;</a>
+<a name="ln243">    }</a>
+<a name="ln244"> </a>
+<a name="ln245">    gs = (GSource *)source;</a>
+<a name="ln246"> </a>
+<a name="ln247">    if(g_source_refcount(gs) &gt; 2) {</a>
+<a name="ln248">        crm_info(&quot;Trigger %p is still referenced %u times&quot;, gs, g_source_refcount(gs));</a>
+<a name="ln249">    }</a>
+<a name="ln250"> </a>
+<a name="ln251">    g_source_destroy(gs); /* Remove from mainloop, ref_count-- */</a>
+<a name="ln252">    g_source_unref(gs); /* The caller no longer carries a reference to source</a>
+<a name="ln253">                         *</a>
+<a name="ln254">                         * At this point the source should be free'd,</a>
+<a name="ln255">                         * unless we're currently processing said</a>
+<a name="ln256">                         * source, in which case mainloop holds an</a>
+<a name="ln257">                         * additional reference and it will be free'd</a>
+<a name="ln258">                         * once our processing completes</a>
+<a name="ln259">                         */</a>
+<a name="ln260">    return TRUE;</a>
+<a name="ln261">}</a>
+<a name="ln262"> </a>
+<a name="ln263">typedef struct signal_s {</a>
+<a name="ln264">    crm_trigger_t trigger;      /* must be first */</a>
+<a name="ln265">    void (*handler) (int sig);</a>
+<a name="ln266">    int signal;</a>
+<a name="ln267"> </a>
+<a name="ln268">} crm_signal_t;</a>
+<a name="ln269"> </a>
+<a name="ln270">static crm_signal_t *crm_signals[NSIG];</a>
+<a name="ln271"> </a>
+<a name="ln272">static gboolean</a>
+<a name="ln273">crm_signal_dispatch(GSource * source, GSourceFunc callback, gpointer userdata)</a>
+<a name="ln274">{</a>
+<a name="ln275">    crm_signal_t *sig = (crm_signal_t *) source;</a>
+<a name="ln276"> </a>
+<a name="ln277">    if(sig-&gt;signal != SIGCHLD) {</a>
+<a name="ln278">        crm_notice(&quot;Caught '%s' signal &quot;CRM_XS&quot; %d (%s handler)&quot;,</a>
+<a name="ln279">                   strsignal(sig-&gt;signal), sig-&gt;signal,</a>
+<a name="ln280">                   (sig-&gt;handler? &quot;invoking&quot; : &quot;no&quot;));</a>
+<a name="ln281">    }</a>
+<a name="ln282"> </a>
+<a name="ln283">    sig-&gt;trigger.trigger = FALSE;</a>
+<a name="ln284">    if (sig-&gt;handler) {</a>
+<a name="ln285">        sig-&gt;handler(sig-&gt;signal);</a>
+<a name="ln286">    }</a>
+<a name="ln287">    return TRUE;</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">static void</a>
+<a name="ln291">mainloop_signal_handler(int sig)</a>
+<a name="ln292">{</a>
+<a name="ln293">    if (sig &gt; 0 &amp;&amp; sig &lt; NSIG &amp;&amp; crm_signals[sig] != NULL) {</a>
+<a name="ln294">        mainloop_set_trigger((crm_trigger_t *) crm_signals[sig]);</a>
+<a name="ln295">    }</a>
+<a name="ln296">}</a>
+<a name="ln297"> </a>
+<a name="ln298">static GSourceFuncs crm_signal_funcs = {</a>
+<a name="ln299">    crm_trigger_prepare,</a>
+<a name="ln300">    crm_trigger_check,</a>
+<a name="ln301">    crm_signal_dispatch,</a>
+<a name="ln302">    crm_trigger_finalize,</a>
+<a name="ln303">};</a>
+<a name="ln304"> </a>
+<a name="ln305">gboolean</a>
+<a name="ln306">crm_signal(int sig, void (*dispatch) (int sig))</a>
+<a name="ln307">{</a>
+<a name="ln308">    sigset_t mask;</a>
+<a name="ln309">    struct sigaction sa;</a>
+<a name="ln310">    struct sigaction old;</a>
+<a name="ln311"> </a>
+<a name="ln312">    if (sigemptyset(&amp;mask) &lt; 0) {</a>
+<a name="ln313">        crm_perror(LOG_ERR, &quot;Call to sigemptyset failed&quot;);</a>
+<a name="ln314">        return FALSE;</a>
+<a name="ln315">    }</a>
+<a name="ln316"> </a>
+<a name="ln317">    memset(&amp;sa, 0, sizeof(struct sigaction));</a>
+<a name="ln318">    sa.sa_handler = dispatch;</a>
+<a name="ln319">    sa.sa_flags = SA_RESTART;</a>
+<a name="ln320">    sa.sa_mask = mask;</a>
+<a name="ln321"> </a>
+<a name="ln322">    if (sigaction(sig, &amp;sa, &amp;old) &lt; 0) {</a>
+<a name="ln323">        crm_perror(LOG_ERR, &quot;Could not install signal handler for signal %d&quot;, sig);</a>
+<a name="ln324">        return FALSE;</a>
+<a name="ln325">    }</a>
+<a name="ln326"> </a>
+<a name="ln327">    return TRUE;</a>
+<a name="ln328">}</a>
+<a name="ln329"> </a>
+<a name="ln330">gboolean</a>
+<a name="ln331">mainloop_add_signal(int sig, void (*dispatch) (int sig))</a>
+<a name="ln332">{</a>
+<a name="ln333">    GSource *source = NULL;</a>
+<a name="ln334">    int priority = G_PRIORITY_HIGH - 1;</a>
+<a name="ln335"> </a>
+<a name="ln336">    if (sig == SIGTERM) {</a>
+<a name="ln337">        /* TERM is higher priority than other signals,</a>
+<a name="ln338">         *   signals are higher priority than other ipc.</a>
+<a name="ln339">         * Yes, minus: smaller is &quot;higher&quot;</a>
+<a name="ln340">         */</a>
+<a name="ln341">        priority--;</a>
+<a name="ln342">    }</a>
+<a name="ln343"> </a>
+<a name="ln344">    if (sig &gt;= NSIG || sig &lt; 0) {</a>
+<a name="ln345">        crm_err(&quot;Signal %d is out of range&quot;, sig);</a>
+<a name="ln346">        return FALSE;</a>
+<a name="ln347"> </a>
+<a name="ln348">    } else if (crm_signals[sig] != NULL &amp;&amp; crm_signals[sig]-&gt;handler == dispatch) {</a>
+<a name="ln349">        crm_trace(&quot;Signal handler for %d is already installed&quot;, sig);</a>
+<a name="ln350">        return TRUE;</a>
+<a name="ln351"> </a>
+<a name="ln352">    } else if (crm_signals[sig] != NULL) {</a>
+<a name="ln353">        crm_err(&quot;Different signal handler for %d is already installed&quot;, sig);</a>
+<a name="ln354">        return FALSE;</a>
+<a name="ln355">    }</a>
+<a name="ln356"> </a>
+<a name="ln357">    CRM_ASSERT(sizeof(crm_signal_t) &gt; sizeof(GSource));</a>
+<a name="ln358">    source = g_source_new(&amp;crm_signal_funcs, sizeof(crm_signal_t));</a>
+<a name="ln359"> </a>
+<a name="ln360">    crm_signals[sig] = (crm_signal_t *) mainloop_setup_trigger(source, priority, NULL, NULL);</a>
+<a name="ln361">    CRM_ASSERT(crm_signals[sig] != NULL);</a>
+<a name="ln362"> </a>
+<a name="ln363">    crm_signals[sig]-&gt;handler = dispatch;</a>
+<a name="ln364">    crm_signals[sig]-&gt;signal = sig;</a>
+<a name="ln365"> </a>
+<a name="ln366">    if (crm_signal(sig, mainloop_signal_handler) == FALSE) {</a>
+<a name="ln367">        crm_signal_t *tmp = crm_signals[sig];</a>
+<a name="ln368"> </a>
+<a name="ln369">        crm_signals[sig] = NULL;</a>
+<a name="ln370"> </a>
+<a name="ln371">        mainloop_destroy_trigger((crm_trigger_t *) tmp);</a>
+<a name="ln372">        return FALSE;</a>
+<a name="ln373">    }</a>
+<a name="ln374">#if 0</a>
+<a name="ln375">    /* If we want signals to interrupt mainloop's poll(), instead of waiting for</a>
+<a name="ln376">     * the timeout, then we should call siginterrupt() below</a>
+<a name="ln377">     *</a>
+<a name="ln378">     * For now, just enforce a low timeout</a>
+<a name="ln379">     */</a>
+<a name="ln380">    if (siginterrupt(sig, 1) &lt; 0) {</a>
+<a name="ln381">        crm_perror(LOG_INFO, &quot;Could not enable system call interruptions for signal %d&quot;, sig);</a>
+<a name="ln382">    }</a>
+<a name="ln383">#endif</a>
+<a name="ln384"> </a>
+<a name="ln385">    return TRUE;</a>
+<a name="ln386">}</a>
+<a name="ln387"> </a>
+<a name="ln388">gboolean</a>
+<a name="ln389">mainloop_destroy_signal(int sig)</a>
+<a name="ln390">{</a>
+<a name="ln391">    crm_signal_t *tmp = NULL;</a>
+<a name="ln392"> </a>
+<a name="ln393">    if (sig &gt;= NSIG || sig &lt; 0) {</a>
+<a name="ln394">        crm_err(&quot;Signal %d is out of range&quot;, sig);</a>
+<a name="ln395">        return FALSE;</a>
+<a name="ln396"> </a>
+<a name="ln397">    } else if (crm_signal(sig, NULL) == FALSE) {</a>
+<a name="ln398">        crm_perror(LOG_ERR, &quot;Could not uninstall signal handler for signal %d&quot;, sig);</a>
+<a name="ln399">        return FALSE;</a>
+<a name="ln400"> </a>
+<a name="ln401">    } else if (crm_signals[sig] == NULL) {</a>
+<a name="ln402">        return TRUE;</a>
+<a name="ln403">    }</a>
+<a name="ln404"> </a>
+<a name="ln405">    crm_trace(&quot;Destroying signal %d&quot;, sig);</a>
+<a name="ln406">    tmp = crm_signals[sig];</a>
+<a name="ln407">    crm_signals[sig] = NULL;</a>
+<a name="ln408">    mainloop_destroy_trigger((crm_trigger_t *) tmp);</a>
+<a name="ln409">    return TRUE;</a>
+<a name="ln410">}</a>
+<a name="ln411"> </a>
+<a name="ln412">static qb_array_t *gio_map = NULL;</a>
+<a name="ln413"> </a>
+<a name="ln414">void</a>
+<a name="ln415">mainloop_cleanup(void) </a>
+<a name="ln416">{</a>
+<a name="ln417">    if(gio_map) {</a>
+<a name="ln418">        qb_array_free(gio_map);</a>
+<a name="ln419">    }</a>
+<a name="ln420">}</a>
+<a name="ln421"> </a>
+<a name="ln422">/*</a>
+<a name="ln423"> * libqb...</a>
+<a name="ln424"> */</a>
+<a name="ln425">struct gio_to_qb_poll {</a>
+<a name="ln426">    int32_t is_used;</a>
+<a name="ln427">    guint source;</a>
+<a name="ln428">    int32_t events;</a>
+<a name="ln429">    void *data;</a>
+<a name="ln430">    qb_ipcs_dispatch_fn_t fn;</a>
+<a name="ln431">    enum qb_loop_priority p;</a>
+<a name="ln432">};</a>
+<a name="ln433"> </a>
+<a name="ln434">static gboolean</a>
+<a name="ln435">gio_read_socket(GIOChannel * gio, GIOCondition condition, gpointer data)</a>
+<a name="ln436">{</a>
+<a name="ln437">    struct gio_to_qb_poll *adaptor = (struct gio_to_qb_poll *)data;</a>
+<a name="ln438">    gint fd = g_io_channel_unix_get_fd(gio);</a>
+<a name="ln439"> </a>
+<a name="ln440">    crm_trace(&quot;%p.%d %d&quot;, data, fd, condition);</a>
+<a name="ln441"> </a>
+<a name="ln442">    /* if this assert get's hit, then there is a race condition between</a>
+<a name="ln443">     * when we destroy a fd and when mainloop actually gives it up */</a>
+<a name="ln444">    CRM_ASSERT(adaptor-&gt;is_used &gt; 0);</a>
+<a name="ln445"> </a>
+<a name="ln446">    return (adaptor-&gt;fn(fd, condition, adaptor-&gt;data) == 0);</a>
+<a name="ln447">}</a>
+<a name="ln448"> </a>
+<a name="ln449">static void</a>
+<a name="ln450">gio_poll_destroy(gpointer data)</a>
+<a name="ln451">{</a>
+<a name="ln452">    struct gio_to_qb_poll *adaptor = (struct gio_to_qb_poll *)data;</a>
+<a name="ln453"> </a>
+<a name="ln454">    adaptor-&gt;is_used--;</a>
+<a name="ln455">    CRM_ASSERT(adaptor-&gt;is_used &gt;= 0);</a>
+<a name="ln456"> </a>
+<a name="ln457">    if (adaptor-&gt;is_used == 0) {</a>
+<a name="ln458">        crm_trace(&quot;Marking adaptor %p unused&quot;, adaptor);</a>
+<a name="ln459">        adaptor-&gt;source = 0;</a>
+<a name="ln460">    }</a>
+<a name="ln461">}</a>
+<a name="ln462"> </a>
+<a name="ln463">static int32_t</a>
+<a name="ln464">gio_poll_dispatch_update(enum qb_loop_priority p, int32_t fd, int32_t evts,</a>
+<a name="ln465">                         void *data, qb_ipcs_dispatch_fn_t fn, int32_t add)</a>
+<a name="ln466">{</a>
+<a name="ln467">    struct gio_to_qb_poll *adaptor;</a>
+<a name="ln468">    GIOChannel *channel;</a>
+<a name="ln469">    int32_t res = 0;</a>
+<a name="ln470"> </a>
+<a name="ln471">    res = qb_array_index(gio_map, fd, (void **)&amp;adaptor);</a>
+<a name="ln472">    if (res &lt; 0) {</a>
+<a name="ln473">        crm_err(&quot;Array lookup failed for fd=%d: %d&quot;, fd, res);</a>
+<a name="ln474">        return res;</a>
+<a name="ln475">    }</a>
+<a name="ln476"> </a>
+<a name="ln477">    crm_trace(&quot;Adding fd=%d to mainloop as adaptor %p&quot;, fd, adaptor);</a>
+<a name="ln478"> </a>
+<a name="ln479">    if (add &amp;&amp; adaptor-&gt;source) {</a>
+<a name="ln480">        crm_err(&quot;Adaptor for descriptor %d is still in-use&quot;, fd);</a>
+<a name="ln481">        return -EEXIST;</a>
+<a name="ln482">    }</a>
+<a name="ln483">    if (!add &amp;&amp; !adaptor-&gt;is_used) {</a>
+<a name="ln484">        crm_err(&quot;Adaptor for descriptor %d is not in-use&quot;, fd);</a>
+<a name="ln485">        return -ENOENT;</a>
+<a name="ln486">    }</a>
+<a name="ln487"> </a>
+<a name="ln488">    /* channel is created with ref_count = 1 */</a>
+<a name="ln489">    channel = g_io_channel_unix_new(fd);</a>
+<a name="ln490">    if (!channel) {</a>
+<a name="ln491">        crm_err(&quot;No memory left to add fd=%d&quot;, fd);</a>
+<a name="ln492">        return -ENOMEM;</a>
+<a name="ln493">    }</a>
+<a name="ln494"> </a>
+<a name="ln495">    if (adaptor-&gt;source) {</a>
+<a name="ln496">        g_source_remove(adaptor-&gt;source);</a>
+<a name="ln497">        adaptor-&gt;source = 0;</a>
+<a name="ln498">    }</a>
+<a name="ln499"> </a>
+<a name="ln500">    /* Because unlike the poll() API, glib doesn't tell us about HUPs by default */</a>
+<a name="ln501">    evts |= (G_IO_HUP | G_IO_NVAL | G_IO_ERR);</a>
+<a name="ln502"> </a>
+<a name="ln503">    adaptor-&gt;fn = fn;</a>
+<a name="ln504">    adaptor-&gt;events = evts;</a>
+<a name="ln505">    adaptor-&gt;data = data;</a>
+<a name="ln506">    adaptor-&gt;p = p;</a>
+<a name="ln507">    adaptor-&gt;is_used++;</a>
+<a name="ln508">    adaptor-&gt;source =</a>
+<a name="ln509">        g_io_add_watch_full(channel, G_PRIORITY_DEFAULT, evts, gio_read_socket, adaptor,</a>
+<a name="ln510">                            gio_poll_destroy);</a>
+<a name="ln511"> </a>
+<a name="ln512">    /* Now that mainloop now holds a reference to channel,</a>
+<a name="ln513">     * thanks to g_io_add_watch_full(), drop ours from g_io_channel_unix_new().</a>
+<a name="ln514">     *</a>
+<a name="ln515">     * This means that channel will be free'd by:</a>
+<a name="ln516">     * g_main_context_dispatch()</a>
+<a name="ln517">     *  -&gt; g_source_destroy_internal()</a>
+<a name="ln518">     *      -&gt; g_source_callback_unref()</a>
+<a name="ln519">     * shortly after gio_poll_destroy() completes</a>
+<a name="ln520">     */</a>
+<a name="ln521">    g_io_channel_unref(channel);</a>
+<a name="ln522"> </a>
+<a name="ln523">    crm_trace(&quot;Added to mainloop with gsource id=%d&quot;, adaptor-&gt;source);</a>
+<a name="ln524">    if (adaptor-&gt;source &gt; 0) {</a>
+<a name="ln525">        return 0;</a>
+<a name="ln526">    }</a>
+<a name="ln527"> </a>
+<a name="ln528">    return -EINVAL;</a>
+<a name="ln529">}</a>
+<a name="ln530"> </a>
+<a name="ln531">static int32_t</a>
+<a name="ln532">gio_poll_dispatch_add(enum qb_loop_priority p, int32_t fd, int32_t evts,</a>
+<a name="ln533">                      void *data, qb_ipcs_dispatch_fn_t fn)</a>
+<a name="ln534">{</a>
+<a name="ln535">    return gio_poll_dispatch_update(p, fd, evts, data, fn, QB_TRUE);</a>
+<a name="ln536">}</a>
+<a name="ln537"> </a>
+<a name="ln538">static int32_t</a>
+<a name="ln539">gio_poll_dispatch_mod(enum qb_loop_priority p, int32_t fd, int32_t evts,</a>
+<a name="ln540">                      void *data, qb_ipcs_dispatch_fn_t fn)</a>
+<a name="ln541">{</a>
+<a name="ln542">    return gio_poll_dispatch_update(p, fd, evts, data, fn, QB_FALSE);</a>
+<a name="ln543">}</a>
+<a name="ln544"> </a>
+<a name="ln545">static int32_t</a>
+<a name="ln546">gio_poll_dispatch_del(int32_t fd)</a>
+<a name="ln547">{</a>
+<a name="ln548">    struct gio_to_qb_poll *adaptor;</a>
+<a name="ln549"> </a>
+<a name="ln550">    crm_trace(&quot;Looking for fd=%d&quot;, fd);</a>
+<a name="ln551">    if (qb_array_index(gio_map, fd, (void **)&amp;adaptor) == 0) {</a>
+<a name="ln552">        if (adaptor-&gt;source) {</a>
+<a name="ln553">            g_source_remove(adaptor-&gt;source);</a>
+<a name="ln554">            adaptor-&gt;source = 0;</a>
+<a name="ln555">        }</a>
+<a name="ln556">    }</a>
+<a name="ln557">    return 0;</a>
+<a name="ln558">}</a>
+<a name="ln559"> </a>
+<a name="ln560">struct qb_ipcs_poll_handlers gio_poll_funcs = {</a>
+<a name="ln561">    .job_add = NULL,</a>
+<a name="ln562">    .dispatch_add = gio_poll_dispatch_add,</a>
+<a name="ln563">    .dispatch_mod = gio_poll_dispatch_mod,</a>
+<a name="ln564">    .dispatch_del = gio_poll_dispatch_del,</a>
+<a name="ln565">};</a>
+<a name="ln566"> </a>
+<a name="ln567">static enum qb_ipc_type</a>
+<a name="ln568">pick_ipc_type(enum qb_ipc_type requested)</a>
+<a name="ln569">{</a>
+<a name="ln570">    const char *env = getenv(&quot;PCMK_ipc_type&quot;);</a>
+<a name="ln571"> </a>
+<a name="ln572">    if (env &amp;&amp; strcmp(&quot;shared-mem&quot;, env) == 0) {</a>
+<a name="ln573">        return QB_IPC_SHM;</a>
+<a name="ln574">    } else if (env &amp;&amp; strcmp(&quot;socket&quot;, env) == 0) {</a>
+<a name="ln575">        return QB_IPC_SOCKET;</a>
+<a name="ln576">    } else if (env &amp;&amp; strcmp(&quot;posix&quot;, env) == 0) {</a>
+<a name="ln577">        return QB_IPC_POSIX_MQ;</a>
+<a name="ln578">    } else if (env &amp;&amp; strcmp(&quot;sysv&quot;, env) == 0) {</a>
+<a name="ln579">        return QB_IPC_SYSV_MQ;</a>
+<a name="ln580">    } else if (requested == QB_IPC_NATIVE) {</a>
+<a name="ln581">        /* We prefer shared memory because the server never blocks on</a>
+<a name="ln582">         * send.  If part of a message fits into the socket, libqb</a>
+<a name="ln583">         * needs to block until the remainder can be sent also.</a>
+<a name="ln584">         * Otherwise the client will wait forever for the remaining</a>
+<a name="ln585">         * bytes.</a>
+<a name="ln586">         */</a>
+<a name="ln587">        return QB_IPC_SHM;</a>
+<a name="ln588">    }</a>
+<a name="ln589">    return requested;</a>
+<a name="ln590">}</a>
+<a name="ln591"> </a>
+<a name="ln592">qb_ipcs_service_t *</a>
+<a name="ln593">mainloop_add_ipc_server(const char *name, enum qb_ipc_type type,</a>
+<a name="ln594">                        struct qb_ipcs_service_handlers * callbacks)</a>
+<a name="ln595">{</a>
+<a name="ln596">    int rc = 0;</a>
+<a name="ln597">    qb_ipcs_service_t *server = NULL;</a>
+<a name="ln598"> </a>
+<a name="ln599">    if (gio_map == NULL) {</a>
+<a name="ln600">        gio_map = qb_array_create_2(64, sizeof(struct gio_to_qb_poll), 1);</a>
+<a name="ln601">    }</a>
+<a name="ln602"> </a>
+<a name="ln603">    crm_client_init();</a>
+<a name="ln604">    server = qb_ipcs_create(name, 0, pick_ipc_type(type), callbacks);</a>
+<a name="ln605"> </a>
+<a name="ln606">#ifdef HAVE_IPCS_GET_BUFFER_SIZE</a>
+<a name="ln607">    /* All clients should use at least ipc_buffer_max as their buffer size */</a>
+<a name="ln608">    qb_ipcs_enforce_buffer_size(server, crm_ipc_default_buffer_size());</a>
+<a name="ln609">#endif</a>
+<a name="ln610"> </a>
+<a name="ln611">    qb_ipcs_poll_handlers_set(server, &amp;gio_poll_funcs);</a>
+<a name="ln612"> </a>
+<a name="ln613">    rc = qb_ipcs_run(server);</a>
+<a name="ln614">    if (rc &lt; 0) {</a>
+<a name="ln615">        crm_err(&quot;Could not start %s IPC server: %s (%d)&quot;, name, pcmk_strerror(rc), rc);</a>
+<a name="ln616">        return NULL;</a>
+<a name="ln617">    }</a>
+<a name="ln618"> </a>
+<a name="ln619">    return server;</a>
+<a name="ln620">}</a>
+<a name="ln621"> </a>
+<a name="ln622">void</a>
+<a name="ln623">mainloop_del_ipc_server(qb_ipcs_service_t * server)</a>
+<a name="ln624">{</a>
+<a name="ln625">    if (server) {</a>
+<a name="ln626">        qb_ipcs_destroy(server);</a>
+<a name="ln627">    }</a>
+<a name="ln628">}</a>
+<a name="ln629"> </a>
+<a name="ln630">struct mainloop_io_s {</a>
+<a name="ln631">    char *name;</a>
+<a name="ln632">    void *userdata;</a>
+<a name="ln633"> </a>
+<a name="ln634">    int fd;</a>
+<a name="ln635">    guint source;</a>
+<a name="ln636">    crm_ipc_t *ipc;</a>
+<a name="ln637">    GIOChannel *channel;</a>
+<a name="ln638"> </a>
+<a name="ln639">    int (*dispatch_fn_ipc) (const char *buffer, ssize_t length, gpointer userdata);</a>
+<a name="ln640">    int (*dispatch_fn_io) (gpointer userdata);</a>
+<a name="ln641">    void (*destroy_fn) (gpointer userdata);</a>
+<a name="ln642"> </a>
+<a name="ln643">};</a>
+<a name="ln644"> </a>
+<a name="ln645">static gboolean</a>
+<a name="ln646">mainloop_gio_callback(GIOChannel * gio, GIOCondition condition, gpointer data)</a>
+<a name="ln647">{</a>
+<a name="ln648">    gboolean keep = TRUE;</a>
+<a name="ln649">    mainloop_io_t *client = data;</a>
+<a name="ln650"> </a>
+<a name="ln651">    CRM_ASSERT(client-&gt;fd == g_io_channel_unix_get_fd(gio));</a>
+<a name="ln652"> </a>
+<a name="ln653">    if (condition &amp; G_IO_IN) {</a>
+<a name="ln654">        if (client-&gt;ipc) {</a>
+<a name="ln655">            long rc = 0;</a>
+<a name="ln656">            int max = 10;</a>
+<a name="ln657"> </a>
+<a name="ln658">            do {</a>
+<a name="ln659">                rc = crm_ipc_read(client-&gt;ipc);</a>
+<a name="ln660">                if (rc &lt;= 0) {</a>
+<a name="ln661">                    crm_trace(&quot;Message acquisition from %s[%p] failed: %s (%ld)&quot;,</a>
+<a name="ln662">                              client-&gt;name, client, pcmk_strerror(rc), rc);</a>
+<a name="ln663"> </a>
+<a name="ln664">                } else if (client-&gt;dispatch_fn_ipc) {</a>
+<a name="ln665">                    const char *buffer = crm_ipc_buffer(client-&gt;ipc);</a>
+<a name="ln666"> </a>
+<a name="ln667">                    crm_trace(&quot;New message from %s[%p] = %ld (I/O condition=%d)&quot;, client-&gt;name, client, rc, condition);</a>
+<a name="ln668">                    if (client-&gt;dispatch_fn_ipc(buffer, rc, client-&gt;userdata) &lt; 0) {</a>
+<a name="ln669">                        crm_trace(&quot;Connection to %s no longer required&quot;, client-&gt;name);</a>
+<a name="ln670">                        keep = FALSE;</a>
+<a name="ln671">                    }</a>
+<a name="ln672">                }</a>
+<a name="ln673"> </a>
+<a name="ln674">            } while (keep &amp;&amp; rc &gt; 0 &amp;&amp; --max &gt; 0);</a>
+<a name="ln675"> </a>
+<a name="ln676">        } else {</a>
+<a name="ln677">            crm_trace(&quot;New message from %s[%p] %u&quot;, client-&gt;name, client, condition);</a>
+<a name="ln678">            if (client-&gt;dispatch_fn_io) {</a>
+<a name="ln679">                if (client-&gt;dispatch_fn_io(client-&gt;userdata) &lt; 0) {</a>
+<a name="ln680">                    crm_trace(&quot;Connection to %s no longer required&quot;, client-&gt;name);</a>
+<a name="ln681">                    keep = FALSE;</a>
+<a name="ln682">                }</a>
+<a name="ln683">            }</a>
+<a name="ln684">        }</a>
+<a name="ln685">    }</a>
+<a name="ln686"> </a>
+<a name="ln687">    if (client-&gt;ipc &amp;&amp; crm_ipc_connected(client-&gt;ipc) == FALSE) {</a>
+<a name="ln688">        crm_err(&quot;Connection to %s[%p] closed (I/O condition=%d)&quot;, client-&gt;name, client, condition);</a>
+<a name="ln689">        keep = FALSE;</a>
+<a name="ln690"> </a>
+<a name="ln691">    } else if (condition &amp; (G_IO_HUP | G_IO_NVAL | G_IO_ERR)) {</a>
+<a name="ln692">        crm_trace(&quot;The connection %s[%p] has been closed (I/O condition=%d)&quot;,</a>
+<a name="ln693">                  client-&gt;name, client, condition);</a>
+<a name="ln694">        keep = FALSE;</a>
+<a name="ln695"> </a>
+<a name="ln696">    } else if ((condition &amp; G_IO_IN) == 0) {</a>
+<a name="ln697">        /*</a>
+<a name="ln698">           #define      GLIB_SYSDEF_POLLIN     =1</a>
+<a name="ln699">           #define      GLIB_SYSDEF_POLLPRI    =2</a>
+<a name="ln700">           #define      GLIB_SYSDEF_POLLOUT    =4</a>
+<a name="ln701">           #define      GLIB_SYSDEF_POLLERR    =8</a>
+<a name="ln702">           #define      GLIB_SYSDEF_POLLHUP    =16</a>
+<a name="ln703">           #define      GLIB_SYSDEF_POLLNVAL   =32</a>
+<a name="ln704"> </a>
+<a name="ln705">           typedef enum</a>
+<a name="ln706">           {</a>
+<a name="ln707">           G_IO_IN      GLIB_SYSDEF_POLLIN,</a>
+<a name="ln708">           G_IO_OUT     GLIB_SYSDEF_POLLOUT,</a>
+<a name="ln709">           G_IO_PRI     GLIB_SYSDEF_POLLPRI,</a>
+<a name="ln710">           G_IO_ERR     GLIB_SYSDEF_POLLERR,</a>
+<a name="ln711">           G_IO_HUP     GLIB_SYSDEF_POLLHUP,</a>
+<a name="ln712">           G_IO_NVAL    GLIB_SYSDEF_POLLNVAL</a>
+<a name="ln713">           } GIOCondition;</a>
+<a name="ln714"> </a>
+<a name="ln715">           A bitwise combination representing a condition to watch for on an event source.</a>
+<a name="ln716"> </a>
+<a name="ln717">           G_IO_IN      There is data to read.</a>
+<a name="ln718">           G_IO_OUT     Data can be written (without blocking).</a>
+<a name="ln719">           G_IO_PRI     There is urgent data to read.</a>
+<a name="ln720">           G_IO_ERR     Error condition.</a>
+<a name="ln721">           G_IO_HUP     Hung up (the connection has been broken, usually for pipes and sockets).</a>
+<a name="ln722">           G_IO_NVAL    Invalid request. The file descriptor is not open.</a>
+<a name="ln723">         */</a>
+<a name="ln724">        crm_err(&quot;Strange condition: %d&quot;, condition);</a>
+<a name="ln725">    }</a>
+<a name="ln726"> </a>
+<a name="ln727">    /* keep == FALSE results in mainloop_gio_destroy() being called</a>
+<a name="ln728">     * just before the source is removed from mainloop</a>
+<a name="ln729">     */</a>
+<a name="ln730">    return keep;</a>
+<a name="ln731">}</a>
+<a name="ln732"> </a>
+<a name="ln733">static void</a>
+<a name="ln734">mainloop_gio_destroy(gpointer c)</a>
+<a name="ln735">{</a>
+<a name="ln736">    mainloop_io_t *client = c;</a>
+<a name="ln737">    char *c_name = strdup(client-&gt;name);</a>
+<a name="ln738"> </a>
+<a name="ln739">    /* client-&gt;source is valid but about to be destroyed (ref_count == 0) in gmain.c</a>
+<a name="ln740">     * client-&gt;channel will still have ref_count &gt; 0... should be == 1</a>
+<a name="ln741">     */</a>
+<a name="ln742">    crm_trace(&quot;Destroying client %s[%p]&quot;, c_name, c);</a>
+<a name="ln743"> </a>
+<a name="ln744">    if (client-&gt;ipc) {</a>
+<a name="ln745">        crm_ipc_close(client-&gt;ipc);</a>
+<a name="ln746">    }</a>
+<a name="ln747"> </a>
+<a name="ln748">    if (client-&gt;destroy_fn) {</a>
+<a name="ln749">        void (*destroy_fn) (gpointer userdata) = client-&gt;destroy_fn;</a>
+<a name="ln750"> </a>
+<a name="ln751">        client-&gt;destroy_fn = NULL;</a>
+<a name="ln752">        destroy_fn(client-&gt;userdata);</a>
+<a name="ln753">    }</a>
+<a name="ln754"> </a>
+<a name="ln755">    if (client-&gt;ipc) {</a>
+<a name="ln756">        crm_ipc_t *ipc = client-&gt;ipc;</a>
+<a name="ln757"> </a>
+<a name="ln758">        client-&gt;ipc = NULL;</a>
+<a name="ln759">        crm_ipc_destroy(ipc);</a>
+<a name="ln760">    }</a>
+<a name="ln761"> </a>
+<a name="ln762">    crm_trace(&quot;Destroyed client %s[%p]&quot;, c_name, c);</a>
+<a name="ln763"> </a>
+<a name="ln764">    free(client-&gt;name); client-&gt;name = NULL;</a>
+<a name="ln765">    free(client);</a>
+<a name="ln766"> </a>
+<a name="ln767">    free(c_name);</a>
+<a name="ln768">}</a>
+<a name="ln769"> </a>
+<a name="ln770">mainloop_io_t *</a>
+<a name="ln771">mainloop_add_ipc_client(const char *name, int priority, size_t max_size, void *userdata,</a>
+<a name="ln772">                        struct ipc_client_callbacks *callbacks)</a>
+<a name="ln773">{</a>
+<a name="ln774">    mainloop_io_t *client = NULL;</a>
+<a name="ln775">    crm_ipc_t *conn = crm_ipc_new(name, max_size);</a>
+<a name="ln776"> </a>
+<a name="ln777">    if (conn &amp;&amp; crm_ipc_connect(conn)) {</a>
+<a name="ln778">        int32_t fd = crm_ipc_get_fd(conn);</a>
+<a name="ln779"> </a>
+<a name="ln780">        client = mainloop_add_fd(name, priority, fd, userdata, NULL);</a>
+<a name="ln781">    }</a>
+<a name="ln782"> </a>
+<a name="ln783">    if (client == NULL) {</a>
+<a name="ln784">        crm_perror(LOG_TRACE, &quot;Connection to %s failed&quot;, name);</a>
+<a name="ln785">        if (conn) {</a>
+<a name="ln786">            crm_ipc_close(conn);</a>
+<a name="ln787">            crm_ipc_destroy(conn);</a>
+<a name="ln788">        }</a>
+<a name="ln789">        return NULL;</a>
+<a name="ln790">    }</a>
+<a name="ln791"> </a>
+<a name="ln792">    client-&gt;ipc = conn;</a>
+<a name="ln793">    client-&gt;destroy_fn = callbacks-&gt;destroy;</a>
+<a name="ln794">    client-&gt;dispatch_fn_ipc = callbacks-&gt;dispatch;</a>
+<a name="ln795">    return client;</a>
+<a name="ln796">}</a>
+<a name="ln797"> </a>
+<a name="ln798">void</a>
+<a name="ln799">mainloop_del_ipc_client(mainloop_io_t * client)</a>
+<a name="ln800">{</a>
+<a name="ln801">    mainloop_del_fd(client);</a>
+<a name="ln802">}</a>
+<a name="ln803"> </a>
+<a name="ln804">crm_ipc_t *</a>
+<a name="ln805">mainloop_get_ipc_client(mainloop_io_t * client)</a>
+<a name="ln806">{</a>
+<a name="ln807">    if (client) {</a>
+<a name="ln808">        return client-&gt;ipc;</a>
+<a name="ln809">    }</a>
+<a name="ln810">    return NULL;</a>
+<a name="ln811">}</a>
+<a name="ln812"> </a>
+<a name="ln813">mainloop_io_t *</a>
+<a name="ln814">mainloop_add_fd(const char *name, int priority, int fd, void *userdata,</a>
+<a name="ln815">                struct mainloop_fd_callbacks * callbacks)</a>
+<a name="ln816">{</a>
+<a name="ln817">    mainloop_io_t *client = NULL;</a>
+<a name="ln818"> </a>
+<a name="ln819">    if (fd &gt;= 0) {</a>
+<a name="ln820">        client = calloc(1, sizeof(mainloop_io_t));</a>
+<a name="ln821">        if (client == NULL) {</a>
+<a name="ln822">            return NULL;</a>
+<a name="ln823">        }</a>
+<a name="ln824">        client-&gt;name = strdup(name);</a>
+<a name="ln825">        client-&gt;userdata = userdata;</a>
+<a name="ln826"> </a>
+<a name="ln827">        if (callbacks) {</a>
+<a name="ln828">            client-&gt;destroy_fn = callbacks-&gt;destroy;</a>
+<a name="ln829">            client-&gt;dispatch_fn_io = callbacks-&gt;dispatch;</a>
+<a name="ln830">        }</a>
+<a name="ln831"> </a>
+<a name="ln832">        client-&gt;fd = fd;</a>
+<a name="ln833">        client-&gt;channel = g_io_channel_unix_new(fd);</a>
+<a name="ln834">        client-&gt;source =</a>
+<a name="ln835">            g_io_add_watch_full(client-&gt;channel, priority,</a>
+<a name="ln836">                                (G_IO_IN | G_IO_HUP | G_IO_NVAL | G_IO_ERR), mainloop_gio_callback,</a>
+<a name="ln837">                                client, mainloop_gio_destroy);</a>
+<a name="ln838"> </a>
+<a name="ln839">        /* Now that mainloop now holds a reference to channel,</a>
+<a name="ln840">         * thanks to g_io_add_watch_full(), drop ours from g_io_channel_unix_new().</a>
+<a name="ln841">         *</a>
+<a name="ln842">         * This means that channel will be free'd by:</a>
+<a name="ln843">         * g_main_context_dispatch() or g_source_remove()</a>
+<a name="ln844">         *  -&gt; g_source_destroy_internal()</a>
+<a name="ln845">         *      -&gt; g_source_callback_unref()</a>
+<a name="ln846">         * shortly after mainloop_gio_destroy() completes</a>
+<a name="ln847">         */</a>
+<a name="ln848">        g_io_channel_unref(client-&gt;channel);</a>
+<a name="ln849">        crm_trace(&quot;Added connection %d for %s[%p].%d&quot;, client-&gt;source, client-&gt;name, client, fd);</a>
+<a name="ln850">    } else {</a>
+<a name="ln851">        errno = EINVAL;</a>
+<a name="ln852">    }</a>
+<a name="ln853"> </a>
+<a name="ln854">    return client;</a>
+<a name="ln855">}</a>
+<a name="ln856"> </a>
+<a name="ln857">void</a>
+<a name="ln858">mainloop_del_fd(mainloop_io_t * client)</a>
+<a name="ln859">{</a>
+<a name="ln860">    if (client != NULL) {</a>
+<a name="ln861">        crm_trace(&quot;Removing client %s[%p]&quot;, client-&gt;name, client);</a>
+<a name="ln862">        if (client-&gt;source) {</a>
+<a name="ln863">            /* Results in mainloop_gio_destroy() being called just</a>
+<a name="ln864">             * before the source is removed from mainloop</a>
+<a name="ln865">             */</a>
+<a name="ln866">            g_source_remove(client-&gt;source);</a>
+<a name="ln867">        }</a>
+<a name="ln868">    }</a>
+<a name="ln869">}</a>
+<a name="ln870"> </a>
+<a name="ln871">static GListPtr child_list = NULL;</a>
+<a name="ln872"> </a>
+<a name="ln873">pid_t</a>
+<a name="ln874">mainloop_child_pid(mainloop_child_t * child)</a>
+<a name="ln875">{</a>
+<a name="ln876">    return child-&gt;pid;</a>
+<a name="ln877">}</a>
+<a name="ln878"> </a>
+<a name="ln879">const char *</a>
+<a name="ln880">mainloop_child_name(mainloop_child_t * child)</a>
+<a name="ln881">{</a>
+<a name="ln882">    return child-&gt;desc;</a>
+<a name="ln883">}</a>
+<a name="ln884"> </a>
+<a name="ln885">int</a>
+<a name="ln886">mainloop_child_timeout(mainloop_child_t * child)</a>
+<a name="ln887">{</a>
+<a name="ln888">    return child-&gt;timeout;</a>
+<a name="ln889">}</a>
+<a name="ln890"> </a>
+<a name="ln891">void *</a>
+<a name="ln892">mainloop_child_userdata(mainloop_child_t * child)</a>
+<a name="ln893">{</a>
+<a name="ln894">    return child-&gt;privatedata;</a>
+<a name="ln895">}</a>
+<a name="ln896"> </a>
+<a name="ln897">void</a>
+<a name="ln898">mainloop_clear_child_userdata(mainloop_child_t * child)</a>
+<a name="ln899">{</a>
+<a name="ln900">    child-&gt;privatedata = NULL;</a>
+<a name="ln901">}</a>
+<a name="ln902"> </a>
+<a name="ln903">/* good function name */</a>
+<a name="ln904">static void</a>
+<a name="ln905">child_free(mainloop_child_t *child)</a>
+<a name="ln906">{</a>
+<a name="ln907">    if (child-&gt;timerid != 0) {</a>
+<a name="ln908">        crm_trace(&quot;Removing timer %d&quot;, child-&gt;timerid);</a>
+<a name="ln909">        g_source_remove(child-&gt;timerid);</a>
+<a name="ln910">        child-&gt;timerid = 0;</a>
+<a name="ln911">    }</a>
+<a name="ln912">    free(child-&gt;desc);</a>
+<a name="ln913">    free(child);</a>
+<a name="ln914">}</a>
+<a name="ln915"> </a>
+<a name="ln916">/* terrible function name */</a>
+<a name="ln917">static int</a>
+<a name="ln918">child_kill_helper(mainloop_child_t *child)</a>
+<a name="ln919">{</a>
+<a name="ln920">    int rc;</a>
+<a name="ln921">    if (child-&gt;flags &amp; mainloop_leave_pid_group) {</a>
+<a name="ln922">        crm_debug(&quot;Kill pid %d only. leave group intact.&quot;, child-&gt;pid);</a>
+<a name="ln923">        rc = kill(child-&gt;pid, SIGKILL);</a>
+<a name="ln924">    } else {</a>
+<a name="ln925">        crm_debug(&quot;Kill pid %d's group&quot;, child-&gt;pid);</a>
+<a name="ln926">        rc = kill(-child-&gt;pid, SIGKILL);</a>
+<a name="ln927">    }</a>
+<a name="ln928"> </a>
+<a name="ln929">    if (rc &lt; 0) {</a>
+<a name="ln930">        if (errno != ESRCH) {</a>
+<a name="ln931">            crm_perror(LOG_ERR, &quot;kill(%d, KILL) failed&quot;, child-&gt;pid);</a>
+<a name="ln932">        }</a>
+<a name="ln933">        return -errno;</a>
+<a name="ln934">    }</a>
+<a name="ln935">    return 0;</a>
+<a name="ln936">}</a>
+<a name="ln937"> </a>
+<a name="ln938">static gboolean</a>
+<a name="ln939">child_timeout_callback(gpointer p)</a>
+<a name="ln940">{</a>
+<a name="ln941">    mainloop_child_t *child = p;</a>
+<a name="ln942">    int rc = 0;</a>
+<a name="ln943"> </a>
+<a name="ln944">    child-&gt;timerid = 0;</a>
+<a name="ln945">    if (child-&gt;timeout) {</a>
+<a name="ln946">        crm_crit(&quot;%s process (PID %d) will not die!&quot;, child-&gt;desc, (int)child-&gt;pid);</a>
+<a name="ln947">        return FALSE;</a>
+<a name="ln948">    }</a>
+<a name="ln949"> </a>
+<a name="ln950">    rc = child_kill_helper(child);</a>
+<a name="ln951">    if (rc == ESRCH) {</a>
+<a name="ln952">        /* Nothing left to do. pid doesn't exist */</a>
+<a name="ln953">        return FALSE;</a>
+<a name="ln954">    }</a>
+<a name="ln955"> </a>
+<a name="ln956">    child-&gt;timeout = TRUE;</a>
+<a name="ln957">    crm_warn(&quot;%s process (PID %d) timed out&quot;, child-&gt;desc, (int)child-&gt;pid);</a>
+<a name="ln958"> </a>
+<a name="ln959">    child-&gt;timerid = g_timeout_add(5000, child_timeout_callback, child);</a>
+<a name="ln960">    return FALSE;</a>
+<a name="ln961">}</a>
+<a name="ln962"> </a>
+<a name="ln963">static gboolean</a>
+<a name="ln964">child_waitpid(mainloop_child_t *child, int flags)</a>
+<a name="ln965">{</a>
+<a name="ln966">    int rc = 0;</a>
+<a name="ln967">    int core = 0;</a>
+<a name="ln968">    int signo = 0;</a>
+<a name="ln969">    int status = 0;</a>
+<a name="ln970">    int exitcode = 0;</a>
+<a name="ln971"> </a>
+<a name="ln972">    rc = waitpid(child-&gt;pid, &amp;status, flags);</a>
+<a name="ln973">    if(rc == 0) {</a>
+<a name="ln974">        crm_perror(LOG_DEBUG, &quot;wait(%d) = %d&quot;, child-&gt;pid, rc);</a>
+<a name="ln975">        return FALSE;</a>
+<a name="ln976"> </a>
+<a name="ln977">    } else if(rc != child-&gt;pid) {</a>
+<a name="ln978">        signo = SIGCHLD;</a>
+<a name="ln979">        exitcode = 1;</a>
+<a name="ln980">        status = 1;</a>
+<a name="ln981">        crm_perror(LOG_ERR, &quot;Call to waitpid(%d) failed&quot;, child-&gt;pid);</a>
+<a name="ln982"> </a>
+<a name="ln983">    } else {</a>
+<a name="ln984">        crm_trace(&quot;Managed process %d exited: %p&quot;, child-&gt;pid, child);</a>
+<a name="ln985"> </a>
+<a name="ln986">        if (WIFEXITED(status)) {</a>
+<a name="ln987">            exitcode = WEXITSTATUS(status);</a>
+<a name="ln988">            crm_trace(&quot;Managed process %d (%s) exited with rc=%d&quot;, child-&gt;pid, child-&gt;desc, exitcode);</a>
+<a name="ln989"> </a>
+<a name="ln990">        } else if (WIFSIGNALED(status)) {</a>
+<a name="ln991">            signo = WTERMSIG(status);</a>
+<a name="ln992">            crm_trace(&quot;Managed process %d (%s) exited with signal=%d&quot;, child-&gt;pid, child-&gt;desc, signo);</a>
+<a name="ln993">        }</a>
+<a name="ln994">#ifdef WCOREDUMP</a>
+<a name="ln995">        if (WCOREDUMP(status)) {</a>
+<a name="ln996">            core = 1;</a>
+<a name="ln997">            crm_err(&quot;Managed process %d (%s) dumped core&quot;, child-&gt;pid, child-&gt;desc);</a>
+<a name="ln998">        }</a>
+<a name="ln999">#endif</a>
+<a name="ln1000">    }</a>
+<a name="ln1001"> </a>
+<a name="ln1002">    if (child-&gt;callback) {</a>
+<a name="ln1003">        child-&gt;callback(child, child-&gt;pid, core, signo, exitcode);</a>
+<a name="ln1004">    }</a>
+<a name="ln1005">    return TRUE;</a>
+<a name="ln1006">}</a>
+<a name="ln1007"> </a>
+<a name="ln1008">static void</a>
+<a name="ln1009">child_death_dispatch(int signal)</a>
+<a name="ln1010">{</a>
+<a name="ln1011">    GListPtr iter = child_list;</a>
+<a name="ln1012">    gboolean exited;</a>
+<a name="ln1013"> </a>
+<a name="ln1014">    while(iter) {</a>
+<a name="ln1015">        GListPtr saved = NULL;</a>
+<a name="ln1016">        mainloop_child_t *child = iter-&gt;data;</a>
+<a name="ln1017">        exited = child_waitpid(child, WNOHANG);</a>
+<a name="ln1018"> </a>
+<a name="ln1019">        saved = iter;</a>
+<a name="ln1020">        iter = iter-&gt;next;</a>
+<a name="ln1021"> </a>
+<a name="ln1022">        if (exited == FALSE) {</a>
+<a name="ln1023">            continue;</a>
+<a name="ln1024">        }</a>
+<a name="ln1025">        crm_trace(&quot;Removing process entry %p for %d&quot;, child, child-&gt;pid);</a>
+<a name="ln1026"> </a>
+<a name="ln1027">        child_list = g_list_remove_link(child_list, saved);</a>
+<a name="ln1028">        g_list_free(saved);</a>
+<a name="ln1029">        child_free(child);</a>
+<a name="ln1030">    }</a>
+<a name="ln1031">}</a>
+<a name="ln1032"> </a>
+<a name="ln1033">static gboolean</a>
+<a name="ln1034">child_signal_init(gpointer p)</a>
+<a name="ln1035">{</a>
+<a name="ln1036">    crm_trace(&quot;Installed SIGCHLD handler&quot;);</a>
+<a name="ln1037">    /* Do NOT use g_child_watch_add() and friends, they rely on pthreads */</a>
+<a name="ln1038">    mainloop_add_signal(SIGCHLD, child_death_dispatch);</a>
+<a name="ln1039"> </a>
+<a name="ln1040">    /* In case they terminated before the signal handler was installed */</a>
+<a name="ln1041">    child_death_dispatch(SIGCHLD);</a>
+<a name="ln1042">    return FALSE;</a>
+<a name="ln1043">}</a>
+<a name="ln1044"> </a>
+<a name="ln1045">int</a>
+<a name="ln1046">mainloop_child_kill(pid_t pid)</a>
+<a name="ln1047">{</a>
+<a name="ln1048">    GListPtr iter;</a>
+<a name="ln1049">    mainloop_child_t *child = NULL;</a>
+<a name="ln1050">    mainloop_child_t *match = NULL;</a>
+<a name="ln1051">    /* It is impossible to block SIGKILL, this allows us to</a>
+<a name="ln1052">     * call waitpid without WNOHANG flag.*/</a>
+<a name="ln1053">    int waitflags = 0, rc = 0;</a>
+<a name="ln1054"> </a>
+<a name="ln1055">    for (iter = child_list; iter != NULL &amp;&amp; match == NULL; iter = iter-&gt;next) {</a>
+<a name="ln1056">        child = iter-&gt;data;</a>
+<a name="ln1057">        if (pid == child-&gt;pid) {</a>
+<a name="ln1058">            match = child;</a>
+<a name="ln1059">        }</a>
+<a name="ln1060">    }</a>
+<a name="ln1061"> </a>
+<a name="ln1062">    if (match == NULL) {</a>
+<a name="ln1063">        return FALSE;</a>
+<a name="ln1064">    }</a>
+<a name="ln1065"> </a>
+<a name="ln1066">    rc = child_kill_helper(match);</a>
+<a name="ln1067">    if(rc == -ESRCH) {</a>
+<a name="ln1068">        /* It's gone, but hasn't shown up in waitpid() yet</a>
+<a name="ln1069">         *</a>
+<a name="ln1070">         * Wait until we get SIGCHLD and let child_death_dispatch()</a>
+<a name="ln1071">         * clean it up as normal (so we get the correct return</a>
+<a name="ln1072">         * code/status)</a>
+<a name="ln1073">         *</a>
+<a name="ln1074">         * The blocking alternative would be to call:</a>
+<a name="ln1075">         *    child_waitpid(match, 0);</a>
+<a name="ln1076">         */</a>
+<a name="ln1077">        crm_trace(&quot;Waiting for child %d to be reaped by child_death_dispatch()&quot;, match-&gt;pid);</a>
+<a name="ln1078">        return TRUE;</a>
+<a name="ln1079"> </a>
+<a name="ln1080">    } else if(rc != 0) {</a>
+<a name="ln1081">        /* If KILL for some other reason set the WNOHANG flag since we</a>
+<a name="ln1082">         * can't be certain what happened.</a>
+<a name="ln1083">         */</a>
+<a name="ln1084">        waitflags = WNOHANG;</a>
+<a name="ln1085">    }</a>
+<a name="ln1086"> </a>
+<a name="ln1087">    if (child_waitpid(match, waitflags) == FALSE) {</a>
+<a name="ln1088">        /* not much we can do if this occurs */</a>
+<a name="ln1089">        return FALSE;</a>
+<a name="ln1090">    }</a>
+<a name="ln1091"> </a>
+<a name="ln1092">    child_list = g_list_remove(child_list, match);</a>
+<a name="ln1093">    child_free(match);</a>
+<a name="ln1094">    return TRUE;</a>
+<a name="ln1095">}</a>
+<a name="ln1096"> </a>
+<a name="ln1097">/* Create/Log a new tracked process</a>
+<a name="ln1098"> * To track a process group, use -pid</a>
+<a name="ln1099"> */</a>
+<a name="ln1100">void</a>
+<a name="ln1101">mainloop_child_add_with_flags(pid_t pid, int timeout, const char *desc, void *privatedata, enum mainloop_child_flags flags, </a>
+<a name="ln1102">                   void (*callback) (mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode))</a>
+<a name="ln1103">{</a>
+<a name="ln1104">    static bool need_init = TRUE;</a>
+<a name="ln1105">    mainloop_child_t *child = g_new(mainloop_child_t, 1);</a>
+<a name="ln1106"> </a>
+<a name="ln1107">    child-&gt;pid = pid;</a>
+<a name="ln1108">    child-&gt;timerid = 0;</a>
+<a name="ln1109">    child-&gt;timeout = FALSE;</a>
+<a name="ln1110">    child-&gt;privatedata = privatedata;</a>
+<a name="ln1111">    child-&gt;callback = callback;</a>
+<a name="ln1112">    child-&gt;flags = flags;</a>
+<a name="ln1113"> </a>
+<a name="ln1114">    if(desc) {</a>
+<a name="ln1115">        child-&gt;desc = strdup(desc);</a>
+<a name="ln1116">    }</a>
+<a name="ln1117"> </a>
+<a name="ln1118">    if (timeout) {</a>
+<a name="ln1119">        child-&gt;timerid = g_timeout_add(timeout, child_timeout_callback, child);</a>
+<a name="ln1120">    }</a>
+<a name="ln1121"> </a>
+<a name="ln1122">    child_list = g_list_append(child_list, child);</a>
+<a name="ln1123"> </a>
+<a name="ln1124">    if(need_init) {</a>
+<a name="ln1125">        need_init = FALSE;</a>
+<a name="ln1126">        /* SIGCHLD processing has to be invoked from mainloop.</a>
+<a name="ln1127">         * We do not want it to be possible to both add a child pid</a>
+<a name="ln1128">         * to mainloop, and have the pid's exit callback invoked within</a>
+<a name="ln1129">         * the same callstack. */</a>
+<a name="ln1130">        g_timeout_add(1, child_signal_init, NULL);</a>
+<a name="ln1131">    }</a>
+<a name="ln1132">}</a>
+<a name="ln1133"> </a>
+<a name="ln1134">void</a>
+<a name="ln1135">mainloop_child_add(pid_t pid, int timeout, const char *desc, void *privatedata,</a>
+<a name="ln1136">                   void (*callback) (mainloop_child_t * p, pid_t pid, int core, int signo, int exitcode))</a>
+<a name="ln1137">{</a>
+<a name="ln1138">    mainloop_child_add_with_flags(pid, timeout, desc, privatedata, 0, callback);</a>
+<a name="ln1139">}</a>
+<a name="ln1140"> </a>
+<a name="ln1141">struct mainloop_timer_s {</a>
+<a name="ln1142">        guint id;</a>
+<a name="ln1143">        guint period_ms;</a>
+<a name="ln1144">        bool repeat;</a>
+<a name="ln1145">        char *name;</a>
+<a name="ln1146">        GSourceFunc cb;</a>
+<a name="ln1147">        void *userdata;</a>
+<a name="ln1148">};</a>
+<a name="ln1149"> </a>
+<a name="ln1150">struct mainloop_timer_s mainloop;</a>
+<a name="ln1151"> </a>
+<a name="ln1152">static gboolean mainloop_timer_cb(gpointer user_data)</a>
+<a name="ln1153">{</a>
+<a name="ln1154">    int id = 0;</a>
+<a name="ln1155">    bool repeat = FALSE;</a>
+<a name="ln1156">    struct mainloop_timer_s *t = user_data;</a>
+<a name="ln1157"> </a>
+<a name="ln1158">    CRM_ASSERT(t != NULL);</a>
+<a name="ln1159"> </a>
+<a name="ln1160">    id = t-&gt;id;</a>
+<a name="ln1161">    t-&gt;id = 0; /* Ensure it's unset during callbacks so that</a>
+<a name="ln1162">                * mainloop_timer_running() works as expected</a>
+<a name="ln1163">                */</a>
+<a name="ln1164"> </a>
+<a name="ln1165">    if(t-&gt;cb) {</a>
+<a name="ln1166">        crm_trace(&quot;Invoking callbacks for timer %s&quot;, t-&gt;name);</a>
+<a name="ln1167">        repeat = t-&gt;repeat;</a>
+<a name="ln1168">        if(t-&gt;cb(t-&gt;userdata) == FALSE) {</a>
+<a name="ln1169">            crm_trace(&quot;Timer %s complete&quot;, t-&gt;name);</a>
+<a name="ln1170">            repeat = FALSE;</a>
+<a name="ln1171">        }</a>
+<a name="ln1172">    }</a>
+<a name="ln1173"> </a>
+<a name="ln1174">    if(repeat) {</a>
+<a name="ln1175">        /* Restore if repeating */</a>
+<a name="ln1176">        t-&gt;id = id;</a>
+<a name="ln1177">    }</a>
+<a name="ln1178"> </a>
+<a name="ln1179">    return repeat;</a>
+<a name="ln1180">}</a>
+<a name="ln1181"> </a>
+<a name="ln1182">bool mainloop_timer_running(mainloop_timer_t *t)</a>
+<a name="ln1183">{</a>
+<a name="ln1184">    if(t &amp;&amp; t-&gt;id != 0) {</a>
+<a name="ln1185">        return TRUE;</a>
+<a name="ln1186">    }</a>
+<a name="ln1187">    return FALSE;</a>
+<a name="ln1188">}</a>
+<a name="ln1189"> </a>
+<a name="ln1190">void mainloop_timer_start(mainloop_timer_t *t)</a>
+<a name="ln1191">{</a>
+<a name="ln1192">    mainloop_timer_stop(t);</a>
+<a name="ln1193">    if(t &amp;&amp; t-&gt;period_ms &gt; 0) {</a>
+<a name="ln1194">        crm_trace(&quot;Starting timer %s&quot;, t-&gt;name);</a>
+<a name="ln1195">        t-&gt;id = g_timeout_add(t-&gt;period_ms, mainloop_timer_cb, t);</a>
+<a name="ln1196">    }</a>
+<a name="ln1197">}</a>
+<a name="ln1198"> </a>
+<a name="ln1199">void mainloop_timer_stop(mainloop_timer_t *t)</a>
+<a name="ln1200">{</a>
+<a name="ln1201">    if(t &amp;&amp; t-&gt;id != 0) {</a>
+<a name="ln1202">        crm_trace(&quot;Stopping timer %s&quot;, t-&gt;name);</a>
+<a name="ln1203">        g_source_remove(t-&gt;id);</a>
+<a name="ln1204">        t-&gt;id = 0;</a>
+<a name="ln1205">    }</a>
+<a name="ln1206">}</a>
+<a name="ln1207"> </a>
+<a name="ln1208">guint mainloop_timer_set_period(mainloop_timer_t *t, guint period_ms)</a>
+<a name="ln1209">{</a>
+<a name="ln1210">    guint last = 0;</a>
+<a name="ln1211"> </a>
+<a name="ln1212">    if(t) {</a>
+<a name="ln1213">        last = t-&gt;period_ms;</a>
+<a name="ln1214">        t-&gt;period_ms = period_ms;</a>
+<a name="ln1215">    }</a>
+<a name="ln1216"> </a>
+<a name="ln1217">    if(t &amp;&amp; t-&gt;id != 0 &amp;&amp; last != t-&gt;period_ms) {</a>
+<a name="ln1218">        mainloop_timer_start(t);</a>
+<a name="ln1219">    }</a>
+<a name="ln1220">    return last;</a>
+<a name="ln1221">}</a>
+<a name="ln1222"> </a>
+<a name="ln1223"> </a>
+<a name="ln1224">mainloop_timer_t *</a>
+<a name="ln1225">mainloop_timer_add(const char *name, guint period_ms, bool repeat, GSourceFunc cb, void *userdata)</a>
+<a name="ln1226">{</a>
+<a name="ln1227">    mainloop_timer_t *t = calloc(1, sizeof(mainloop_timer_t));</a>
+<a name="ln1228"> </a>
+<a name="ln1229">    if(t) {</a>
+<a name="ln1230">        if(name) {</a>
+<a name="ln1231">            t-&gt;name = crm_strdup_printf(&quot;%s-%u-%d&quot;, name, period_ms, repeat);</a>
+<a name="ln1232">        } else {</a>
+<a name="ln1233">            t-&gt;name = crm_strdup_printf(&quot;%p-%u-%d&quot;, t, period_ms, repeat);</a>
+<a name="ln1234">        }</a>
+<a name="ln1235">        t-&gt;id = 0;</a>
+<a name="ln1236">        t-&gt;period_ms = period_ms;</a>
+<a name="ln1237">        t-&gt;repeat = repeat;</a>
+<a name="ln1238">        t-&gt;cb = cb;</a>
+<a name="ln1239">        t-&gt;userdata = userdata;</a>
+<a name="ln1240">        crm_trace(&quot;Created timer %s with %p %p&quot;, t-&gt;name, userdata, t-&gt;userdata);</a>
+<a name="ln1241">    }</a>
+<a name="ln1242">    return t;</a>
+<a name="ln1243">}</a>
+<a name="ln1244"> </a>
+<a name="ln1245">void</a>
+<a name="ln1246">mainloop_timer_del(mainloop_timer_t *t)</a>
+<a name="ln1247">{</a>
+<a name="ln1248">    if(t) {</a>
+<a name="ln1249">        crm_trace(&quot;Destroying timer %s&quot;, t-&gt;name);</a>
+<a name="ln1250">        mainloop_timer_stop(t);</a>
+<a name="ln1251">        free(t-&gt;name);</a>
+<a name="ln1252">        free(t);</a>
+<a name="ln1253">    }</a>
+<a name="ln1254">}</a>
+<a name="ln1255"> </a>
+
+</code></pre>
+<div class="balloon" rel="444"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (adaptor->is_used > 0) == (0).</p></div>
+<div class="balloon" rel="455"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (adaptor->is_used >= 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

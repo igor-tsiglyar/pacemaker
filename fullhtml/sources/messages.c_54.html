@@ -1,0 +1,591 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;unistd.h&gt;</a>
+<a name="ln27">#include &lt;stdlib.h&gt;</a>
+<a name="ln28">#include &lt;errno.h&gt;</a>
+<a name="ln29">#include &lt;fcntl.h&gt;</a>
+<a name="ln30">#include &lt;time.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;sys/param.h&gt;</a>
+<a name="ln33">#include &lt;sys/types.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;crm/crm.h&gt;</a>
+<a name="ln36">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln37">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln41">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">#include &lt;cibio.h&gt;</a>
+<a name="ln44">#include &lt;cibmessages.h&gt;</a>
+<a name="ln45">#include &lt;callbacks.h&gt;</a>
+<a name="ln46"> </a>
+<a name="ln47">/* Maximum number of diffs to ignore while waiting for a resync */</a>
+<a name="ln48">#define MAX_DIFF_RETRY 5</a>
+<a name="ln49"> </a>
+<a name="ln50">gboolean cib_is_master = FALSE;</a>
+<a name="ln51"> </a>
+<a name="ln52">xmlNode *the_cib = NULL;</a>
+<a name="ln53">extern const char *cib_our_uname;</a>
+<a name="ln54">int revision_check(xmlNode * cib_update, xmlNode * cib_copy, int flags);</a>
+<a name="ln55">int get_revision(xmlNode * xml_obj, int cur_revision);</a>
+<a name="ln56"> </a>
+<a name="ln57">int updateList(xmlNode * local_cib, xmlNode * update_command, xmlNode * failed,</a>
+<a name="ln58">               int operation, const char *section);</a>
+<a name="ln59"> </a>
+<a name="ln60">gboolean check_generation(xmlNode * newCib, xmlNode * oldCib);</a>
+<a name="ln61"> </a>
+<a name="ln62">gboolean update_results(xmlNode * failed, xmlNode * target, const char *operation, int return_code);</a>
+<a name="ln63"> </a>
+<a name="ln64">int cib_update_counter(xmlNode * xml_obj, const char *field, gboolean reset);</a>
+<a name="ln65"> </a>
+<a name="ln66">int sync_our_cib(xmlNode * request, gboolean all);</a>
+<a name="ln67"> </a>
+<a name="ln68">extern xmlNode *cib_msg_copy(const xmlNode * msg, gboolean with_data);</a>
+<a name="ln69">extern gboolean cib_shutdown_flag;</a>
+<a name="ln70"> </a>
+<a name="ln71">int</a>
+<a name="ln72">cib_process_shutdown_req(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln73">                         xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln74">                         xmlNode ** answer)</a>
+<a name="ln75">{</a>
+<a name="ln76">    int result = pcmk_ok;</a>
+<a name="ln77">    const char *host = crm_element_value(req, F_ORIG);</a>
+<a name="ln78"> </a>
+<a name="ln79">    *answer = NULL;</a>
+<a name="ln80"> </a>
+<a name="ln81">    if (crm_element_value(req, F_CIB_ISREPLY) == NULL) {</a>
+<a name="ln82">        crm_info(&quot;Shutdown REQ from %s&quot;, host);</a>
+<a name="ln83">        return pcmk_ok;</a>
+<a name="ln84"> </a>
+<a name="ln85">    } else if (cib_shutdown_flag) {</a>
+<a name="ln86">        crm_info(&quot;Shutdown ACK from %s&quot;, host);</a>
+<a name="ln87">        terminate_cib(__FUNCTION__, 0);</a>
+<a name="ln88">        return pcmk_ok;</a>
+<a name="ln89"> </a>
+<a name="ln90">    } else {</a>
+<a name="ln91">        crm_err(&quot;Shutdown ACK from %s - not shutting down&quot;, host);</a>
+<a name="ln92">        result = -EINVAL;</a>
+<a name="ln93">    }</a>
+<a name="ln94"> </a>
+<a name="ln95">    return result;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">int</a>
+<a name="ln99">cib_process_default(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln100">                    xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln101">                    xmlNode ** answer)</a>
+<a name="ln102">{</a>
+<a name="ln103">    int result = pcmk_ok;</a>
+<a name="ln104"> </a>
+<a name="ln105">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln106">    *answer = NULL;</a>
+<a name="ln107"> </a>
+<a name="ln108">    if (op == NULL) {</a>
+<a name="ln109">        result = -EINVAL;</a>
+<a name="ln110">        crm_err(&quot;No operation specified&quot;);</a>
+<a name="ln111"> </a>
+<a name="ln112">    } else if (strcasecmp(CRM_OP_NOOP, op) == 0) {</a>
+<a name="ln113">        ;</a>
+<a name="ln114"> </a>
+<a name="ln115">    } else {</a>
+<a name="ln116">        result = -EPROTONOSUPPORT;</a>
+<a name="ln117">        crm_err(&quot;Action [%s] is not supported by the CIB&quot;, op);</a>
+<a name="ln118">    }</a>
+<a name="ln119">    return result;</a>
+<a name="ln120">}</a>
+<a name="ln121"> </a>
+<a name="ln122">int</a>
+<a name="ln123">cib_process_quit(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln124">                 xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln125">{</a>
+<a name="ln126">    int result = pcmk_ok;</a>
+<a name="ln127"> </a>
+<a name="ln128">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln129"> </a>
+<a name="ln130">    crm_warn(&quot;The CRMd has asked us to exit... complying&quot;);</a>
+<a name="ln131">    crm_exit(pcmk_ok);</a>
+<a name="ln132">    return result;</a>
+<a name="ln133">}</a>
+<a name="ln134"> </a>
+<a name="ln135">int</a>
+<a name="ln136">cib_process_readwrite(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln137">                      xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln138">                      xmlNode ** answer)</a>
+<a name="ln139">{</a>
+<a name="ln140">    int result = pcmk_ok;</a>
+<a name="ln141"> </a>
+<a name="ln142">    crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln143"> </a>
+<a name="ln144">    if (safe_str_eq(op, CIB_OP_ISMASTER)) {</a>
+<a name="ln145">        if (cib_is_master == TRUE) {</a>
+<a name="ln146">            result = pcmk_ok;</a>
+<a name="ln147">        } else {</a>
+<a name="ln148">            result = -EPERM;</a>
+<a name="ln149">        }</a>
+<a name="ln150">        return result;</a>
+<a name="ln151">    }</a>
+<a name="ln152"> </a>
+<a name="ln153">    if (safe_str_eq(op, CIB_OP_MASTER)) {</a>
+<a name="ln154">        if (cib_is_master == FALSE) {</a>
+<a name="ln155">            crm_info(&quot;We are now in R/W mode&quot;);</a>
+<a name="ln156">            cib_is_master = TRUE;</a>
+<a name="ln157">        } else {</a>
+<a name="ln158">            crm_debug(&quot;We are still in R/W mode&quot;);</a>
+<a name="ln159">        }</a>
+<a name="ln160"> </a>
+<a name="ln161">    } else if (cib_is_master) {</a>
+<a name="ln162">        crm_info(&quot;We are now in R/O mode&quot;);</a>
+<a name="ln163">        cib_is_master = FALSE;</a>
+<a name="ln164">    }</a>
+<a name="ln165"> </a>
+<a name="ln166">    return result;</a>
+<a name="ln167">}</a>
+<a name="ln168"> </a>
+<a name="ln169">/* Set to 1 when a sync is requested, incremented when a diff is ignored,</a>
+<a name="ln170"> * reset to 0 when a sync is received</a>
+<a name="ln171"> */</a>
+<a name="ln172">static int sync_in_progress = 0;</a>
+<a name="ln173"> </a>
+<a name="ln174">void</a>
+<a name="ln175">send_sync_request(const char *host)</a>
+<a name="ln176">{</a>
+<a name="ln177">    xmlNode *sync_me = create_xml_node(NULL, &quot;sync-me&quot;);</a>
+<a name="ln178"> </a>
+<a name="ln179">    crm_info(&quot;Requesting re-sync from %s&quot;, (host? host : &quot;all peers&quot;));</a>
+<a name="ln180">    sync_in_progress = 1;</a>
+<a name="ln181"> </a>
+<a name="ln182">    crm_xml_add(sync_me, F_TYPE, &quot;cib&quot;);</a>
+<a name="ln183">    crm_xml_add(sync_me, F_CIB_OPERATION, CIB_OP_SYNC_ONE);</a>
+<a name="ln184">    crm_xml_add(sync_me, F_CIB_DELEGATED, cib_our_uname);</a>
+<a name="ln185"> </a>
+<a name="ln186">    send_cluster_message(host ? crm_get_peer(0, host) : NULL, crm_msg_cib, sync_me, FALSE);</a>
+<a name="ln187">    free_xml(sync_me);</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">int</a>
+<a name="ln191">cib_process_ping(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln192">                 xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln193">{</a>
+<a name="ln194">    const char *host = crm_element_value(req, F_ORIG);</a>
+<a name="ln195">    const char *seq = crm_element_value(req, F_CIB_PING_ID);</a>
+<a name="ln196">    char *digest = calculate_xml_versioned_digest(the_cib, FALSE, TRUE, CRM_FEATURE_SET);</a>
+<a name="ln197"> </a>
+<a name="ln198">    static struct qb_log_callsite *cs = NULL;</a>
+<a name="ln199"> </a>
+<a name="ln200">    crm_trace(&quot;Processing \&quot;%s\&quot; event %s from %s&quot;, op, seq, host);</a>
+<a name="ln201">    *answer = create_xml_node(NULL, XML_CRM_TAG_PING);</a>
+<a name="ln202"> </a>
+<a name="ln203">    crm_xml_add(*answer, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln204">    crm_xml_add(*answer, XML_ATTR_DIGEST, digest);</a>
+<a name="ln205">    crm_xml_add(*answer, F_CIB_PING_ID, seq);</a>
+<a name="ln206"> </a>
+<a name="ln207">    if (cs == NULL) {</a>
+<a name="ln208">        cs = qb_log_callsite_get(__func__, __FILE__, __FUNCTION__, LOG_TRACE, __LINE__, crm_trace_nonlog);</a>
+<a name="ln209">    }</a>
+<a name="ln210">    if (cs &amp;&amp; cs-&gt;targets) {</a>
+<a name="ln211">        /* Append additional detail so the reciever can log the differences */</a>
+<a name="ln212">        add_message_xml(*answer, F_CIB_CALLDATA, the_cib);</a>
+<a name="ln213"> </a>
+<a name="ln214">    } else {</a>
+<a name="ln215">        /* Always include at least the version details */</a>
+<a name="ln216">        const char *tag = TYPE(the_cib);</a>
+<a name="ln217">        xmlNode *shallow = create_xml_node(NULL, tag);</a>
+<a name="ln218"> </a>
+<a name="ln219">        copy_in_properties(shallow, the_cib);</a>
+<a name="ln220">        add_message_xml(*answer, F_CIB_CALLDATA, shallow);</a>
+<a name="ln221">        free_xml(shallow);</a>
+<a name="ln222">    }</a>
+<a name="ln223"> </a>
+<a name="ln224">    crm_info(&quot;Reporting our current digest to %s: %s for %s.%s.%s (%p %d)&quot;,</a>
+<a name="ln225">             host, digest,</a>
+<a name="ln226">             crm_element_value(existing_cib, XML_ATTR_GENERATION_ADMIN),</a>
+<a name="ln227">             crm_element_value(existing_cib, XML_ATTR_GENERATION),</a>
+<a name="ln228">             crm_element_value(existing_cib, XML_ATTR_NUMUPDATES),</a>
+<a name="ln229">             existing_cib,</a>
+<a name="ln230">             cs &amp;&amp; cs-&gt;targets);</a>
+<a name="ln231"> </a>
+<a name="ln232">    free(digest);</a>
+<a name="ln233"> </a>
+<a name="ln234">    return pcmk_ok;</a>
+<a name="ln235">}</a>
+<a name="ln236"> </a>
+<a name="ln237">int</a>
+<a name="ln238">cib_process_sync(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln239">                 xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln240">{</a>
+<a name="ln241">    return sync_our_cib(req, TRUE);</a>
+<a name="ln242">}</a>
+<a name="ln243"> </a>
+<a name="ln244">int</a>
+<a name="ln245">cib_process_upgrade_server(const char *op, int options, const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln246">                           xmlNode * existing_cib, xmlNode ** result_cib, xmlNode ** answer)</a>
+<a name="ln247">{</a>
+<a name="ln248">    int rc = pcmk_ok;</a>
+<a name="ln249"> </a>
+<a name="ln250">    *answer = NULL;</a>
+<a name="ln251"> </a>
+<a name="ln252">    if(crm_element_value(req, F_CIB_SCHEMA_MAX)) {</a>
+<a name="ln253">        return cib_process_upgrade(</a>
+<a name="ln254">            op, options, section, req, input, existing_cib, result_cib, answer);</a>
+<a name="ln255"> </a>
+<a name="ln256">    } else {</a>
+<a name="ln257">        int new_version = 0;</a>
+<a name="ln258">        int current_version = 0;</a>
+<a name="ln259">        xmlNode *scratch = copy_xml(existing_cib);</a>
+<a name="ln260">        const char *host = crm_element_value(req, F_ORIG);</a>
+<a name="ln261">        const char *value = crm_element_value(existing_cib, XML_ATTR_VALIDATION);</a>
+<a name="ln262"> </a>
+<a name="ln263">        crm_trace(&quot;Processing \&quot;%s\&quot; event&quot;, op);</a>
+<a name="ln264">        if (value != NULL) {</a>
+<a name="ln265">            current_version = get_schema_version(value);</a>
+<a name="ln266">        }</a>
+<a name="ln267"> </a>
+<a name="ln268">        rc = update_validation(&amp;scratch, &amp;new_version, 0, TRUE, TRUE);</a>
+<a name="ln269">        if (new_version &gt; current_version) {</a>
+<a name="ln270">            xmlNode *up = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln271"> </a>
+<a name="ln272">            rc = pcmk_ok;</a>
+<a name="ln273">            crm_notice(&quot;Upgrade request from %s verified&quot;, host);</a>
+<a name="ln274"> </a>
+<a name="ln275">            crm_xml_add(up, F_TYPE, &quot;cib&quot;);</a>
+<a name="ln276">            crm_xml_add(up, F_CIB_OPERATION, CIB_OP_UPGRADE);</a>
+<a name="ln277">            crm_xml_add(up, F_CIB_SCHEMA_MAX, get_schema_name(new_version));</a>
+<a name="ln278">            crm_xml_add(up, F_CIB_DELEGATED, host);</a>
+<a name="ln279">            crm_xml_add(up, F_CIB_CLIENTID, crm_element_value(req, F_CIB_CLIENTID));</a>
+<a name="ln280">            crm_xml_add(up, F_CIB_CALLOPTS, crm_element_value(req, F_CIB_CALLOPTS));</a>
+<a name="ln281">            crm_xml_add(up, F_CIB_CALLID, crm_element_value(req, F_CIB_CALLID));</a>
+<a name="ln282"> </a>
+<a name="ln283">            if (cib_legacy_mode() &amp;&amp; cib_is_master) {</a>
+<a name="ln284">                rc = cib_process_upgrade(</a>
+<a name="ln285">                    op, options, section, up, input, existing_cib, result_cib, answer);</a>
+<a name="ln286"> </a>
+<a name="ln287">            } else {</a>
+<a name="ln288">                send_cluster_message(NULL, crm_msg_cib, up, FALSE);</a>
+<a name="ln289">            }</a>
+<a name="ln290"> </a>
+<a name="ln291">            free_xml(up);</a>
+<a name="ln292"> </a>
+<a name="ln293">        } else if(rc == pcmk_ok) {</a>
+<a name="ln294">            rc = -pcmk_err_schema_unchanged;</a>
+<a name="ln295">        }</a>
+<a name="ln296"> </a>
+<a name="ln297">        free_xml(scratch);</a>
+<a name="ln298">    }</a>
+<a name="ln299">    return rc;</a>
+<a name="ln300">}</a>
+<a name="ln301"> </a>
+<a name="ln302">int</a>
+<a name="ln303">cib_process_sync_one(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln304">                     xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln305">                     xmlNode ** answer)</a>
+<a name="ln306">{</a>
+<a name="ln307">    return sync_our_cib(req, FALSE);</a>
+<a name="ln308">}</a>
+<a name="ln309"> </a>
+<a name="ln310">int</a>
+<a name="ln311">cib_server_process_diff(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln312">                        xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln313">                        xmlNode ** answer)</a>
+<a name="ln314">{</a>
+<a name="ln315">    int rc = pcmk_ok;</a>
+<a name="ln316"> </a>
+<a name="ln317">    if (sync_in_progress &gt; MAX_DIFF_RETRY) {</a>
+<a name="ln318">        /* Don't ignore diffs forever; the last request may have been lost.</a>
+<a name="ln319">         * If the diff fails, we'll ask for another full resync.</a>
+<a name="ln320">         */</a>
+<a name="ln321">        sync_in_progress = 0;</a>
+<a name="ln322">    }</a>
+<a name="ln323"> </a>
+<a name="ln324">    /* The master should never ignore a diff */</a>
+<a name="ln325">    if (sync_in_progress &amp;&amp; !cib_is_master) {</a>
+<a name="ln326">        int diff_add_updates = 0;</a>
+<a name="ln327">        int diff_add_epoch = 0;</a>
+<a name="ln328">        int diff_add_admin_epoch = 0;</a>
+<a name="ln329"> </a>
+<a name="ln330">        int diff_del_updates = 0;</a>
+<a name="ln331">        int diff_del_epoch = 0;</a>
+<a name="ln332">        int diff_del_admin_epoch = 0;</a>
+<a name="ln333"> </a>
+<a name="ln334">        cib_diff_version_details(input,</a>
+<a name="ln335">                                 &amp;diff_add_admin_epoch, &amp;diff_add_epoch, &amp;diff_add_updates,</a>
+<a name="ln336">                                 &amp;diff_del_admin_epoch, &amp;diff_del_epoch, &amp;diff_del_updates);</a>
+<a name="ln337"> </a>
+<a name="ln338">        sync_in_progress++;</a>
+<a name="ln339">        crm_notice(&quot;Not applying diff %d.%d.%d -&gt; %d.%d.%d (sync in progress)&quot;,</a>
+<a name="ln340">                   diff_del_admin_epoch, diff_del_epoch, diff_del_updates,</a>
+<a name="ln341">                   diff_add_admin_epoch, diff_add_epoch, diff_add_updates);</a>
+<a name="ln342">        return -pcmk_err_diff_resync;</a>
+<a name="ln343">    }</a>
+<a name="ln344"> </a>
+<a name="ln345">    rc = cib_process_diff(op, options, section, req, input, existing_cib, result_cib, answer);</a>
+<a name="ln346">    crm_trace(&quot;result: %s (%d), %s&quot;, pcmk_strerror(rc), rc, cib_is_master?&quot;master&quot;:&quot;slave&quot;);</a>
+<a name="ln347"> </a>
+<a name="ln348">    if (rc == -pcmk_err_diff_resync &amp;&amp; cib_is_master == FALSE) {</a>
+<a name="ln349">        free_xml(*result_cib);</a>
+<a name="ln350">        *result_cib = NULL;</a>
+<a name="ln351">        send_sync_request(NULL);</a>
+<a name="ln352"> </a>
+<a name="ln353">    } else if (rc == -pcmk_err_diff_resync) {</a>
+<a name="ln354">        rc = -pcmk_err_diff_failed;</a>
+<a name="ln355">        if (options &amp; cib_force_diff) {</a>
+<a name="ln356">            crm_warn(&quot;Not requesting full refresh in R/W mode&quot;);</a>
+<a name="ln357">        }</a>
+<a name="ln358"> </a>
+<a name="ln359">    } else if ((rc != pcmk_ok) &amp;&amp; !cib_is_master &amp;&amp; cib_legacy_mode()) {</a>
+<a name="ln360">        crm_warn(&quot;Requesting full CIB refresh because update failed: %s&quot;</a>
+<a name="ln361">                 CRM_XS &quot; rc=%d&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln362">        xml_log_patchset(LOG_INFO, __FUNCTION__, input);</a>
+<a name="ln363">        free_xml(*result_cib);</a>
+<a name="ln364">        *result_cib = NULL;</a>
+<a name="ln365">        send_sync_request(NULL);</a>
+<a name="ln366">    }</a>
+<a name="ln367"> </a>
+<a name="ln368">    return rc;</a>
+<a name="ln369">}</a>
+<a name="ln370"> </a>
+<a name="ln371">int</a>
+<a name="ln372">cib_process_replace_svr(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln373">                        xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln374">                        xmlNode ** answer)</a>
+<a name="ln375">{</a>
+<a name="ln376">    const char *tag = crm_element_name(input);</a>
+<a name="ln377">    int rc =</a>
+<a name="ln378">        cib_process_replace(op, options, section, req, input, existing_cib, result_cib, answer);</a>
+<a name="ln379">    if (rc == pcmk_ok &amp;&amp; safe_str_eq(tag, XML_TAG_CIB)) {</a>
+<a name="ln380">        sync_in_progress = 0;</a>
+<a name="ln381">    }</a>
+<a name="ln382">    return rc;</a>
+<a name="ln383">}</a>
+<a name="ln384"> </a>
+<a name="ln385">static int</a>
+<a name="ln386">delete_cib_object(xmlNode * parent, xmlNode * delete_spec)</a>
+<a name="ln387">{</a>
+<a name="ln388">    const char *object_name = NULL;</a>
+<a name="ln389">    const char *object_id = NULL;</a>
+<a name="ln390">    xmlNode *equiv_node = NULL;</a>
+<a name="ln391">    int result = pcmk_ok;</a>
+<a name="ln392"> </a>
+<a name="ln393">    if (delete_spec != NULL) {</a>
+<a name="ln394">        object_name = crm_element_name(delete_spec);</a>
+<a name="ln395">    }</a>
+<a name="ln396">    object_id = crm_element_value(delete_spec, XML_ATTR_ID);</a>
+<a name="ln397"> </a>
+<a name="ln398">    crm_trace(&quot;Processing: &lt;%s id=%s&gt;&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln399"> </a>
+<a name="ln400">    if (delete_spec == NULL) {</a>
+<a name="ln401">        result = -EINVAL;</a>
+<a name="ln402"> </a>
+<a name="ln403">    } else if (parent == NULL) {</a>
+<a name="ln404">        result = -EINVAL;</a>
+<a name="ln405"> </a>
+<a name="ln406">    } else if (object_id == NULL) {</a>
+<a name="ln407">        /*  placeholder object */</a>
+<a name="ln408">        equiv_node = find_xml_node(parent, object_name, FALSE);</a>
+<a name="ln409"> </a>
+<a name="ln410">    } else {</a>
+<a name="ln411">        equiv_node = find_entity(parent, object_name, object_id);</a>
+<a name="ln412">    }</a>
+<a name="ln413"> </a>
+<a name="ln414">    if (result != pcmk_ok) {</a>
+<a name="ln415">        ;                       /* nothing */</a>
+<a name="ln416"> </a>
+<a name="ln417">    } else if (equiv_node == NULL) {</a>
+<a name="ln418">        result = pcmk_ok;</a>
+<a name="ln419"> </a>
+<a name="ln420">    } else if (xml_has_children(delete_spec) == FALSE) {</a>
+<a name="ln421">        /*  only leaves are deleted */</a>
+<a name="ln422">        crm_debug(&quot;Removing leaf: &lt;%s id=%s&gt;&quot;, crm_str(object_name), crm_str(object_id));</a>
+<a name="ln423">        free_xml(equiv_node);</a>
+<a name="ln424">        equiv_node = NULL;</a>
+<a name="ln425"> </a>
+<a name="ln426">    } else {</a>
+<a name="ln427">        xmlNode *child = NULL;</a>
+<a name="ln428"> </a>
+<a name="ln429">        for (child = __xml_first_child(delete_spec); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln430">            int tmp_result = delete_cib_object(equiv_node, child);</a>
+<a name="ln431"> </a>
+<a name="ln432">            /*  only the first error is likely to be interesting */</a>
+<a name="ln433">            if (tmp_result != pcmk_ok &amp;&amp; result == pcmk_ok) {</a>
+<a name="ln434">                result = tmp_result;</a>
+<a name="ln435">            }</a>
+<a name="ln436">        }</a>
+<a name="ln437">    }</a>
+<a name="ln438"> </a>
+<a name="ln439">    return result;</a>
+<a name="ln440">}</a>
+<a name="ln441"> </a>
+<a name="ln442">int</a>
+<a name="ln443">cib_process_delete_absolute(const char *op, int options, const char *section, xmlNode * req,</a>
+<a name="ln444">                            xmlNode * input, xmlNode * existing_cib, xmlNode ** result_cib,</a>
+<a name="ln445">                            xmlNode ** answer)</a>
+<a name="ln446">{</a>
+<a name="ln447">    xmlNode *failed = NULL;</a>
+<a name="ln448">    int result = pcmk_ok;</a>
+<a name="ln449">    xmlNode *update_section = NULL;</a>
+<a name="ln450"> </a>
+<a name="ln451">    crm_trace(&quot;Processing \&quot;%s\&quot; event for section=%s&quot;, op, crm_str(section));</a>
+<a name="ln452">    if (safe_str_eq(XML_CIB_TAG_SECTION_ALL, section)) {</a>
+<a name="ln453">        section = NULL;</a>
+<a name="ln454"> </a>
+<a name="ln455">    } else if (safe_str_eq(XML_TAG_CIB, section)) {</a>
+<a name="ln456">        section = NULL;</a>
+<a name="ln457"> </a>
+<a name="ln458">    } else if (safe_str_eq(crm_element_name(input), XML_TAG_CIB)) {</a>
+<a name="ln459">        section = NULL;</a>
+<a name="ln460">    }</a>
+<a name="ln461"> </a>
+<a name="ln462">    CRM_CHECK(strcasecmp(CIB_OP_DELETE, op) == 0, return -EINVAL);</a>
+<a name="ln463"> </a>
+<a name="ln464">    if (input == NULL) {</a>
+<a name="ln465">        crm_err(&quot;Cannot perform modification with no data&quot;);</a>
+<a name="ln466">        return -EINVAL;</a>
+<a name="ln467">    }</a>
+<a name="ln468"> </a>
+<a name="ln469">    failed = create_xml_node(NULL, XML_TAG_FAILED);</a>
+<a name="ln470"> </a>
+<a name="ln471">    update_section = get_object_root(section, *result_cib);</a>
+<a name="ln472">    result = delete_cib_object(update_section, input);</a>
+<a name="ln473">    update_results(failed, input, op, result);</a>
+<a name="ln474"> </a>
+<a name="ln475">    if (xml_has_children(failed)) {</a>
+<a name="ln476">        CRM_CHECK(result != pcmk_ok, result = -EINVAL);</a>
+<a name="ln477">    }</a>
+<a name="ln478"> </a>
+<a name="ln479">    if (result != pcmk_ok) {</a>
+<a name="ln480">        crm_log_xml_err(failed, &quot;CIB Update failures&quot;);</a>
+<a name="ln481">        *answer = failed;</a>
+<a name="ln482"> </a>
+<a name="ln483">    } else {</a>
+<a name="ln484">        free_xml(failed);</a>
+<a name="ln485">    }</a>
+<a name="ln486"> </a>
+<a name="ln487">    return result;</a>
+<a name="ln488">}</a>
+<a name="ln489"> </a>
+<a name="ln490">gboolean</a>
+<a name="ln491">check_generation(xmlNode * newCib, xmlNode * oldCib)</a>
+<a name="ln492">{</a>
+<a name="ln493">    if (cib_compare_generation(newCib, oldCib) &gt;= 0) {</a>
+<a name="ln494">        return TRUE;</a>
+<a name="ln495">    }</a>
+<a name="ln496"> </a>
+<a name="ln497">    crm_warn(&quot;Generation from update is older than the existing one&quot;);</a>
+<a name="ln498">    return FALSE;</a>
+<a name="ln499">}</a>
+<a name="ln500"> </a>
+<a name="ln501">int</a>
+<a name="ln502">sync_our_cib(xmlNode * request, gboolean all)</a>
+<a name="ln503">{</a>
+<a name="ln504">    int result = pcmk_ok;</a>
+<a name="ln505">    char *digest = NULL;</a>
+<a name="ln506">    const char *host = crm_element_value(request, F_ORIG);</a>
+<a name="ln507">    const char *op = crm_element_value(request, F_CIB_OPERATION);</a>
+<a name="ln508"> </a>
+<a name="ln509">    xmlNode *replace_request = cib_msg_copy(request, FALSE);</a>
+<a name="ln510"> </a>
+<a name="ln511">    CRM_CHECK(the_cib != NULL,;);</a>
+<a name="ln512">    CRM_CHECK(replace_request != NULL,;);</a>
+<a name="ln513"> </a>
+<a name="ln514">    crm_debug(&quot;Syncing CIB to %s&quot;, all ? &quot;all peers&quot; : host);</a>
+<a name="ln515">    if (all == FALSE &amp;&amp; host == NULL) {</a>
+<a name="ln516">        crm_log_xml_err(request, &quot;bad sync&quot;);</a>
+<a name="ln517">    }</a>
+<a name="ln518"> </a>
+<a name="ln519">    /* remove the &quot;all == FALSE&quot; condition</a>
+<a name="ln520">     *</a>
+<a name="ln521">     * sync_from was failing, the local client wasn't being notified</a>
+<a name="ln522">     *    because it didn't know it was a reply</a>
+<a name="ln523">     * setting this does not prevent the other nodes from applying it</a>
+<a name="ln524">     *    if all == TRUE</a>
+<a name="ln525">     */</a>
+<a name="ln526">    if (host != NULL) {</a>
+<a name="ln527">        crm_xml_add(replace_request, F_CIB_ISREPLY, host);</a>
+<a name="ln528">    }</a>
+<a name="ln529">    if (all) {</a>
+<a name="ln530">        xml_remove_prop(replace_request, F_CIB_HOST);</a>
+<a name="ln531">    }</a>
+<a name="ln532"> </a>
+<a name="ln533">    crm_xml_add(replace_request, F_CIB_OPERATION, CIB_OP_REPLACE);</a>
+<a name="ln534">    crm_xml_add(replace_request, &quot;original_&quot; F_CIB_OPERATION, op);</a>
+<a name="ln535">    crm_xml_add(replace_request, F_CIB_GLOBAL_UPDATE, XML_BOOLEAN_TRUE);</a>
+<a name="ln536"> </a>
+<a name="ln537">    crm_xml_add(replace_request, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln538">    digest = calculate_xml_versioned_digest(the_cib, FALSE, TRUE, CRM_FEATURE_SET);</a>
+<a name="ln539">    crm_xml_add(replace_request, XML_ATTR_DIGEST, digest);</a>
+<a name="ln540"> </a>
+<a name="ln541">    add_message_xml(replace_request, F_CIB_CALLDATA, the_cib);</a>
+<a name="ln542"> </a>
+<a name="ln543">    if (send_cluster_message</a>
+<a name="ln544">        (all ? NULL : crm_get_peer(0, host), crm_msg_cib, replace_request, FALSE) == FALSE) {</a>
+<a name="ln545">        result = -ENOTCONN;</a>
+<a name="ln546">    }</a>
+<a name="ln547">    free_xml(replace_request);</a>
+<a name="ln548">    free(digest);</a>
+<a name="ln549">    return result;</a>
+<a name="ln550">}</a>
+
+</code></pre>
+<div class="balloon" rel="462"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

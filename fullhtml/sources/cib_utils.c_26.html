@@ -1,0 +1,879 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2004 International Business Machines</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;unistd.h&gt;</a>
+<a name="ln25">#include &lt;stdlib.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;stdarg.h&gt;</a>
+<a name="ln28">#include &lt;string.h&gt;</a>
+<a name="ln29">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;glib.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;crm/crm.h&gt;</a>
+<a name="ln34">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln35">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln36">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln37">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln38"> </a>
+<a name="ln39">struct config_root_s {</a>
+<a name="ln40">    const char *name;</a>
+<a name="ln41">    const char *parent;</a>
+<a name="ln42">    const char *path;</a>
+<a name="ln43">};</a>
+<a name="ln44"> </a>
+<a name="ln45"> /*</a>
+<a name="ln46">  * &quot;//crm_config&quot; will also work in place of &quot;/cib/configuration/crm_config&quot;</a>
+<a name="ln47">  * The / prefix means find starting from the root, whereas the // prefix means</a>
+<a name="ln48">  * find anywhere and risks multiple matches</a>
+<a name="ln49">  */</a>
+<a name="ln50">/* *INDENT-OFF* */</a>
+<a name="ln51">struct config_root_s known_paths[] = {</a>
+<a name="ln52">    { NULL,			NULL,                 &quot;//cib&quot; },</a>
+<a name="ln53">    { XML_TAG_CIB,		NULL,                 &quot;//cib&quot; },</a>
+<a name="ln54">    { XML_CIB_TAG_STATUS,       &quot;/cib&quot;,               &quot;//cib/status&quot; },</a>
+<a name="ln55">    { XML_CIB_TAG_CONFIGURATION,&quot;/cib&quot;,               &quot;//cib/configuration&quot; },</a>
+<a name="ln56">    { XML_CIB_TAG_CRMCONFIG,    &quot;/cib/configuration&quot;, &quot;//cib/configuration/crm_config&quot; },</a>
+<a name="ln57">    { XML_CIB_TAG_NODES,        &quot;/cib/configuration&quot;, &quot;//cib/configuration/nodes&quot; },</a>
+<a name="ln58">    { XML_CIB_TAG_DOMAINS,      &quot;/cib/configuration&quot;, &quot;//cib/configuration/domains&quot; },</a>
+<a name="ln59">    { XML_CIB_TAG_RESOURCES,    &quot;/cib/configuration&quot;, &quot;//cib/configuration/resources&quot; },</a>
+<a name="ln60">    { XML_CIB_TAG_CONSTRAINTS,  &quot;/cib/configuration&quot;, &quot;//cib/configuration/constraints&quot; },</a>
+<a name="ln61">    { XML_CIB_TAG_OPCONFIG,	&quot;/cib/configuration&quot;, &quot;//cib/configuration/op_defaults&quot; },</a>
+<a name="ln62">    { XML_CIB_TAG_RSCCONFIG,	&quot;/cib/configuration&quot;, &quot;//cib/configuration/rsc_defaults&quot; },</a>
+<a name="ln63">    { XML_CIB_TAG_ACLS,		&quot;/cib/configuration&quot;, &quot;//cib/configuration/acls&quot; },</a>
+<a name="ln64">    { XML_TAG_FENCING_TOPOLOGY,	&quot;/cib/configuration&quot;, &quot;//cib/configuration/fencing-topology&quot; },</a>
+<a name="ln65">    { XML_CIB_TAG_SECTION_ALL,  NULL,                 &quot;//cib&quot; },</a>
+<a name="ln66">};</a>
+<a name="ln67">/* *INDENT-ON* */</a>
+<a name="ln68"> </a>
+<a name="ln69">int</a>
+<a name="ln70">cib_compare_generation(xmlNode * left, xmlNode * right)</a>
+<a name="ln71">{</a>
+<a name="ln72">    int lpc = 0;</a>
+<a name="ln73"> </a>
+<a name="ln74">    const char *attributes[] = {</a>
+<a name="ln75">        XML_ATTR_GENERATION_ADMIN,</a>
+<a name="ln76">        XML_ATTR_GENERATION,</a>
+<a name="ln77">        XML_ATTR_NUMUPDATES,</a>
+<a name="ln78">    };</a>
+<a name="ln79"> </a>
+<a name="ln80">    crm_log_xml_trace(left, &quot;left&quot;);</a>
+<a name="ln81">    crm_log_xml_trace(right, &quot;right&quot;);</a>
+<a name="ln82"> </a>
+<a name="ln83">    for (lpc = 0; lpc &lt; DIMOF(attributes); lpc++) {</a>
+<a name="ln84">        int int_elem_l = -1;</a>
+<a name="ln85">        int int_elem_r = -1;</a>
+<a name="ln86">        const char *elem_r = NULL;</a>
+<a name="ln87">        const char *elem_l = crm_element_value(left, attributes[lpc]);</a>
+<a name="ln88"> </a>
+<a name="ln89">        if (right != NULL) {</a>
+<a name="ln90">            elem_r = crm_element_value(right, attributes[lpc]);</a>
+<a name="ln91">        }</a>
+<a name="ln92"> </a>
+<a name="ln93">        if (elem_l != NULL) {</a>
+<a name="ln94">            int_elem_l = crm_parse_int(elem_l, NULL);</a>
+<a name="ln95">        }</a>
+<a name="ln96">        if (elem_r != NULL) {</a>
+<a name="ln97">            int_elem_r = crm_parse_int(elem_r, NULL);</a>
+<a name="ln98">        }</a>
+<a name="ln99"> </a>
+<a name="ln100">        if (int_elem_l &lt; int_elem_r) {</a>
+<a name="ln101">            crm_trace(&quot;%s (%s &lt; %s)&quot;, attributes[lpc], crm_str(elem_l), crm_str(elem_r));</a>
+<a name="ln102">            return -1;</a>
+<a name="ln103"> </a>
+<a name="ln104">        } else if (int_elem_l &gt; int_elem_r) {</a>
+<a name="ln105">            crm_trace(&quot;%s (%s &gt; %s)&quot;, attributes[lpc], crm_str(elem_l), crm_str(elem_r));</a>
+<a name="ln106">            return 1;</a>
+<a name="ln107">        }</a>
+<a name="ln108">    }</a>
+<a name="ln109"> </a>
+<a name="ln110">    return 0;</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">/* Deprecated - doesn't expose -EACCES */</a>
+<a name="ln114">xmlNode *</a>
+<a name="ln115">get_cib_copy(cib_t * cib)</a>
+<a name="ln116">{</a>
+<a name="ln117">    xmlNode *xml_cib;</a>
+<a name="ln118">    int options = cib_scope_local | cib_sync_call;</a>
+<a name="ln119">    int rc = pcmk_ok;</a>
+<a name="ln120"> </a>
+<a name="ln121">    if (cib-&gt;state == cib_disconnected) {</a>
+<a name="ln122">        return NULL;</a>
+<a name="ln123">    }</a>
+<a name="ln124"> </a>
+<a name="ln125">    rc = cib-&gt;cmds-&gt;query(cib, NULL, &amp;xml_cib, options);</a>
+<a name="ln126">    if (rc == -EACCES) {</a>
+<a name="ln127">        return NULL;</a>
+<a name="ln128"> </a>
+<a name="ln129">    } else if (rc != pcmk_ok) {</a>
+<a name="ln130">        crm_err(&quot;Couldn't retrieve the CIB&quot;);</a>
+<a name="ln131">        free_xml(xml_cib);</a>
+<a name="ln132">        return NULL;</a>
+<a name="ln133"> </a>
+<a name="ln134">    } else if (xml_cib == NULL) {</a>
+<a name="ln135">        crm_err(&quot;The CIB result was empty&quot;);</a>
+<a name="ln136">        free_xml(xml_cib);</a>
+<a name="ln137">        return NULL;</a>
+<a name="ln138">    }</a>
+<a name="ln139"> </a>
+<a name="ln140">    if (safe_str_eq(crm_element_name(xml_cib), XML_TAG_CIB)) {</a>
+<a name="ln141">        return xml_cib;</a>
+<a name="ln142">    }</a>
+<a name="ln143">    free_xml(xml_cib);</a>
+<a name="ln144">    return NULL;</a>
+<a name="ln145">}</a>
+<a name="ln146"> </a>
+<a name="ln147">xmlNode *</a>
+<a name="ln148">cib_get_generation(cib_t * cib)</a>
+<a name="ln149">{</a>
+<a name="ln150">    xmlNode *the_cib = NULL;</a>
+<a name="ln151">    xmlNode *generation = create_xml_node(NULL, XML_CIB_TAG_GENERATION_TUPPLE);</a>
+<a name="ln152"> </a>
+<a name="ln153">    cib-&gt;cmds-&gt;query(cib, NULL, &amp;the_cib, cib_scope_local | cib_sync_call);</a>
+<a name="ln154">    if (the_cib != NULL) {</a>
+<a name="ln155">        copy_in_properties(generation, the_cib);</a>
+<a name="ln156">        free_xml(the_cib);</a>
+<a name="ln157">    }</a>
+<a name="ln158"> </a>
+<a name="ln159">    return generation;</a>
+<a name="ln160">}</a>
+<a name="ln161"> </a>
+<a name="ln162">gboolean</a>
+<a name="ln163">cib_version_details(xmlNode * cib, int *admin_epoch, int *epoch, int *updates)</a>
+<a name="ln164">{</a>
+<a name="ln165">    *epoch = -1;</a>
+<a name="ln166">    *updates = -1;</a>
+<a name="ln167">    *admin_epoch = -1;</a>
+<a name="ln168"> </a>
+<a name="ln169">    if (cib == NULL) {</a>
+<a name="ln170">        return FALSE;</a>
+<a name="ln171"> </a>
+<a name="ln172">    } else {</a>
+<a name="ln173">        crm_element_value_int(cib, XML_ATTR_GENERATION, epoch);</a>
+<a name="ln174">        crm_element_value_int(cib, XML_ATTR_NUMUPDATES, updates);</a>
+<a name="ln175">        crm_element_value_int(cib, XML_ATTR_GENERATION_ADMIN, admin_epoch);</a>
+<a name="ln176">    }</a>
+<a name="ln177">    return TRUE;</a>
+<a name="ln178">}</a>
+<a name="ln179"> </a>
+<a name="ln180">gboolean</a>
+<a name="ln181">cib_diff_version_details(xmlNode * diff, int *admin_epoch, int *epoch, int *updates,</a>
+<a name="ln182">                         int *_admin_epoch, int *_epoch, int *_updates)</a>
+<a name="ln183">{</a>
+<a name="ln184">    int add[] = { 0, 0, 0 };</a>
+<a name="ln185">    int del[] = { 0, 0, 0 };</a>
+<a name="ln186"> </a>
+<a name="ln187">    xml_patch_versions(diff, add, del);</a>
+<a name="ln188"> </a>
+<a name="ln189">    *admin_epoch = add[0];</a>
+<a name="ln190">    *epoch = add[1];</a>
+<a name="ln191">    *updates = add[2];</a>
+<a name="ln192"> </a>
+<a name="ln193">    *_admin_epoch = del[0];</a>
+<a name="ln194">    *_epoch = del[1];</a>
+<a name="ln195">    *_updates = del[2];</a>
+<a name="ln196"> </a>
+<a name="ln197">    return TRUE;</a>
+<a name="ln198">}</a>
+<a name="ln199"> </a>
+<a name="ln200">/*</a>
+<a name="ln201"> * The caller should never free the return value</a>
+<a name="ln202"> */</a>
+<a name="ln203"> </a>
+<a name="ln204">const char *</a>
+<a name="ln205">get_object_path(const char *object_type)</a>
+<a name="ln206">{</a>
+<a name="ln207">    int lpc = 0;</a>
+<a name="ln208">    int max = DIMOF(known_paths);</a>
+<a name="ln209"> </a>
+<a name="ln210">    for (; lpc &lt; max; lpc++) {</a>
+<a name="ln211">        if ((object_type == NULL &amp;&amp; known_paths[lpc].name == NULL)</a>
+<a name="ln212">            || safe_str_eq(object_type, known_paths[lpc].name)) {</a>
+<a name="ln213">            return known_paths[lpc].path;</a>
+<a name="ln214">        }</a>
+<a name="ln215">    }</a>
+<a name="ln216">    return NULL;</a>
+<a name="ln217">}</a>
+<a name="ln218"> </a>
+<a name="ln219">const char *</a>
+<a name="ln220">get_object_parent(const char *object_type)</a>
+<a name="ln221">{</a>
+<a name="ln222">    int lpc = 0;</a>
+<a name="ln223">    int max = DIMOF(known_paths);</a>
+<a name="ln224"> </a>
+<a name="ln225">    for (; lpc &lt; max; lpc++) {</a>
+<a name="ln226">        if (safe_str_eq(object_type, known_paths[lpc].name)) {</a>
+<a name="ln227">            return known_paths[lpc].parent;</a>
+<a name="ln228">        }</a>
+<a name="ln229">    }</a>
+<a name="ln230">    return NULL;</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">xmlNode *</a>
+<a name="ln234">get_object_root(const char *object_type, xmlNode * the_root)</a>
+<a name="ln235">{</a>
+<a name="ln236">    const char *xpath = get_object_path(object_type);</a>
+<a name="ln237"> </a>
+<a name="ln238">    if (xpath == NULL) {</a>
+<a name="ln239">        return the_root;        /* or return NULL? */</a>
+<a name="ln240">    }</a>
+<a name="ln241"> </a>
+<a name="ln242">    return get_xpath_object(xpath, the_root, LOG_DEBUG_4);</a>
+<a name="ln243">}</a>
+<a name="ln244"> </a>
+<a name="ln245">/*</a>
+<a name="ln246"> * It is the callers responsibility to free both the new CIB (output)</a>
+<a name="ln247"> *     and the new CIB (input)</a>
+<a name="ln248"> */</a>
+<a name="ln249">xmlNode *</a>
+<a name="ln250">createEmptyCib(int admin_epoch)</a>
+<a name="ln251">{</a>
+<a name="ln252">    xmlNode *cib_root = NULL, *config = NULL;</a>
+<a name="ln253"> </a>
+<a name="ln254">    cib_root = create_xml_node(NULL, XML_TAG_CIB);</a>
+<a name="ln255">    crm_xml_add(cib_root, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln256">    crm_xml_add(cib_root, XML_ATTR_VALIDATION, xml_latest_schema());</a>
+<a name="ln257"> </a>
+<a name="ln258">    crm_xml_add_int(cib_root, XML_ATTR_GENERATION, admin_epoch);</a>
+<a name="ln259">    crm_xml_add_int(cib_root, XML_ATTR_NUMUPDATES, 0);</a>
+<a name="ln260">    crm_xml_add_int(cib_root, XML_ATTR_GENERATION_ADMIN, 0);</a>
+<a name="ln261"> </a>
+<a name="ln262">    config = create_xml_node(cib_root, XML_CIB_TAG_CONFIGURATION);</a>
+<a name="ln263">    create_xml_node(cib_root, XML_CIB_TAG_STATUS);</a>
+<a name="ln264"> </a>
+<a name="ln265">    create_xml_node(config, XML_CIB_TAG_CRMCONFIG);</a>
+<a name="ln266">    create_xml_node(config, XML_CIB_TAG_NODES);</a>
+<a name="ln267">    create_xml_node(config, XML_CIB_TAG_RESOURCES);</a>
+<a name="ln268">    create_xml_node(config, XML_CIB_TAG_CONSTRAINTS);</a>
+<a name="ln269"> </a>
+<a name="ln270">    return cib_root;</a>
+<a name="ln271">}</a>
+<a name="ln272"> </a>
+<a name="ln273">static bool</a>
+<a name="ln274">cib_acl_enabled(xmlNode *xml, const char *user)</a>
+<a name="ln275">{</a>
+<a name="ln276">    bool rc = FALSE;</a>
+<a name="ln277"> </a>
+<a name="ln278">#if ENABLE_ACL</a>
+<a name="ln279">    if(pcmk_acl_required(user)) {</a>
+<a name="ln280">        const char *value = NULL;</a>
+<a name="ln281">        GHashTable *options = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln282"> </a>
+<a name="ln283">        cib_read_config(options, xml);</a>
+<a name="ln284">        value = cib_pref(options, &quot;enable-acl&quot;);</a>
+<a name="ln285">        rc = crm_is_true(value);</a>
+<a name="ln286">        g_hash_table_destroy(options);</a>
+<a name="ln287">    }</a>
+<a name="ln288"> </a>
+<a name="ln289">    crm_trace(&quot;CIB ACL is %s&quot;, rc ? &quot;enabled&quot; : &quot;disabled&quot;);</a>
+<a name="ln290">#endif</a>
+<a name="ln291">    return rc;</a>
+<a name="ln292">}</a>
+<a name="ln293"> </a>
+<a name="ln294">int</a>
+<a name="ln295">cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_query,</a>
+<a name="ln296">               const char *section, xmlNode * req, xmlNode * input,</a>
+<a name="ln297">               gboolean manage_counters, gboolean * config_changed,</a>
+<a name="ln298">               xmlNode * current_cib, xmlNode ** result_cib, xmlNode ** diff, xmlNode ** output)</a>
+<a name="ln299">{</a>
+<a name="ln300">    int rc = pcmk_ok;</a>
+<a name="ln301">    gboolean check_dtd = TRUE;</a>
+<a name="ln302">    xmlNode *top = NULL;</a>
+<a name="ln303">    xmlNode *scratch = NULL;</a>
+<a name="ln304">    xmlNode *local_diff = NULL;</a>
+<a name="ln305"> </a>
+<a name="ln306">    const char *new_version = NULL;</a>
+<a name="ln307">    static struct qb_log_callsite *diff_cs = NULL;</a>
+<a name="ln308">    const char *user = crm_element_value(req, F_CIB_USER);</a>
+<a name="ln309">    bool with_digest = FALSE;</a>
+<a name="ln310"> </a>
+<a name="ln311">    crm_trace(&quot;Begin %s%s%s op&quot;, is_set(call_options, cib_dryrun)?&quot;dry-run of &quot;:&quot;&quot;, is_query ? &quot;read-only &quot; : &quot;&quot;, op);</a>
+<a name="ln312"> </a>
+<a name="ln313">    CRM_CHECK(output != NULL, return -ENOMSG);</a>
+<a name="ln314">    CRM_CHECK(result_cib != NULL, return -ENOMSG);</a>
+<a name="ln315">    CRM_CHECK(config_changed != NULL, return -ENOMSG);</a>
+<a name="ln316"> </a>
+<a name="ln317">    if(output) {</a>
+<a name="ln318">        *output = NULL;</a>
+<a name="ln319">    }</a>
+<a name="ln320"> </a>
+<a name="ln321">    *result_cib = NULL;</a>
+<a name="ln322">    *config_changed = FALSE;</a>
+<a name="ln323"> </a>
+<a name="ln324">    if (fn == NULL) {</a>
+<a name="ln325">        return -EINVAL;</a>
+<a name="ln326">    }</a>
+<a name="ln327"> </a>
+<a name="ln328">    if (is_query) {</a>
+<a name="ln329">        xmlNode *cib_ro = current_cib;</a>
+<a name="ln330">        xmlNode *cib_filtered = NULL;</a>
+<a name="ln331"> </a>
+<a name="ln332">        if(cib_acl_enabled(cib_ro, user)) {</a>
+<a name="ln333">            if(xml_acl_filtered_copy(user, current_cib, current_cib, &amp;cib_filtered)) {</a>
+<a name="ln334">                if (cib_filtered == NULL) {</a>
+<a name="ln335">                    crm_debug(&quot;Pre-filtered the entire cib&quot;);</a>
+<a name="ln336">                    return -EACCES;</a>
+<a name="ln337">                }</a>
+<a name="ln338">                cib_ro = cib_filtered;</a>
+<a name="ln339">                crm_log_xml_trace(cib_ro, &quot;filtered&quot;);</a>
+<a name="ln340">            }</a>
+<a name="ln341">        }</a>
+<a name="ln342"> </a>
+<a name="ln343">        rc = (*fn) (op, call_options, section, req, input, cib_ro, result_cib, output);</a>
+<a name="ln344"> </a>
+<a name="ln345">        if(output == NULL || *output == NULL) {</a>
+<a name="ln346">            /* nothing */</a>
+<a name="ln347"> </a>
+<a name="ln348">        } else if(cib_filtered == *output) {</a>
+<a name="ln349">            cib_filtered = NULL; /* Let them have this copy */</a>
+<a name="ln350"> </a>
+<a name="ln351">        } else if(*output == current_cib) {</a>
+<a name="ln352">            /* They already know not to free it */</a>
+<a name="ln353"> </a>
+<a name="ln354">        } else if(cib_filtered &amp;&amp; (*output)-&gt;doc == cib_filtered-&gt;doc) {</a>
+<a name="ln355">            /* We're about to free the document of which *output is a part */</a>
+<a name="ln356">            *output = copy_xml(*output);</a>
+<a name="ln357"> </a>
+<a name="ln358">        } else if((*output)-&gt;doc == current_cib-&gt;doc) {</a>
+<a name="ln359">            /* Give them a copy they can free */</a>
+<a name="ln360">            *output = copy_xml(*output);</a>
+<a name="ln361">        }</a>
+<a name="ln362"> </a>
+<a name="ln363">        free_xml(cib_filtered);</a>
+<a name="ln364">        return rc;</a>
+<a name="ln365">    }</a>
+<a name="ln366"> </a>
+<a name="ln367"> </a>
+<a name="ln368">    if (is_set(call_options, cib_zero_copy)) {</a>
+<a name="ln369">        /* Conditional on v2 patch style */</a>
+<a name="ln370"> </a>
+<a name="ln371">        scratch = current_cib;</a>
+<a name="ln372"> </a>
+<a name="ln373">        /* Create a shallow copy of current_cib for the version details */</a>
+<a name="ln374">        current_cib = create_xml_node(NULL, (const char *)scratch-&gt;name);</a>
+<a name="ln375">        copy_in_properties(current_cib, scratch);</a>
+<a name="ln376">        top = current_cib;</a>
+<a name="ln377"> </a>
+<a name="ln378">        xml_track_changes(scratch, user, NULL, cib_acl_enabled(scratch, user));</a>
+<a name="ln379">        rc = (*fn) (op, call_options, section, req, input, scratch, &amp;scratch, output);</a>
+<a name="ln380"> </a>
+<a name="ln381">    } else {</a>
+<a name="ln382">        scratch = copy_xml(current_cib);</a>
+<a name="ln383">        xml_track_changes(scratch, user, NULL, cib_acl_enabled(scratch, user));</a>
+<a name="ln384">        rc = (*fn) (op, call_options, section, req, input, current_cib, &amp;scratch, output);</a>
+<a name="ln385"> </a>
+<a name="ln386">        if(scratch &amp;&amp; xml_tracking_changes(scratch) == FALSE) {</a>
+<a name="ln387">            crm_trace(&quot;Inferring changes after %s op&quot;, op);</a>
+<a name="ln388">            xml_track_changes(scratch, user, current_cib, cib_acl_enabled(current_cib, user));</a>
+<a name="ln389">            xml_calculate_changes(current_cib, scratch);</a>
+<a name="ln390">        }</a>
+<a name="ln391">        CRM_CHECK(current_cib != scratch, return -EINVAL);</a>
+<a name="ln392">    }</a>
+<a name="ln393"> </a>
+<a name="ln394">    xml_acl_disable(scratch); /* Allow the system to make any additional changes */</a>
+<a name="ln395"> </a>
+<a name="ln396">    if (rc == pcmk_ok &amp;&amp; scratch == NULL) {</a>
+<a name="ln397">        rc = -EINVAL;</a>
+<a name="ln398">        goto done;</a>
+<a name="ln399"> </a>
+<a name="ln400">    } else if(rc == pcmk_ok &amp;&amp; xml_acl_denied(scratch)) {</a>
+<a name="ln401">        crm_trace(&quot;ACL rejected part or all of the proposed changes&quot;);</a>
+<a name="ln402">        rc = -EACCES;</a>
+<a name="ln403">        goto done;</a>
+<a name="ln404"> </a>
+<a name="ln405">    } else if (rc != pcmk_ok) {</a>
+<a name="ln406">        goto done;</a>
+<a name="ln407">    }</a>
+<a name="ln408"> </a>
+<a name="ln409">    if (scratch) {</a>
+<a name="ln410">        new_version = crm_element_value(scratch, XML_ATTR_CRM_VERSION);</a>
+<a name="ln411"> </a>
+<a name="ln412">        if (new_version &amp;&amp; compare_version(new_version, CRM_FEATURE_SET) &gt; 0) {</a>
+<a name="ln413">            crm_err(&quot;Discarding update with feature set '%s' greater than our own '%s'&quot;,</a>
+<a name="ln414">                    new_version, CRM_FEATURE_SET);</a>
+<a name="ln415">            rc = -EPROTONOSUPPORT;</a>
+<a name="ln416">            goto done;</a>
+<a name="ln417">        }</a>
+<a name="ln418">    }</a>
+<a name="ln419"> </a>
+<a name="ln420">    if (current_cib) {</a>
+<a name="ln421">        int old = 0;</a>
+<a name="ln422">        int new = 0;</a>
+<a name="ln423"> </a>
+<a name="ln424">        crm_element_value_int(scratch, XML_ATTR_GENERATION_ADMIN, &amp;new);</a>
+<a name="ln425">        crm_element_value_int(current_cib, XML_ATTR_GENERATION_ADMIN, &amp;old);</a>
+<a name="ln426"> </a>
+<a name="ln427">        if (old &gt; new) {</a>
+<a name="ln428">            crm_err(&quot;%s went backwards: %d -&gt; %d (Opts: 0x%x)&quot;,</a>
+<a name="ln429">                    XML_ATTR_GENERATION_ADMIN, old, new, call_options);</a>
+<a name="ln430">            crm_log_xml_warn(req, &quot;Bad Op&quot;);</a>
+<a name="ln431">            crm_log_xml_warn(input, &quot;Bad Data&quot;);</a>
+<a name="ln432">            rc = -pcmk_err_old_data;</a>
+<a name="ln433"> </a>
+<a name="ln434">        } else if (old == new) {</a>
+<a name="ln435">            crm_element_value_int(scratch, XML_ATTR_GENERATION, &amp;new);</a>
+<a name="ln436">            crm_element_value_int(current_cib, XML_ATTR_GENERATION, &amp;old);</a>
+<a name="ln437">            if (old &gt; new) {</a>
+<a name="ln438">                crm_err(&quot;%s went backwards: %d -&gt; %d (Opts: 0x%x)&quot;,</a>
+<a name="ln439">                        XML_ATTR_GENERATION, old, new, call_options);</a>
+<a name="ln440">                crm_log_xml_warn(req, &quot;Bad Op&quot;);</a>
+<a name="ln441">                crm_log_xml_warn(input, &quot;Bad Data&quot;);</a>
+<a name="ln442">                rc = -pcmk_err_old_data;</a>
+<a name="ln443">            }</a>
+<a name="ln444">        }</a>
+<a name="ln445">    }</a>
+<a name="ln446"> </a>
+<a name="ln447">    crm_trace(&quot;Massaging CIB contents&quot;);</a>
+<a name="ln448">    strip_text_nodes(scratch);</a>
+<a name="ln449">    fix_plus_plus_recursive(scratch);</a>
+<a name="ln450"> </a>
+<a name="ln451">    if (is_set(call_options, cib_zero_copy)) {</a>
+<a name="ln452">        /* At this point, current_cib is just the 'cib' tag and its properties,</a>
+<a name="ln453">         *</a>
+<a name="ln454">         * The v1 format would barf on this, but we know the v2 patch</a>
+<a name="ln455">         * format only needs it for the top-level version fields</a>
+<a name="ln456">         */</a>
+<a name="ln457">        local_diff = xml_create_patchset(2, current_cib, scratch, (bool*)config_changed, manage_counters);</a>
+<a name="ln458"> </a>
+<a name="ln459">    } else {</a>
+<a name="ln460">        static time_t expires = 0;</a>
+<a name="ln461">        time_t tm_now = time(NULL);</a>
+<a name="ln462"> </a>
+<a name="ln463">        if (expires &lt; tm_now) {</a>
+<a name="ln464">            expires = tm_now + 60;  /* Validate clients are correctly applying v2-style diffs at most once a minute */</a>
+<a name="ln465">            with_digest = TRUE;</a>
+<a name="ln466">        }</a>
+<a name="ln467"> </a>
+<a name="ln468">        local_diff = xml_create_patchset(0, current_cib, scratch, (bool*)config_changed, manage_counters);</a>
+<a name="ln469">    }</a>
+<a name="ln470"> </a>
+<a name="ln471">    xml_log_changes(LOG_TRACE, __FUNCTION__, scratch);</a>
+<a name="ln472">    xml_accept_changes(scratch);</a>
+<a name="ln473"> </a>
+<a name="ln474">    if (diff_cs == NULL) {</a>
+<a name="ln475">        diff_cs = qb_log_callsite_get(__PRETTY_FUNCTION__, __FILE__, &quot;diff-validation&quot;, LOG_DEBUG, __LINE__, crm_trace_nonlog);</a>
+<a name="ln476">    }</a>
+<a name="ln477"> </a>
+<a name="ln478">    if(local_diff) {</a>
+<a name="ln479">        patchset_process_digest(local_diff, current_cib, scratch, with_digest);</a>
+<a name="ln480"> </a>
+<a name="ln481">        xml_log_patchset(LOG_INFO, __FUNCTION__, local_diff);</a>
+<a name="ln482">        crm_log_xml_trace(local_diff, &quot;raw patch&quot;);</a>
+<a name="ln483">    }</a>
+<a name="ln484"> </a>
+<a name="ln485">    if (is_not_set(call_options, cib_zero_copy) /* The original to compare against doesn't exist */</a>
+<a name="ln486">        &amp;&amp; local_diff</a>
+<a name="ln487">        &amp;&amp; crm_is_callsite_active(diff_cs, LOG_TRACE, 0)) {</a>
+<a name="ln488"> </a>
+<a name="ln489">        /* Validate the calculated patch set */</a>
+<a name="ln490">        int test_rc, format = 1;</a>
+<a name="ln491">        xmlNode * c = copy_xml(current_cib);</a>
+<a name="ln492"> </a>
+<a name="ln493">        crm_element_value_int(local_diff, &quot;format&quot;, &amp;format);</a>
+<a name="ln494">        test_rc = xml_apply_patchset(c, local_diff, manage_counters);</a>
+<a name="ln495"> </a>
+<a name="ln496">        if(test_rc != pcmk_ok) {</a>
+<a name="ln497">            save_xml_to_file(c,           &quot;PatchApply:calculated&quot;, NULL);</a>
+<a name="ln498">            save_xml_to_file(current_cib, &quot;PatchApply:input&quot;, NULL);</a>
+<a name="ln499">            save_xml_to_file(scratch,     &quot;PatchApply:actual&quot;, NULL);</a>
+<a name="ln500">            save_xml_to_file(local_diff,  &quot;PatchApply:diff&quot;, NULL);</a>
+<a name="ln501">            crm_err(&quot;v%d patchset error, patch failed to apply: %s (%d)&quot;, format, pcmk_strerror(test_rc), test_rc);</a>
+<a name="ln502">        }</a>
+<a name="ln503">        free_xml(c);</a>
+<a name="ln504">    }</a>
+<a name="ln505"> </a>
+<a name="ln506">    if (safe_str_eq(section, XML_CIB_TAG_STATUS)) {</a>
+<a name="ln507">        /* Throttle the amount of costly validation we perform due to status updates</a>
+<a name="ln508">         * a) we don't really care whats in the status section</a>
+<a name="ln509">         * b) we don't validate any of its contents at the moment anyway</a>
+<a name="ln510">         */</a>
+<a name="ln511">        check_dtd = FALSE;</a>
+<a name="ln512">    }</a>
+<a name="ln513"> </a>
+<a name="ln514">    /* === scratch must not be modified after this point ===</a>
+<a name="ln515">     * Exceptions, anything in:</a>
+<a name="ln516"> </a>
+<a name="ln517">     static filter_t filter[] = {</a>
+<a name="ln518">     { 0, XML_ATTR_ORIGIN },</a>
+<a name="ln519">     { 0, XML_CIB_ATTR_WRITTEN },</a>
+<a name="ln520">     { 0, XML_ATTR_UPDATE_ORIG },</a>
+<a name="ln521">     { 0, XML_ATTR_UPDATE_CLIENT },</a>
+<a name="ln522">     { 0, XML_ATTR_UPDATE_USER },</a>
+<a name="ln523">     };</a>
+<a name="ln524">     */</a>
+<a name="ln525"> </a>
+<a name="ln526">    if (*config_changed &amp;&amp; is_not_set(call_options, cib_no_mtime)) {</a>
+<a name="ln527">        char *now_str = NULL;</a>
+<a name="ln528">        time_t now = time(NULL);</a>
+<a name="ln529">        const char *schema = crm_element_value(scratch, XML_ATTR_VALIDATION);</a>
+<a name="ln530"> </a>
+<a name="ln531">        now_str = ctime(&amp;now);</a>
+<a name="ln532">        now_str[24] = EOS;      /* replace the newline */</a>
+<a name="ln533">        crm_xml_replace(scratch, XML_CIB_ATTR_WRITTEN, now_str);</a>
+<a name="ln534"> </a>
+<a name="ln535">        if (schema) {</a>
+<a name="ln536">            static int minimum_schema = 0;</a>
+<a name="ln537">            int current_schema = get_schema_version(schema);</a>
+<a name="ln538"> </a>
+<a name="ln539">            if (minimum_schema == 0) {</a>
+<a name="ln540">                minimum_schema = get_schema_version(&quot;pacemaker-1.2&quot;);</a>
+<a name="ln541">            }</a>
+<a name="ln542"> </a>
+<a name="ln543">            /* Does the CIB support the &quot;update-*&quot; attributes... */</a>
+<a name="ln544">            if (current_schema &gt;= minimum_schema) {</a>
+<a name="ln545">                const char *origin = crm_element_value(req, F_ORIG);</a>
+<a name="ln546"> </a>
+<a name="ln547">                CRM_LOG_ASSERT(origin != NULL);</a>
+<a name="ln548">                crm_xml_replace(scratch, XML_ATTR_UPDATE_ORIG, origin);</a>
+<a name="ln549">                crm_xml_replace(scratch, XML_ATTR_UPDATE_CLIENT,</a>
+<a name="ln550">                                crm_element_value(req, F_CIB_CLIENTNAME));</a>
+<a name="ln551">#if ENABLE_ACL</a>
+<a name="ln552">                crm_xml_replace(scratch, XML_ATTR_UPDATE_USER, crm_element_value(req, F_CIB_USER));</a>
+<a name="ln553">#endif</a>
+<a name="ln554">            }</a>
+<a name="ln555">        }</a>
+<a name="ln556">    }</a>
+<a name="ln557"> </a>
+<a name="ln558">    crm_trace(&quot;Perform validation: %s&quot;, check_dtd ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln559">    if (rc == pcmk_ok &amp;&amp; check_dtd &amp;&amp; validate_xml(scratch, NULL, TRUE) == FALSE) {</a>
+<a name="ln560">        const char *current_dtd = crm_element_value(scratch, XML_ATTR_VALIDATION);</a>
+<a name="ln561"> </a>
+<a name="ln562">        crm_warn(&quot;Updated CIB does not validate against %s schema/dtd&quot;, crm_str(current_dtd));</a>
+<a name="ln563">        rc = -pcmk_err_schema_validation;</a>
+<a name="ln564">    }</a>
+<a name="ln565"> </a>
+<a name="ln566">  done:</a>
+<a name="ln567"> </a>
+<a name="ln568">    *result_cib = scratch;</a>
+<a name="ln569">#if ENABLE_ACL</a>
+<a name="ln570">    if(rc != pcmk_ok &amp;&amp; cib_acl_enabled(current_cib, user)) {</a>
+<a name="ln571">        if(xml_acl_filtered_copy(user, current_cib, scratch, result_cib)) {</a>
+<a name="ln572">            if (*result_cib == NULL) {</a>
+<a name="ln573">                crm_debug(&quot;Pre-filtered the entire cib result&quot;);</a>
+<a name="ln574">            }</a>
+<a name="ln575">            free_xml(scratch);</a>
+<a name="ln576">        }</a>
+<a name="ln577">    }</a>
+<a name="ln578">#endif</a>
+<a name="ln579"> </a>
+<a name="ln580">    if(diff) {</a>
+<a name="ln581">        *diff = local_diff;</a>
+<a name="ln582">    } else {</a>
+<a name="ln583">        free_xml(local_diff);</a>
+<a name="ln584">    }</a>
+<a name="ln585"> </a>
+<a name="ln586">    free_xml(top);</a>
+<a name="ln587">    crm_trace(&quot;Done&quot;);</a>
+<a name="ln588">    return rc;</a>
+<a name="ln589">}</a>
+<a name="ln590"> </a>
+<a name="ln591">xmlNode *</a>
+<a name="ln592">cib_create_op(int call_id, const char *token, const char *op, const char *host, const char *section,</a>
+<a name="ln593">              xmlNode * data, int call_options, const char *user_name)</a>
+<a name="ln594">{</a>
+<a name="ln595">    xmlNode *op_msg = create_xml_node(NULL, &quot;cib_command&quot;);</a>
+<a name="ln596"> </a>
+<a name="ln597">    CRM_CHECK(op_msg != NULL, return NULL);</a>
+<a name="ln598">    CRM_CHECK(token != NULL, return NULL);</a>
+<a name="ln599"> </a>
+<a name="ln600">    crm_xml_add(op_msg, F_XML_TAGNAME, &quot;cib_command&quot;);</a>
+<a name="ln601"> </a>
+<a name="ln602">    crm_xml_add(op_msg, F_TYPE, T_CIB);</a>
+<a name="ln603">    crm_xml_add(op_msg, F_CIB_CALLBACK_TOKEN, token);</a>
+<a name="ln604">    crm_xml_add(op_msg, F_CIB_OPERATION, op);</a>
+<a name="ln605">    crm_xml_add(op_msg, F_CIB_HOST, host);</a>
+<a name="ln606">    crm_xml_add(op_msg, F_CIB_SECTION, section);</a>
+<a name="ln607">    crm_xml_add_int(op_msg, F_CIB_CALLID, call_id);</a>
+<a name="ln608">#if ENABLE_ACL</a>
+<a name="ln609">    if (user_name) {</a>
+<a name="ln610">        crm_xml_add(op_msg, F_CIB_USER, user_name);</a>
+<a name="ln611">    }</a>
+<a name="ln612">#endif</a>
+<a name="ln613">    crm_trace(&quot;Sending call options: %.8lx, %d&quot;, (long)call_options, call_options);</a>
+<a name="ln614">    crm_xml_add_int(op_msg, F_CIB_CALLOPTS, call_options);</a>
+<a name="ln615"> </a>
+<a name="ln616">    if (data != NULL) {</a>
+<a name="ln617">        add_message_xml(op_msg, F_CIB_CALLDATA, data);</a>
+<a name="ln618">    }</a>
+<a name="ln619"> </a>
+<a name="ln620">    if (call_options &amp; cib_inhibit_bcast) {</a>
+<a name="ln621">        CRM_CHECK((call_options &amp; cib_scope_local), return NULL);</a>
+<a name="ln622">    }</a>
+<a name="ln623">    return op_msg;</a>
+<a name="ln624">}</a>
+<a name="ln625"> </a>
+<a name="ln626">void</a>
+<a name="ln627">cib_native_callback(cib_t * cib, xmlNode * msg, int call_id, int rc)</a>
+<a name="ln628">{</a>
+<a name="ln629">    xmlNode *output = NULL;</a>
+<a name="ln630">    cib_callback_client_t *blob = NULL;</a>
+<a name="ln631"> </a>
+<a name="ln632">    if (msg != NULL) {</a>
+<a name="ln633">        crm_element_value_int(msg, F_CIB_RC, &amp;rc);</a>
+<a name="ln634">        crm_element_value_int(msg, F_CIB_CALLID, &amp;call_id);</a>
+<a name="ln635">        output = get_message_xml(msg, F_CIB_CALLDATA);</a>
+<a name="ln636">    }</a>
+<a name="ln637"> </a>
+<a name="ln638">    blob = g_hash_table_lookup(cib_op_callback_table, GINT_TO_POINTER(call_id));</a>
+<a name="ln639">    if (blob == NULL) {</a>
+<a name="ln640">        crm_trace(&quot;No callback found for call %d&quot;, call_id);</a>
+<a name="ln641">    }</a>
+<a name="ln642"> </a>
+<a name="ln643">    if (cib == NULL) {</a>
+<a name="ln644">        crm_debug(&quot;No cib object supplied&quot;);</a>
+<a name="ln645">    }</a>
+<a name="ln646"> </a>
+<a name="ln647">    if (rc == -pcmk_err_diff_resync) {</a>
+<a name="ln648">        /* This is an internal value that clients do not and should not care about */</a>
+<a name="ln649">        rc = pcmk_ok;</a>
+<a name="ln650">    }</a>
+<a name="ln651"> </a>
+<a name="ln652">    if (blob &amp;&amp; blob-&gt;callback &amp;&amp; (rc == pcmk_ok || blob-&gt;only_success == FALSE)) {</a>
+<a name="ln653">        crm_trace(&quot;Invoking callback %s for call %d&quot;, crm_str(blob-&gt;id), call_id);</a>
+<a name="ln654">        blob-&gt;callback(msg, call_id, rc, output, blob-&gt;user_data);</a>
+<a name="ln655"> </a>
+<a name="ln656">    } else if (cib &amp;&amp; cib-&gt;op_callback == NULL &amp;&amp; rc != pcmk_ok) {</a>
+<a name="ln657">        crm_warn(&quot;CIB command failed: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln658">        crm_log_xml_debug(msg, &quot;Failed CIB Update&quot;);</a>
+<a name="ln659">    }</a>
+<a name="ln660"> </a>
+<a name="ln661">    /* This may free user_data, so do it after the callback */</a>
+<a name="ln662">    if (blob) {</a>
+<a name="ln663">        remove_cib_op_callback(call_id, FALSE);</a>
+<a name="ln664">    }</a>
+<a name="ln665"> </a>
+<a name="ln666">    if (cib &amp;&amp; cib-&gt;op_callback != NULL) {</a>
+<a name="ln667">        crm_trace(&quot;Invoking global callback for call %d&quot;, call_id);</a>
+<a name="ln668">        cib-&gt;op_callback(msg, call_id, rc, output);</a>
+<a name="ln669">    }</a>
+<a name="ln670">    crm_trace(&quot;OP callback activated for %d&quot;, call_id);</a>
+<a name="ln671">}</a>
+<a name="ln672"> </a>
+<a name="ln673">void</a>
+<a name="ln674">cib_native_notify(gpointer data, gpointer user_data)</a>
+<a name="ln675">{</a>
+<a name="ln676">    xmlNode *msg = user_data;</a>
+<a name="ln677">    cib_notify_client_t *entry = data;</a>
+<a name="ln678">    const char *event = NULL;</a>
+<a name="ln679"> </a>
+<a name="ln680">    if (msg == NULL) {</a>
+<a name="ln681">        crm_warn(&quot;Skipping callback - NULL message&quot;);</a>
+<a name="ln682">        return;</a>
+<a name="ln683">    }</a>
+<a name="ln684"> </a>
+<a name="ln685">    event = crm_element_value(msg, F_SUBTYPE);</a>
+<a name="ln686"> </a>
+<a name="ln687">    if (entry == NULL) {</a>
+<a name="ln688">        crm_warn(&quot;Skipping callback - NULL callback client&quot;);</a>
+<a name="ln689">        return;</a>
+<a name="ln690"> </a>
+<a name="ln691">    } else if (entry-&gt;callback == NULL) {</a>
+<a name="ln692">        crm_warn(&quot;Skipping callback - NULL callback&quot;);</a>
+<a name="ln693">        return;</a>
+<a name="ln694"> </a>
+<a name="ln695">    } else if (safe_str_neq(entry-&gt;event, event)) {</a>
+<a name="ln696">        crm_trace(&quot;Skipping callback - event mismatch %p/%s vs. %s&quot;, entry, entry-&gt;event, event);</a>
+<a name="ln697">        return;</a>
+<a name="ln698">    }</a>
+<a name="ln699"> </a>
+<a name="ln700">    crm_trace(&quot;Invoking callback for %p/%s event...&quot;, entry, event);</a>
+<a name="ln701">    entry-&gt;callback(event, msg);</a>
+<a name="ln702">    crm_trace(&quot;Callback invoked...&quot;);</a>
+<a name="ln703">}</a>
+<a name="ln704"> </a>
+<a name="ln705">pe_cluster_option cib_opts[] = {</a>
+<a name="ln706">    /* name, old-name, validate, default, description */</a>
+<a name="ln707">    {&quot;enable-acl&quot;, NULL, &quot;boolean&quot;, NULL, &quot;false&quot;, &amp;check_boolean,</a>
+<a name="ln708">     &quot;Enable CIB ACL&quot;, NULL}</a>
+<a name="ln709">    ,</a>
+<a name="ln710">};</a>
+<a name="ln711"> </a>
+<a name="ln712">void</a>
+<a name="ln713">cib_metadata(void)</a>
+<a name="ln714">{</a>
+<a name="ln715">    config_metadata(&quot;Cluster Information Base&quot;, &quot;1.0&quot;,</a>
+<a name="ln716">                    &quot;Cluster Information Base Options&quot;,</a>
+<a name="ln717">                    &quot;This is a fake resource that details the options that can be configured for the Cluster Information Base.&quot;,</a>
+<a name="ln718">                    cib_opts, DIMOF(cib_opts));</a>
+<a name="ln719">}</a>
+<a name="ln720"> </a>
+<a name="ln721">void</a>
+<a name="ln722">verify_cib_options(GHashTable * options)</a>
+<a name="ln723">{</a>
+<a name="ln724">    verify_all_options(options, cib_opts, DIMOF(cib_opts));</a>
+<a name="ln725">}</a>
+<a name="ln726"> </a>
+<a name="ln727">const char *</a>
+<a name="ln728">cib_pref(GHashTable * options, const char *name)</a>
+<a name="ln729">{</a>
+<a name="ln730">    return get_cluster_pref(options, cib_opts, DIMOF(cib_opts), name);</a>
+<a name="ln731">}</a>
+<a name="ln732"> </a>
+<a name="ln733">gboolean</a>
+<a name="ln734">cib_read_config(GHashTable * options, xmlNode * current_cib)</a>
+<a name="ln735">{</a>
+<a name="ln736">    xmlNode *config = NULL;</a>
+<a name="ln737">    crm_time_t *now = NULL;</a>
+<a name="ln738"> </a>
+<a name="ln739">    if (options == NULL || current_cib == NULL) {</a>
+<a name="ln740">        return FALSE;</a>
+<a name="ln741">    }</a>
+<a name="ln742"> </a>
+<a name="ln743">    now = crm_time_new(NULL);</a>
+<a name="ln744"> </a>
+<a name="ln745">    g_hash_table_remove_all(options);</a>
+<a name="ln746"> </a>
+<a name="ln747">    config = get_object_root(XML_CIB_TAG_CRMCONFIG, current_cib);</a>
+<a name="ln748">    if (config) {</a>
+<a name="ln749">        unpack_instance_attributes(current_cib, config, XML_CIB_TAG_PROPSET, NULL, options,</a>
+<a name="ln750">                                   CIB_OPTIONS_FIRST, FALSE, now);</a>
+<a name="ln751">    }</a>
+<a name="ln752"> </a>
+<a name="ln753">    verify_cib_options(options);</a>
+<a name="ln754"> </a>
+<a name="ln755">    crm_time_free(now);</a>
+<a name="ln756"> </a>
+<a name="ln757">    return TRUE;</a>
+<a name="ln758">}</a>
+<a name="ln759"> </a>
+<a name="ln760">int</a>
+<a name="ln761">cib_apply_patch_event(xmlNode * event, xmlNode * input, xmlNode ** output, int level)</a>
+<a name="ln762">{</a>
+<a name="ln763">    int rc = pcmk_err_generic;</a>
+<a name="ln764"> </a>
+<a name="ln765">    xmlNode *diff = NULL;</a>
+<a name="ln766"> </a>
+<a name="ln767">    CRM_ASSERT(event);</a>
+<a name="ln768">    CRM_ASSERT(input);</a>
+<a name="ln769">    CRM_ASSERT(output);</a>
+<a name="ln770"> </a>
+<a name="ln771">    crm_element_value_int(event, F_CIB_RC, &amp;rc);</a>
+<a name="ln772">    diff = get_message_xml(event, F_CIB_UPDATE_RESULT);</a>
+<a name="ln773"> </a>
+<a name="ln774">    if (rc &lt; pcmk_ok || diff == NULL) {</a>
+<a name="ln775">        return rc;</a>
+<a name="ln776">    }</a>
+<a name="ln777"> </a>
+<a name="ln778">    if (level &gt; LOG_CRIT) {</a>
+<a name="ln779">        xml_log_patchset(level, &quot;Config update&quot;, diff);</a>
+<a name="ln780">    }</a>
+<a name="ln781"> </a>
+<a name="ln782">    if (input != NULL) {</a>
+<a name="ln783">        rc = cib_process_diff(NULL, cib_none, NULL, event, diff, input, output, NULL);</a>
+<a name="ln784"> </a>
+<a name="ln785">        if (rc != pcmk_ok) {</a>
+<a name="ln786">            crm_debug(&quot;Update didn't apply: %s (%d) %p&quot;, pcmk_strerror(rc), rc, *output);</a>
+<a name="ln787"> </a>
+<a name="ln788">            if (rc == -pcmk_err_old_data) {</a>
+<a name="ln789">                crm_trace(&quot;Masking error, we already have the supplied update&quot;);</a>
+<a name="ln790">                return pcmk_ok;</a>
+<a name="ln791">            }</a>
+<a name="ln792">            free_xml(*output); *output = NULL;</a>
+<a name="ln793"> </a>
+<a name="ln794">            return rc;</a>
+<a name="ln795">        }</a>
+<a name="ln796">    }</a>
+<a name="ln797"> </a>
+<a name="ln798">    return rc;</a>
+<a name="ln799">}</a>
+<a name="ln800"> </a>
+<a name="ln801">gboolean</a>
+<a name="ln802">cib_internal_config_changed(xmlNode * diff)</a>
+<a name="ln803">{</a>
+<a name="ln804">    gboolean changed = FALSE;</a>
+<a name="ln805">    xmlXPathObject *xpathObj = NULL;</a>
+<a name="ln806"> </a>
+<a name="ln807">    if (diff == NULL) {</a>
+<a name="ln808">        return FALSE;</a>
+<a name="ln809">    }</a>
+<a name="ln810"> </a>
+<a name="ln811">    xpathObj = xpath_search(diff, &quot;//&quot; XML_CIB_TAG_CRMCONFIG);</a>
+<a name="ln812">    if (numXpathResults(xpathObj) &gt; 0) {</a>
+<a name="ln813">        changed = TRUE;</a>
+<a name="ln814">    }</a>
+<a name="ln815"> </a>
+<a name="ln816">    freeXpathObject(xpathObj);</a>
+<a name="ln817"> </a>
+<a name="ln818">    return changed;</a>
+<a name="ln819">}</a>
+<a name="ln820"> </a>
+<a name="ln821">int</a>
+<a name="ln822">cib_internal_op(cib_t * cib, const char *op, const char *host,</a>
+<a name="ln823">                const char *section, xmlNode * data,</a>
+<a name="ln824">                xmlNode ** output_data, int call_options, const char *user_name)</a>
+<a name="ln825">{</a>
+<a name="ln826">    int (*delegate) (cib_t * cib, const char *op, const char *host,</a>
+<a name="ln827">                     const char *section, xmlNode * data,</a>
+<a name="ln828">                     xmlNode ** output_data, int call_options, const char *user_name) =</a>
+<a name="ln829">        cib-&gt;delegate_fn;</a>
+<a name="ln830"> </a>
+<a name="ln831">#if ENABLE_ACL</a>
+<a name="ln832">    if(user_name == NULL) {</a>
+<a name="ln833">        user_name = getenv(&quot;CIB_user&quot;);</a>
+<a name="ln834">    }</a>
+<a name="ln835">#endif</a>
+<a name="ln836"> </a>
+<a name="ln837">    return delegate(cib, op, host, section, data, output_data, call_options, user_name);</a>
+<a name="ln838">}</a>
+
+</code></pre>
+<div class="balloon" rel="782"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'input != NULL' is always true.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

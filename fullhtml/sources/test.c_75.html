@@ -1,0 +1,716 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2009 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;sys/time.h&gt;</a>
+<a name="ln28">#include &lt;sys/types.h&gt;</a>
+<a name="ln29">#include &lt;sys/stat.h&gt;</a>
+<a name="ln30">#include &lt;unistd.h&gt;</a>
+<a name="ln31">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;stdlib.h&gt;</a>
+<a name="ln34">#include &lt;errno.h&gt;</a>
+<a name="ln35">#include &lt;fcntl.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">#include &lt;crm/crm.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln40">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">#include &lt;crm/stonith-ng.h&gt;</a>
+<a name="ln43">#include &lt;crm/fencing/internal.h&gt;</a>
+<a name="ln44">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln45"> </a>
+<a name="ln46">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln47"> </a>
+<a name="ln48">GMainLoop *mainloop = NULL;</a>
+<a name="ln49">crm_trigger_t *trig = NULL;</a>
+<a name="ln50">int mainloop_iter = 0;</a>
+<a name="ln51">int callback_rc = 0;</a>
+<a name="ln52">typedef void (*mainloop_test_iteration_cb) (int check_event);</a>
+<a name="ln53"> </a>
+<a name="ln54">#define MAINLOOP_DEFAULT_TIMEOUT 2</a>
+<a name="ln55"> </a>
+<a name="ln56">#define mainloop_test_done(pass) \</a>
+<a name="ln57">    if (pass) { \</a>
+<a name="ln58">        crm_info(&quot;SUCCESS - %s&quot;, __FUNCTION__); \</a>
+<a name="ln59">        mainloop_iter++;   \</a>
+<a name="ln60">        mainloop_set_trigger(trig);  \</a>
+<a name="ln61">    } else { \</a>
+<a name="ln62">        crm_err(&quot;FAILURE = %s async_callback %d&quot;, __FUNCTION__, callback_rc); \</a>
+<a name="ln63">        crm_exit(pcmk_err_generic); \</a>
+<a name="ln64">    } \</a>
+<a name="ln65">    callback_rc = 0; \</a>
+<a name="ln66"> </a>
+<a name="ln67"> </a>
+<a name="ln68">/* *INDENT-OFF* */</a>
+<a name="ln69">enum test_modes {</a>
+<a name="ln70">    /* class dev test using a very specific environment */</a>
+<a name="ln71">    test_standard = 0,</a>
+<a name="ln72">    /* watch notifications only */</a>
+<a name="ln73">    test_passive,</a>
+<a name="ln74">    /* sanity test stonith client api using fence_dummy */</a>
+<a name="ln75">    test_api_sanity,</a>
+<a name="ln76">    /* sanity test mainloop code with async respones. */</a>
+<a name="ln77">    test_api_mainloop,</a>
+<a name="ln78">};</a>
+<a name="ln79"> </a>
+<a name="ln80">static struct crm_option long_options[] = {</a>
+<a name="ln81">    {&quot;verbose&quot;,     0, 0, 'V'},</a>
+<a name="ln82">    {&quot;version&quot;,     0, 0, '$'},</a>
+<a name="ln83">    {&quot;help&quot;,        0, 0, '?'},</a>
+<a name="ln84">    {&quot;passive&quot;,     0, 0, 'p'},</a>
+<a name="ln85">    {&quot;api_test&quot;,    0, 0, 't'},</a>
+<a name="ln86">    {&quot;mainloop_api_test&quot;,    0, 0, 'm'},</a>
+<a name="ln87"> </a>
+<a name="ln88">    {0, 0, 0, 0}</a>
+<a name="ln89">};</a>
+<a name="ln90">/* *INDENT-ON* */</a>
+<a name="ln91"> </a>
+<a name="ln92">stonith_t *st = NULL;</a>
+<a name="ln93">struct pollfd pollfd;</a>
+<a name="ln94">int st_opts = st_opt_sync_call;</a>
+<a name="ln95">int expected_notifications = 0;</a>
+<a name="ln96">int verbose = 0;</a>
+<a name="ln97"> </a>
+<a name="ln98">static void</a>
+<a name="ln99">dispatch_helper(int timeout)</a>
+<a name="ln100">{</a>
+<a name="ln101">    int rc;</a>
+<a name="ln102"> </a>
+<a name="ln103">    crm_debug(&quot;Looking for notification&quot;);</a>
+<a name="ln104">    pollfd.events = POLLIN;</a>
+<a name="ln105">    while (true) {</a>
+<a name="ln106">        rc = poll(&amp;pollfd, 1, timeout); /* wait 10 minutes, -1 forever */</a>
+<a name="ln107">        if (rc &gt; 0) {</a>
+<a name="ln108">            if (!stonith_dispatch(st)) {</a>
+<a name="ln109">                break;</a>
+<a name="ln110">            }</a>
+<a name="ln111">        } else {</a>
+<a name="ln112">            break;</a>
+<a name="ln113">        }</a>
+<a name="ln114">    }</a>
+<a name="ln115">}</a>
+<a name="ln116"> </a>
+<a name="ln117">static void</a>
+<a name="ln118">st_callback(stonith_t * st, stonith_event_t * e)</a>
+<a name="ln119">{</a>
+<a name="ln120">    if (st-&gt;state == stonith_disconnected) {</a>
+<a name="ln121">        crm_exit(ENOTCONN);</a>
+<a name="ln122">    }</a>
+<a name="ln123"> </a>
+<a name="ln124">    crm_notice(&quot;Operation %s requested by %s %s for peer %s.  %s reported: %s (ref=%s)&quot;,</a>
+<a name="ln125">               e-&gt;operation, e-&gt;origin, e-&gt;result == pcmk_ok ? &quot;completed&quot; : &quot;failed&quot;,</a>
+<a name="ln126">               e-&gt;target, e-&gt;executioner ? e-&gt;executioner : &quot;&lt;none&gt;&quot;,</a>
+<a name="ln127">               pcmk_strerror(e-&gt;result), e-&gt;id);</a>
+<a name="ln128"> </a>
+<a name="ln129">    if (expected_notifications) {</a>
+<a name="ln130">        expected_notifications--;</a>
+<a name="ln131">    }</a>
+<a name="ln132">}</a>
+<a name="ln133"> </a>
+<a name="ln134">static void</a>
+<a name="ln135">st_global_callback(stonith_t * stonith, stonith_callback_data_t * data)</a>
+<a name="ln136">{</a>
+<a name="ln137">    crm_notice(&quot;Call id %d completed with rc %d&quot;, data-&gt;call_id, data-&gt;rc);</a>
+<a name="ln138">}</a>
+<a name="ln139"> </a>
+<a name="ln140">static void</a>
+<a name="ln141">passive_test(void)</a>
+<a name="ln142">{</a>
+<a name="ln143">    int rc = 0;</a>
+<a name="ln144"> </a>
+<a name="ln145">    rc = st-&gt;cmds-&gt;connect(st, crm_system_name, &amp;pollfd.fd);</a>
+<a name="ln146">    crm_debug(&quot;Connect: %d&quot;, rc);</a>
+<a name="ln147"> </a>
+<a name="ln148">    st-&gt;cmds-&gt;register_notification(st, T_STONITH_NOTIFY_DISCONNECT, st_callback);</a>
+<a name="ln149">    st-&gt;cmds-&gt;register_notification(st, T_STONITH_NOTIFY_FENCE, st_callback);</a>
+<a name="ln150">    st-&gt;cmds-&gt;register_notification(st, STONITH_OP_DEVICE_ADD, st_callback);</a>
+<a name="ln151">    st-&gt;cmds-&gt;register_notification(st, STONITH_OP_DEVICE_DEL, st_callback);</a>
+<a name="ln152">    st-&gt;cmds-&gt;register_callback(st, 0, 120, st_opt_timeout_updates, NULL, &quot;st_global_callback&quot;,</a>
+<a name="ln153">                                st_global_callback);</a>
+<a name="ln154"> </a>
+<a name="ln155">    dispatch_helper(600 * 1000);</a>
+<a name="ln156">}</a>
+<a name="ln157"> </a>
+<a name="ln158">#define single_test(cmd, str, num_notifications, expected_rc) \</a>
+<a name="ln159">{ \</a>
+<a name="ln160">    int rc = 0; \</a>
+<a name="ln161">    rc = cmd; \</a>
+<a name="ln162">    expected_notifications = 0;  \</a>
+<a name="ln163">    if (num_notifications) { \</a>
+<a name="ln164">        expected_notifications = num_notifications; \</a>
+<a name="ln165">        dispatch_helper(500);  \</a>
+<a name="ln166">    } \</a>
+<a name="ln167">    if (rc != expected_rc) { \</a>
+<a name="ln168">        crm_err(&quot;FAILURE - expected rc %d != %d(%s) for cmd - %s&quot;, expected_rc, rc, pcmk_strerror(rc), str); \</a>
+<a name="ln169">        crm_exit(pcmk_err_generic); \</a>
+<a name="ln170">    } else if (expected_notifications) { \</a>
+<a name="ln171">        crm_err(&quot;FAILURE - expected %d notifications, got only %d for cmd - %s&quot;, \</a>
+<a name="ln172">            num_notifications, num_notifications - expected_notifications, str); \</a>
+<a name="ln173">        crm_exit(pcmk_err_generic); \</a>
+<a name="ln174">    } else { \</a>
+<a name="ln175">        if (verbose) {                   \</a>
+<a name="ln176">            crm_info(&quot;SUCCESS - %s: %d&quot;, str, rc);    \</a>
+<a name="ln177">        } else {   \</a>
+<a name="ln178">            crm_debug(&quot;SUCCESS - %s: %d&quot;, str, rc);    \</a>
+<a name="ln179">        }                          \</a>
+<a name="ln180">    } \</a>
+<a name="ln181">}\</a>
+<a name="ln182"> </a>
+<a name="ln183">static void</a>
+<a name="ln184">run_fence_failure_test(void)</a>
+<a name="ln185">{</a>
+<a name="ln186">    stonith_key_value_t *params = NULL;</a>
+<a name="ln187"> </a>
+<a name="ln188">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;false_1_node1=1,2 false_1_node2=3,4&quot;);</a>
+<a name="ln189">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;fail&quot;);</a>
+<a name="ln190"> </a>
+<a name="ln191">    single_test(st-&gt;</a>
+<a name="ln192">                cmds-&gt;register_device(st, st_opts, &quot;test-id1&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;, params),</a>
+<a name="ln193">                &quot;Register device1 for failure test&quot;, 1, 0);</a>
+<a name="ln194"> </a>
+<a name="ln195">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node2&quot;, &quot;off&quot;, 3, 0),</a>
+<a name="ln196">                &quot;Fence failure results off&quot;, 1, -pcmk_err_generic);</a>
+<a name="ln197"> </a>
+<a name="ln198">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node2&quot;, &quot;reboot&quot;, 3, 0),</a>
+<a name="ln199">                &quot;Fence failure results reboot&quot;, 1, -pcmk_err_generic);</a>
+<a name="ln200"> </a>
+<a name="ln201">    single_test(st-&gt;cmds-&gt;remove_device(st, st_opts, &quot;test-id1&quot;),</a>
+<a name="ln202">                &quot;Remove device1 for failure test&quot;, 1, 0);</a>
+<a name="ln203"> </a>
+<a name="ln204">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln205">}</a>
+<a name="ln206"> </a>
+<a name="ln207">static void</a>
+<a name="ln208">run_fence_failure_rollover_test(void)</a>
+<a name="ln209">{</a>
+<a name="ln210">    stonith_key_value_t *params = NULL;</a>
+<a name="ln211"> </a>
+<a name="ln212">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;false_1_node1=1,2 false_1_node2=3,4&quot;);</a>
+<a name="ln213">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;fail&quot;);</a>
+<a name="ln214"> </a>
+<a name="ln215">    single_test(st-&gt;</a>
+<a name="ln216">                cmds-&gt;register_device(st, st_opts, &quot;test-id1&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;, params),</a>
+<a name="ln217">                &quot;Register device1 for rollover test&quot;, 1, 0);</a>
+<a name="ln218">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln219">    params = NULL;</a>
+<a name="ln220">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;false_1_node1=1,2 false_1_node2=3,4&quot;);</a>
+<a name="ln221">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;pass&quot;);</a>
+<a name="ln222"> </a>
+<a name="ln223">    single_test(st-&gt;</a>
+<a name="ln224">                cmds-&gt;register_device(st, st_opts, &quot;test-id2&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;, params),</a>
+<a name="ln225">                &quot;Register device2 for rollover test&quot;, 1, 0);</a>
+<a name="ln226"> </a>
+<a name="ln227">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node2&quot;, &quot;off&quot;, 3, 0),</a>
+<a name="ln228">                &quot;Fence rollover results off&quot;, 1, 0);</a>
+<a name="ln229"> </a>
+<a name="ln230">    /* Expect -ENODEV because fence_dummy requires 'on' to be executed on target */</a>
+<a name="ln231">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node2&quot;, &quot;on&quot;, 3, 0),</a>
+<a name="ln232">                &quot;Fence rollover results on&quot;, 1, -ENODEV);</a>
+<a name="ln233"> </a>
+<a name="ln234">    single_test(st-&gt;cmds-&gt;remove_device(st, st_opts, &quot;test-id1&quot;),</a>
+<a name="ln235">                &quot;Remove device1 for rollover tests&quot;, 1, 0);</a>
+<a name="ln236"> </a>
+<a name="ln237">    single_test(st-&gt;cmds-&gt;remove_device(st, st_opts, &quot;test-id2&quot;),</a>
+<a name="ln238">                &quot;Remove device2 for rollover tests&quot;, 1, 0);</a>
+<a name="ln239"> </a>
+<a name="ln240">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln241">}</a>
+<a name="ln242"> </a>
+<a name="ln243">static void</a>
+<a name="ln244">run_standard_test(void)</a>
+<a name="ln245">{</a>
+<a name="ln246">    stonith_key_value_t *params = NULL;</a>
+<a name="ln247"> </a>
+<a name="ln248">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;false_1_node1=1,2 false_1_node2=3,4&quot;);</a>
+<a name="ln249">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;pass&quot;);</a>
+<a name="ln250">    params = stonith_key_value_add(params, &quot;mock_dynamic_hosts&quot;, &quot;false_1_node1 false_1_node2&quot;);</a>
+<a name="ln251"> </a>
+<a name="ln252">    single_test(st-&gt;</a>
+<a name="ln253">                cmds-&gt;register_device(st, st_opts, &quot;test-id&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;, params),</a>
+<a name="ln254">                &quot;Register&quot;, 1, 0);</a>
+<a name="ln255">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln256">    params = NULL;</a>
+<a name="ln257"> </a>
+<a name="ln258">    single_test(st-&gt;cmds-&gt;list(st, st_opts, &quot;test-id&quot;, NULL, 1), &quot;list&quot;, 1, 0);</a>
+<a name="ln259"> </a>
+<a name="ln260">    single_test(st-&gt;cmds-&gt;monitor(st, st_opts, &quot;test-id&quot;, 1), &quot;Monitor&quot;, 1, 0);</a>
+<a name="ln261"> </a>
+<a name="ln262">    single_test(st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node2&quot;, 1),</a>
+<a name="ln263">                &quot;Status false_1_node2&quot;, 1, 0);</a>
+<a name="ln264"> </a>
+<a name="ln265">    single_test(st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node1&quot;, 1),</a>
+<a name="ln266">                &quot;Status false_1_node1&quot;, 1, 0);</a>
+<a name="ln267"> </a>
+<a name="ln268">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;unknown-host&quot;, &quot;off&quot;, 1, 0),</a>
+<a name="ln269">                &quot;Fence unknown-host (expected failure)&quot;, 0, -ENODEV);</a>
+<a name="ln270"> </a>
+<a name="ln271">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node1&quot;, &quot;off&quot;, 1, 0),</a>
+<a name="ln272">                &quot;Fence false_1_node1&quot;, 1, 0);</a>
+<a name="ln273"> </a>
+<a name="ln274">    /* Expect -ENODEV because fence_dummy requires 'on' to be executed on target */</a>
+<a name="ln275">    single_test(st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node1&quot;, &quot;on&quot;, 1, 0),</a>
+<a name="ln276">                &quot;Unfence false_1_node1&quot;, 1, -ENODEV);</a>
+<a name="ln277"> </a>
+<a name="ln278">    /* Confirm that an invalid level index is rejected */</a>
+<a name="ln279">    single_test(st-&gt;cmds-&gt;register_level(st, st_opts, &quot;node1&quot;, 999, params),</a>
+<a name="ln280">                &quot;Attempt to register an invalid level index&quot;, 0, -EINVAL);</a>
+<a name="ln281"> </a>
+<a name="ln282">    single_test(st-&gt;cmds-&gt;remove_device(st, st_opts, &quot;test-id&quot;), &quot;Remove test-id&quot;, 1, 0);</a>
+<a name="ln283"> </a>
+<a name="ln284">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln285">}</a>
+<a name="ln286"> </a>
+<a name="ln287">static void</a>
+<a name="ln288">sanity_tests(void)</a>
+<a name="ln289">{</a>
+<a name="ln290">    int rc = 0;</a>
+<a name="ln291"> </a>
+<a name="ln292">    rc = st-&gt;cmds-&gt;connect(st, crm_system_name, &amp;pollfd.fd);</a>
+<a name="ln293">    crm_debug(&quot;Connect: %d&quot;, rc);</a>
+<a name="ln294"> </a>
+<a name="ln295">    st-&gt;cmds-&gt;register_notification(st, T_STONITH_NOTIFY_DISCONNECT, st_callback);</a>
+<a name="ln296">    st-&gt;cmds-&gt;register_notification(st, T_STONITH_NOTIFY_FENCE, st_callback);</a>
+<a name="ln297">    st-&gt;cmds-&gt;register_notification(st, STONITH_OP_DEVICE_ADD, st_callback);</a>
+<a name="ln298">    st-&gt;cmds-&gt;register_notification(st, STONITH_OP_DEVICE_DEL, st_callback);</a>
+<a name="ln299">    st-&gt;cmds-&gt;register_callback(st, 0, 120, st_opt_timeout_updates, NULL, &quot;st_global_callback&quot;,</a>
+<a name="ln300">                                st_global_callback);</a>
+<a name="ln301"> </a>
+<a name="ln302">    crm_info(&quot;Starting API Sanity Tests&quot;);</a>
+<a name="ln303">    run_standard_test();</a>
+<a name="ln304">    run_fence_failure_test();</a>
+<a name="ln305">    run_fence_failure_rollover_test();</a>
+<a name="ln306">    crm_info(&quot;Sanity Tests Passed&quot;);</a>
+<a name="ln307">}</a>
+<a name="ln308"> </a>
+<a name="ln309">static void</a>
+<a name="ln310">standard_dev_test(void)</a>
+<a name="ln311">{</a>
+<a name="ln312">    int rc = 0;</a>
+<a name="ln313">    char *tmp = NULL;</a>
+<a name="ln314">    stonith_key_value_t *params = NULL;</a>
+<a name="ln315"> </a>
+<a name="ln316">    rc = st-&gt;cmds-&gt;connect(st, crm_system_name, &amp;pollfd.fd);</a>
+<a name="ln317">    crm_debug(&quot;Connect: %d&quot;, rc);</a>
+<a name="ln318"> </a>
+<a name="ln319">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;some-host=pcmk-7 true_1_node1=3,4&quot;);</a>
+<a name="ln320"> </a>
+<a name="ln321">    rc = st-&gt;cmds-&gt;register_device(st, st_opts, &quot;test-id&quot;, &quot;stonith-ng&quot;, &quot;fence_xvm&quot;, params);</a>
+<a name="ln322">    crm_debug(&quot;Register: %d&quot;, rc);</a>
+<a name="ln323"> </a>
+<a name="ln324">    rc = st-&gt;cmds-&gt;list(st, st_opts, &quot;test-id&quot;, &amp;tmp, 10);</a>
+<a name="ln325">    crm_debug(&quot;List: %d output: %s&quot;, rc, tmp ? tmp : &quot;&lt;none&gt;&quot;);</a>
+<a name="ln326"> </a>
+<a name="ln327">    rc = st-&gt;cmds-&gt;monitor(st, st_opts, &quot;test-id&quot;, 10);</a>
+<a name="ln328">    crm_debug(&quot;Monitor: %d&quot;, rc);</a>
+<a name="ln329"> </a>
+<a name="ln330">    rc = st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node2&quot;, 10);</a>
+<a name="ln331">    crm_debug(&quot;Status false_1_node2: %d&quot;, rc);</a>
+<a name="ln332"> </a>
+<a name="ln333">    rc = st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node1&quot;, 10);</a>
+<a name="ln334">    crm_debug(&quot;Status false_1_node1: %d&quot;, rc);</a>
+<a name="ln335"> </a>
+<a name="ln336">    rc = st-&gt;cmds-&gt;fence(st, st_opts, &quot;unknown-host&quot;, &quot;off&quot;, 60, 0);</a>
+<a name="ln337">    crm_debug(&quot;Fence unknown-host: %d&quot;, rc);</a>
+<a name="ln338"> </a>
+<a name="ln339">    rc = st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node1&quot;, 10);</a>
+<a name="ln340">    crm_debug(&quot;Status false_1_node1: %d&quot;, rc);</a>
+<a name="ln341"> </a>
+<a name="ln342">    rc = st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node1&quot;, &quot;off&quot;, 60, 0);</a>
+<a name="ln343">    crm_debug(&quot;Fence false_1_node1: %d&quot;, rc);</a>
+<a name="ln344"> </a>
+<a name="ln345">    rc = st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node1&quot;, 10);</a>
+<a name="ln346">    crm_debug(&quot;Status false_1_node1: %d&quot;, rc);</a>
+<a name="ln347"> </a>
+<a name="ln348">    rc = st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node1&quot;, &quot;on&quot;, 10, 0);</a>
+<a name="ln349">    crm_debug(&quot;Unfence false_1_node1: %d&quot;, rc);</a>
+<a name="ln350"> </a>
+<a name="ln351">    rc = st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;false_1_node1&quot;, 10);</a>
+<a name="ln352">    crm_debug(&quot;Status false_1_node1: %d&quot;, rc);</a>
+<a name="ln353"> </a>
+<a name="ln354">    rc = st-&gt;cmds-&gt;fence(st, st_opts, &quot;some-host&quot;, &quot;off&quot;, 10, 0);</a>
+<a name="ln355">    crm_debug(&quot;Fence alias: %d&quot;, rc);</a>
+<a name="ln356"> </a>
+<a name="ln357">    rc = st-&gt;cmds-&gt;status(st, st_opts, &quot;test-id&quot;, &quot;some-host&quot;, 10);</a>
+<a name="ln358">    crm_debug(&quot;Status alias: %d&quot;, rc);</a>
+<a name="ln359"> </a>
+<a name="ln360">    rc = st-&gt;cmds-&gt;fence(st, st_opts, &quot;false_1_node1&quot;, &quot;on&quot;, 10, 0);</a>
+<a name="ln361">    crm_debug(&quot;Unfence false_1_node1: %d&quot;, rc);</a>
+<a name="ln362"> </a>
+<a name="ln363">    rc = st-&gt;cmds-&gt;remove_device(st, st_opts, &quot;test-id&quot;);</a>
+<a name="ln364">    crm_debug(&quot;Remove test-id: %d&quot;, rc);</a>
+<a name="ln365"> </a>
+<a name="ln366">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln367">}</a>
+<a name="ln368"> </a>
+<a name="ln369">static void</a>
+<a name="ln370"> iterate_mainloop_tests(gboolean event_ready);</a>
+<a name="ln371"> </a>
+<a name="ln372">static void</a>
+<a name="ln373">mainloop_callback(stonith_t * stonith, stonith_callback_data_t * data)</a>
+<a name="ln374">{</a>
+<a name="ln375">    callback_rc = data-&gt;rc;</a>
+<a name="ln376">    iterate_mainloop_tests(TRUE);</a>
+<a name="ln377">}</a>
+<a name="ln378"> </a>
+<a name="ln379">static int</a>
+<a name="ln380">register_callback_helper(int callid)</a>
+<a name="ln381">{</a>
+<a name="ln382">    return st-&gt;cmds-&gt;register_callback(st,</a>
+<a name="ln383">                                       callid,</a>
+<a name="ln384">                                       MAINLOOP_DEFAULT_TIMEOUT,</a>
+<a name="ln385">                                       st_opt_timeout_updates, NULL, &quot;callback&quot;, mainloop_callback);</a>
+<a name="ln386">}</a>
+<a name="ln387"> </a>
+<a name="ln388">static void</a>
+<a name="ln389">test_async_fence_pass(int check_event)</a>
+<a name="ln390">{</a>
+<a name="ln391">    int rc = 0;</a>
+<a name="ln392"> </a>
+<a name="ln393">    if (check_event) {</a>
+<a name="ln394">        if (callback_rc != 0) {</a>
+<a name="ln395">            mainloop_test_done(FALSE);</a>
+<a name="ln396">        } else {</a>
+<a name="ln397">            mainloop_test_done(TRUE);</a>
+<a name="ln398">        }</a>
+<a name="ln399">        return;</a>
+<a name="ln400">    }</a>
+<a name="ln401"> </a>
+<a name="ln402">    rc = st-&gt;cmds-&gt;fence(st, 0, &quot;true_1_node1&quot;, &quot;off&quot;, MAINLOOP_DEFAULT_TIMEOUT, 0);</a>
+<a name="ln403">    if (rc &lt; 0) {</a>
+<a name="ln404">        crm_err(&quot;fence failed with rc %d&quot;, rc);</a>
+<a name="ln405">        mainloop_test_done(FALSE);</a>
+<a name="ln406">    }</a>
+<a name="ln407">    register_callback_helper(rc);</a>
+<a name="ln408">    /* wait for event */</a>
+<a name="ln409">}</a>
+<a name="ln410"> </a>
+<a name="ln411">#define CUSTOM_TIMEOUT_ADDITION 10</a>
+<a name="ln412">static void</a>
+<a name="ln413">test_async_fence_custom_timeout(int check_event)</a>
+<a name="ln414">{</a>
+<a name="ln415">    int rc = 0;</a>
+<a name="ln416">    static time_t begin = 0;</a>
+<a name="ln417"> </a>
+<a name="ln418">    if (check_event) {</a>
+<a name="ln419">        uint32_t diff = (time(NULL) - begin);</a>
+<a name="ln420"> </a>
+<a name="ln421">        if (callback_rc != -ETIME) {</a>
+<a name="ln422">            mainloop_test_done(FALSE);</a>
+<a name="ln423">        } else if (diff &lt; CUSTOM_TIMEOUT_ADDITION + MAINLOOP_DEFAULT_TIMEOUT) {</a>
+<a name="ln424">            crm_err</a>
+<a name="ln425">                (&quot;Custom timeout test failed, callback expiration should be updated to %d, actual timeout was %d&quot;,</a>
+<a name="ln426">                 CUSTOM_TIMEOUT_ADDITION + MAINLOOP_DEFAULT_TIMEOUT, diff);</a>
+<a name="ln427">            mainloop_test_done(FALSE);</a>
+<a name="ln428">        } else {</a>
+<a name="ln429">            mainloop_test_done(TRUE);</a>
+<a name="ln430">        }</a>
+<a name="ln431">        return;</a>
+<a name="ln432">    }</a>
+<a name="ln433">    begin = time(NULL);</a>
+<a name="ln434"> </a>
+<a name="ln435">    rc = st-&gt;cmds-&gt;fence(st, 0, &quot;custom_timeout_node1&quot;, &quot;off&quot;, MAINLOOP_DEFAULT_TIMEOUT, 0);</a>
+<a name="ln436">    if (rc &lt; 0) {</a>
+<a name="ln437">        crm_err(&quot;fence failed with rc %d&quot;, rc);</a>
+<a name="ln438">        mainloop_test_done(FALSE);</a>
+<a name="ln439">    }</a>
+<a name="ln440">    register_callback_helper(rc);</a>
+<a name="ln441">    /* wait for event */</a>
+<a name="ln442">}</a>
+<a name="ln443"> </a>
+<a name="ln444">static void</a>
+<a name="ln445">test_async_fence_timeout(int check_event)</a>
+<a name="ln446">{</a>
+<a name="ln447">    int rc = 0;</a>
+<a name="ln448"> </a>
+<a name="ln449">    if (check_event) {</a>
+<a name="ln450">        if (callback_rc != -ENODEV) {</a>
+<a name="ln451">            mainloop_test_done(FALSE);</a>
+<a name="ln452">        } else {</a>
+<a name="ln453">            mainloop_test_done(TRUE);</a>
+<a name="ln454">        }</a>
+<a name="ln455">        return;</a>
+<a name="ln456">    }</a>
+<a name="ln457"> </a>
+<a name="ln458">    rc = st-&gt;cmds-&gt;fence(st, 0, &quot;false_1_node2&quot;, &quot;off&quot;, MAINLOOP_DEFAULT_TIMEOUT, 0);</a>
+<a name="ln459">    if (rc &lt; 0) {</a>
+<a name="ln460">        crm_err(&quot;fence failed with rc %d&quot;, rc);</a>
+<a name="ln461">        mainloop_test_done(FALSE);</a>
+<a name="ln462">    }</a>
+<a name="ln463">    register_callback_helper(rc);</a>
+<a name="ln464">    /* wait for event */</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">static void</a>
+<a name="ln468">test_async_monitor(int check_event)</a>
+<a name="ln469">{</a>
+<a name="ln470">    int rc = 0;</a>
+<a name="ln471"> </a>
+<a name="ln472">    if (check_event) {</a>
+<a name="ln473">        if (callback_rc) {</a>
+<a name="ln474">            mainloop_test_done(FALSE);</a>
+<a name="ln475">        } else {</a>
+<a name="ln476">            mainloop_test_done(TRUE);</a>
+<a name="ln477">        }</a>
+<a name="ln478">        return;</a>
+<a name="ln479">    }</a>
+<a name="ln480"> </a>
+<a name="ln481">    rc = st-&gt;cmds-&gt;monitor(st, 0, &quot;false_1&quot;, MAINLOOP_DEFAULT_TIMEOUT);</a>
+<a name="ln482">    if (rc &lt; 0) {</a>
+<a name="ln483">        crm_err(&quot;monitor failed with rc %d&quot;, rc);</a>
+<a name="ln484">        mainloop_test_done(FALSE);</a>
+<a name="ln485">    }</a>
+<a name="ln486"> </a>
+<a name="ln487">    register_callback_helper(rc);</a>
+<a name="ln488">    /* wait for event */</a>
+<a name="ln489">}</a>
+<a name="ln490"> </a>
+<a name="ln491">static void</a>
+<a name="ln492">test_register_async_devices(int check_event)</a>
+<a name="ln493">{</a>
+<a name="ln494">    char buf[16] = { 0, };</a>
+<a name="ln495">    stonith_key_value_t *params = NULL;</a>
+<a name="ln496"> </a>
+<a name="ln497">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;false_1_node1=1,2&quot;);</a>
+<a name="ln498">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;fail&quot;);</a>
+<a name="ln499">    st-&gt;cmds-&gt;register_device(st, st_opts, &quot;false_1&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;, params);</a>
+<a name="ln500">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln501"> </a>
+<a name="ln502">    params = NULL;</a>
+<a name="ln503">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;true_1_node1=1,2&quot;);</a>
+<a name="ln504">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;pass&quot;);</a>
+<a name="ln505">    st-&gt;cmds-&gt;register_device(st, st_opts, &quot;true_1&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;, params);</a>
+<a name="ln506">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln507"> </a>
+<a name="ln508">    params = NULL;</a>
+<a name="ln509">    params = stonith_key_value_add(params, &quot;pcmk_host_map&quot;, &quot;custom_timeout_node1=1,2&quot;);</a>
+<a name="ln510">    params = stonith_key_value_add(params, &quot;mode&quot;, &quot;fail&quot;);</a>
+<a name="ln511">    params = stonith_key_value_add(params, &quot;delay&quot;, &quot;1000&quot;);</a>
+<a name="ln512">    snprintf(buf, sizeof(buf) - 1, &quot;%d&quot;, MAINLOOP_DEFAULT_TIMEOUT + CUSTOM_TIMEOUT_ADDITION);</a>
+<a name="ln513">    params = stonith_key_value_add(params, &quot;pcmk_off_timeout&quot;, buf);</a>
+<a name="ln514">    st-&gt;cmds-&gt;register_device(st, st_opts, &quot;false_custom_timeout&quot;, &quot;stonith-ng&quot;, &quot;fence_dummy&quot;,</a>
+<a name="ln515">                              params);</a>
+<a name="ln516">    stonith_key_value_freeall(params, 1, 1);</a>
+<a name="ln517"> </a>
+<a name="ln518">    mainloop_test_done(TRUE);</a>
+<a name="ln519">}</a>
+<a name="ln520"> </a>
+<a name="ln521">static void</a>
+<a name="ln522">try_mainloop_connect(int check_event)</a>
+<a name="ln523">{</a>
+<a name="ln524">    int tries = 10;</a>
+<a name="ln525">    int i = 0;</a>
+<a name="ln526">    int rc = 0;</a>
+<a name="ln527"> </a>
+<a name="ln528">    for (i = 0; i &lt; tries; i++) {</a>
+<a name="ln529">        rc = st-&gt;cmds-&gt;connect(st, crm_system_name, NULL);</a>
+<a name="ln530"> </a>
+<a name="ln531">        if (!rc) {</a>
+<a name="ln532">            crm_info(&quot;stonith client connection established&quot;);</a>
+<a name="ln533">            mainloop_test_done(TRUE);</a>
+<a name="ln534">            return;</a>
+<a name="ln535">        } else {</a>
+<a name="ln536">            crm_info(&quot;stonith client connection failed&quot;);</a>
+<a name="ln537">        }</a>
+<a name="ln538">        sleep(1);</a>
+<a name="ln539">    }</a>
+<a name="ln540"> </a>
+<a name="ln541">    crm_err(&quot;API CONNECTION FAILURE&quot;);</a>
+<a name="ln542">    mainloop_test_done(FALSE);</a>
+<a name="ln543">}</a>
+<a name="ln544"> </a>
+<a name="ln545">static void</a>
+<a name="ln546">iterate_mainloop_tests(gboolean event_ready)</a>
+<a name="ln547">{</a>
+<a name="ln548">    static mainloop_test_iteration_cb callbacks[] = {</a>
+<a name="ln549">        try_mainloop_connect,</a>
+<a name="ln550">        test_register_async_devices,</a>
+<a name="ln551">        test_async_monitor,</a>
+<a name="ln552">        test_async_fence_pass,</a>
+<a name="ln553">        test_async_fence_timeout,</a>
+<a name="ln554">        test_async_fence_custom_timeout,</a>
+<a name="ln555">    };</a>
+<a name="ln556"> </a>
+<a name="ln557">    if (mainloop_iter == (sizeof(callbacks) / sizeof(mainloop_test_iteration_cb))) {</a>
+<a name="ln558">        /* all tests ran, everything passed */</a>
+<a name="ln559">        crm_info(&quot;ALL MAINLOOP TESTS PASSED!&quot;);</a>
+<a name="ln560">        crm_exit(pcmk_ok);</a>
+<a name="ln561">    }</a>
+<a name="ln562"> </a>
+<a name="ln563">    callbacks[mainloop_iter] (event_ready);</a>
+<a name="ln564">}</a>
+<a name="ln565"> </a>
+<a name="ln566">static gboolean</a>
+<a name="ln567">trigger_iterate_mainloop_tests(gpointer user_data)</a>
+<a name="ln568">{</a>
+<a name="ln569">    iterate_mainloop_tests(FALSE);</a>
+<a name="ln570">    return TRUE;</a>
+<a name="ln571">}</a>
+<a name="ln572"> </a>
+<a name="ln573">static void</a>
+<a name="ln574">test_shutdown(int nsig)</a>
+<a name="ln575">{</a>
+<a name="ln576">    int rc = 0;</a>
+<a name="ln577"> </a>
+<a name="ln578">    if (st) {</a>
+<a name="ln579">        rc = st-&gt;cmds-&gt;disconnect(st);</a>
+<a name="ln580">        crm_info(&quot;Disconnect: %d&quot;, rc);</a>
+<a name="ln581"> </a>
+<a name="ln582">        crm_debug(&quot;Destroy&quot;);</a>
+<a name="ln583">        stonith_api_delete(st);</a>
+<a name="ln584">    }</a>
+<a name="ln585"> </a>
+<a name="ln586">    if (rc) {</a>
+<a name="ln587">        crm_exit(pcmk_err_generic);</a>
+<a name="ln588">    }</a>
+<a name="ln589">}</a>
+<a name="ln590"> </a>
+<a name="ln591">static void</a>
+<a name="ln592">mainloop_tests(void)</a>
+<a name="ln593">{</a>
+<a name="ln594">    trig = mainloop_add_trigger(G_PRIORITY_HIGH, trigger_iterate_mainloop_tests, NULL);</a>
+<a name="ln595">    mainloop_set_trigger(trig);</a>
+<a name="ln596">    mainloop_add_signal(SIGTERM, test_shutdown);</a>
+<a name="ln597"> </a>
+<a name="ln598">    crm_info(&quot;Starting&quot;);</a>
+<a name="ln599">    mainloop = g_main_new(FALSE);</a>
+<a name="ln600">    g_main_run(mainloop);</a>
+<a name="ln601">}</a>
+<a name="ln602"> </a>
+<a name="ln603">int</a>
+<a name="ln604">main(int argc, char **argv)</a>
+<a name="ln605">{</a>
+<a name="ln606">    int argerr = 0;</a>
+<a name="ln607">    int flag;</a>
+<a name="ln608">    int option_index = 0;</a>
+<a name="ln609"> </a>
+<a name="ln610">    enum test_modes mode = test_standard;</a>
+<a name="ln611"> </a>
+<a name="ln612">    crm_set_options(NULL, &quot;mode [options]&quot;, long_options,</a>
+<a name="ln613">                    &quot;Provides a summary of cluster's current state.&quot;</a>
+<a name="ln614">                    &quot;\n\nOutputs varying levels of detail in a number of different formats.\n&quot;);</a>
+<a name="ln615"> </a>
+<a name="ln616">    while (1) {</a>
+<a name="ln617">        flag = crm_get_option(argc, argv, &amp;option_index);</a>
+<a name="ln618">        if (flag == -1) {</a>
+<a name="ln619">            break;</a>
+<a name="ln620">        }</a>
+<a name="ln621"> </a>
+<a name="ln622">        switch (flag) {</a>
+<a name="ln623">            case 'V':</a>
+<a name="ln624">                verbose = 1;</a>
+<a name="ln625">                break;</a>
+<a name="ln626">            case '$':</a>
+<a name="ln627">            case '?':</a>
+<a name="ln628">                crm_help(flag, EX_OK);</a>
+<a name="ln629">                break;</a>
+<a name="ln630">            case 'p':</a>
+<a name="ln631">                mode = test_passive;</a>
+<a name="ln632">                break;</a>
+<a name="ln633">            case 't':</a>
+<a name="ln634">                mode = test_api_sanity;</a>
+<a name="ln635">                break;</a>
+<a name="ln636">            case 'm':</a>
+<a name="ln637">                mode = test_api_mainloop;</a>
+<a name="ln638">                break;</a>
+<a name="ln639">            default:</a>
+<a name="ln640">                ++argerr;</a>
+<a name="ln641">                break;</a>
+<a name="ln642">        }</a>
+<a name="ln643">    }</a>
+<a name="ln644"> </a>
+<a name="ln645">    crm_log_init(&quot;stonith-test&quot;, LOG_INFO, TRUE, verbose ? TRUE : FALSE, argc, argv, FALSE);</a>
+<a name="ln646"> </a>
+<a name="ln647">    if (optind &gt; argc) {</a>
+<a name="ln648">        ++argerr;</a>
+<a name="ln649">    }</a>
+<a name="ln650"> </a>
+<a name="ln651">    if (argerr) {</a>
+<a name="ln652">        crm_help('?', EX_USAGE);</a>
+<a name="ln653">    }</a>
+<a name="ln654"> </a>
+<a name="ln655">    crm_debug(&quot;Create&quot;);</a>
+<a name="ln656">    st = stonith_api_new();</a>
+<a name="ln657"> </a>
+<a name="ln658">    switch (mode) {</a>
+<a name="ln659">        case test_standard:</a>
+<a name="ln660">            standard_dev_test();</a>
+<a name="ln661">            break;</a>
+<a name="ln662">        case test_passive:</a>
+<a name="ln663">            passive_test();</a>
+<a name="ln664">            break;</a>
+<a name="ln665">        case test_api_sanity:</a>
+<a name="ln666">            sanity_tests();</a>
+<a name="ln667">            break;</a>
+<a name="ln668">        case test_api_mainloop:</a>
+<a name="ln669">            mainloop_tests();</a>
+<a name="ln670">            break;</a>
+<a name="ln671">    }</a>
+<a name="ln672"> </a>
+<a name="ln673">    test_shutdown(0);</a>
+<a name="ln674">    return 0;</a>
+<a name="ln675">}</a>
+
+</code></pre>
+<div class="balloon" rel="92"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V707/" target="_blank">V707</a> Giving short names to global variables is considered to be bad practice. It is suggested to rename 'st' variable.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

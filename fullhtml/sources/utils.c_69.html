@@ -1,0 +1,1064 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/crm.h&gt;</a>
+<a name="ln26">#include &lt;crm/cib.h&gt;</a>
+<a name="ln27">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln28">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln29">#include &lt;crm/cluster.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln32">#include &lt;crmd_utils.h&gt;</a>
+<a name="ln33">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">/*	A_DC_TIMER_STOP, A_DC_TIMER_START,</a>
+<a name="ln36"> *	A_FINALIZE_TIMER_STOP, A_FINALIZE_TIMER_START</a>
+<a name="ln37"> *	A_INTEGRATE_TIMER_STOP, A_INTEGRATE_TIMER_START</a>
+<a name="ln38"> */</a>
+<a name="ln39">void</a>
+<a name="ln40">do_timer_control(long long action,</a>
+<a name="ln41">                 enum crmd_fsa_cause cause,</a>
+<a name="ln42">                 enum crmd_fsa_state cur_state,</a>
+<a name="ln43">                 enum crmd_fsa_input current_input, fsa_data_t * msg_data)</a>
+<a name="ln44">{</a>
+<a name="ln45">    gboolean timer_op_ok = TRUE;</a>
+<a name="ln46"> </a>
+<a name="ln47">    if (action &amp; A_DC_TIMER_STOP) {</a>
+<a name="ln48">        timer_op_ok = crm_timer_stop(election_trigger);</a>
+<a name="ln49"> </a>
+<a name="ln50">    } else if (action &amp; A_FINALIZE_TIMER_STOP) {</a>
+<a name="ln51">        timer_op_ok = crm_timer_stop(finalization_timer);</a>
+<a name="ln52"> </a>
+<a name="ln53">    } else if (action &amp; A_INTEGRATE_TIMER_STOP) {</a>
+<a name="ln54">        timer_op_ok = crm_timer_stop(integration_timer);</a>
+<a name="ln55"> </a>
+<a name="ln56">/* 	} else if(action &amp; A_ELECTION_TIMEOUT_STOP) { */</a>
+<a name="ln57">/* 		timer_op_ok = crm_timer_stop(election_timeout); */</a>
+<a name="ln58">    }</a>
+<a name="ln59"> </a>
+<a name="ln60">    /* don't start a timer that wasn't already running */</a>
+<a name="ln61">    if (action &amp; A_DC_TIMER_START &amp;&amp; timer_op_ok) {</a>
+<a name="ln62">        crm_timer_start(election_trigger);</a>
+<a name="ln63">        if (AM_I_DC) {</a>
+<a name="ln64">            /* there can be only one */</a>
+<a name="ln65">            register_fsa_input(cause, I_ELECTION, NULL);</a>
+<a name="ln66">        }</a>
+<a name="ln67"> </a>
+<a name="ln68">    } else if (action &amp; A_FINALIZE_TIMER_START) {</a>
+<a name="ln69">        crm_timer_start(finalization_timer);</a>
+<a name="ln70"> </a>
+<a name="ln71">    } else if (action &amp; A_INTEGRATE_TIMER_START) {</a>
+<a name="ln72">        crm_timer_start(integration_timer);</a>
+<a name="ln73"> </a>
+<a name="ln74">/* 	} else if(action &amp; A_ELECTION_TIMEOUT_START) { */</a>
+<a name="ln75">/* 		crm_timer_start(election_timeout); */</a>
+<a name="ln76">    }</a>
+<a name="ln77">}</a>
+<a name="ln78"> </a>
+<a name="ln79">const char *</a>
+<a name="ln80">get_timer_desc(fsa_timer_t * timer)</a>
+<a name="ln81">{</a>
+<a name="ln82">    if (timer == election_trigger) {</a>
+<a name="ln83">        return &quot;Election Trigger&quot;;</a>
+<a name="ln84"> </a>
+<a name="ln85">    } else if (timer == shutdown_escalation_timer) {</a>
+<a name="ln86">        return &quot;Shutdown Escalation&quot;;</a>
+<a name="ln87"> </a>
+<a name="ln88">    } else if (timer == integration_timer) {</a>
+<a name="ln89">        return &quot;Integration Timer&quot;;</a>
+<a name="ln90"> </a>
+<a name="ln91">    } else if (timer == finalization_timer) {</a>
+<a name="ln92">        return &quot;Finalization Timer&quot;;</a>
+<a name="ln93"> </a>
+<a name="ln94">    } else if (timer == transition_timer) {</a>
+<a name="ln95">        return &quot;New Transition Timer&quot;;</a>
+<a name="ln96"> </a>
+<a name="ln97">    } else if (timer == wait_timer) {</a>
+<a name="ln98">        return &quot;Wait Timer&quot;;</a>
+<a name="ln99"> </a>
+<a name="ln100">    } else if (timer == recheck_timer) {</a>
+<a name="ln101">        return &quot;PEngine Recheck Timer&quot;;</a>
+<a name="ln102"> </a>
+<a name="ln103">    }</a>
+<a name="ln104">    return &quot;Unknown Timer&quot;;</a>
+<a name="ln105">}</a>
+<a name="ln106"> </a>
+<a name="ln107">gboolean</a>
+<a name="ln108">crm_timer_popped(gpointer data)</a>
+<a name="ln109">{</a>
+<a name="ln110">    fsa_timer_t *timer = (fsa_timer_t *) data;</a>
+<a name="ln111"> </a>
+<a name="ln112">    if (timer == wait_timer</a>
+<a name="ln113">        || timer == recheck_timer</a>
+<a name="ln114">        || timer == transition_timer || timer == finalization_timer || timer == election_trigger) {</a>
+<a name="ln115">        crm_info(&quot;%s (%s) just popped (%dms)&quot;,</a>
+<a name="ln116">                 get_timer_desc(timer), fsa_input2string(timer-&gt;fsa_input), timer-&gt;period_ms);</a>
+<a name="ln117">        timer-&gt;counter++;</a>
+<a name="ln118"> </a>
+<a name="ln119">    } else {</a>
+<a name="ln120">        crm_err(&quot;%s (%s) just popped in state %s! (%dms)&quot;,</a>
+<a name="ln121">                get_timer_desc(timer), fsa_input2string(timer-&gt;fsa_input),</a>
+<a name="ln122">                fsa_state2string(fsa_state), timer-&gt;period_ms);</a>
+<a name="ln123">    }</a>
+<a name="ln124"> </a>
+<a name="ln125">    if (timer == election_trigger &amp;&amp; election_trigger-&gt;counter &gt; 5) {</a>
+<a name="ln126">        crm_notice(&quot;We appear to be in an election loop, something may be wrong&quot;);</a>
+<a name="ln127">        crm_write_blackbox(0, NULL);</a>
+<a name="ln128">        election_trigger-&gt;counter = 0;</a>
+<a name="ln129">    }</a>
+<a name="ln130"> </a>
+<a name="ln131">    if (timer-&gt;repeat == FALSE) {</a>
+<a name="ln132">        crm_timer_stop(timer);  /* make it _not_ go off again */</a>
+<a name="ln133">    }</a>
+<a name="ln134"> </a>
+<a name="ln135">    if (timer-&gt;fsa_input == I_INTEGRATED) {</a>
+<a name="ln136">        crm_info(&quot;Welcomed: %d, Integrated: %d&quot;,</a>
+<a name="ln137">                 crmd_join_phase_count(crm_join_welcomed),</a>
+<a name="ln138">                 crmd_join_phase_count(crm_join_integrated));</a>
+<a name="ln139">        if (crmd_join_phase_count(crm_join_welcomed) == 0) {</a>
+<a name="ln140">            /* If we don't even have ourself, start again */</a>
+<a name="ln141">            register_fsa_error_adv(C_FSA_INTERNAL, I_ELECTION, NULL, NULL, __FUNCTION__);</a>
+<a name="ln142"> </a>
+<a name="ln143">        } else {</a>
+<a name="ln144">            register_fsa_input_before(C_TIMER_POPPED, timer-&gt;fsa_input, NULL);</a>
+<a name="ln145">        }</a>
+<a name="ln146"> </a>
+<a name="ln147">    } else if (timer == recheck_timer &amp;&amp; fsa_state != S_IDLE) {</a>
+<a name="ln148">        crm_debug(&quot;Discarding %s event in state: %s&quot;,</a>
+<a name="ln149">                  fsa_input2string(timer-&gt;fsa_input), fsa_state2string(fsa_state));</a>
+<a name="ln150"> </a>
+<a name="ln151">    } else if (timer == finalization_timer &amp;&amp; fsa_state != S_FINALIZE_JOIN) {</a>
+<a name="ln152">        crm_debug(&quot;Discarding %s event in state: %s&quot;,</a>
+<a name="ln153">                  fsa_input2string(timer-&gt;fsa_input), fsa_state2string(fsa_state));</a>
+<a name="ln154"> </a>
+<a name="ln155">    } else if (timer-&gt;fsa_input != I_NULL) {</a>
+<a name="ln156">        register_fsa_input(C_TIMER_POPPED, timer-&gt;fsa_input, NULL);</a>
+<a name="ln157">    }</a>
+<a name="ln158"> </a>
+<a name="ln159">    crm_trace(&quot;Triggering FSA: %s&quot;, __FUNCTION__);</a>
+<a name="ln160">    mainloop_set_trigger(fsa_source);</a>
+<a name="ln161"> </a>
+<a name="ln162">    return TRUE;</a>
+<a name="ln163">}</a>
+<a name="ln164"> </a>
+<a name="ln165">gboolean</a>
+<a name="ln166">is_timer_started(fsa_timer_t * timer)</a>
+<a name="ln167">{</a>
+<a name="ln168">    if (timer-&gt;period_ms &gt; 0) {</a>
+<a name="ln169">        if (timer-&gt;source_id == 0) {</a>
+<a name="ln170">            return FALSE;</a>
+<a name="ln171">        } else {</a>
+<a name="ln172">            return TRUE;</a>
+<a name="ln173">        }</a>
+<a name="ln174">    }</a>
+<a name="ln175">    return FALSE;</a>
+<a name="ln176">}</a>
+<a name="ln177"> </a>
+<a name="ln178">gboolean</a>
+<a name="ln179">crm_timer_start(fsa_timer_t * timer)</a>
+<a name="ln180">{</a>
+<a name="ln181">    const char *timer_desc = get_timer_desc(timer);</a>
+<a name="ln182"> </a>
+<a name="ln183">    if (timer-&gt;source_id == 0 &amp;&amp; timer-&gt;period_ms &gt; 0) {</a>
+<a name="ln184">        timer-&gt;source_id = g_timeout_add(timer-&gt;period_ms, timer-&gt;callback, (void *)timer);</a>
+<a name="ln185">        CRM_ASSERT(timer-&gt;source_id != 0);</a>
+<a name="ln186">        crm_debug(&quot;Started %s (%s:%dms), src=%d&quot;,</a>
+<a name="ln187">                  timer_desc, fsa_input2string(timer-&gt;fsa_input),</a>
+<a name="ln188">                  timer-&gt;period_ms, timer-&gt;source_id);</a>
+<a name="ln189"> </a>
+<a name="ln190">    } else if (timer-&gt;period_ms &lt; 0) {</a>
+<a name="ln191">        crm_err(&quot;Tried to start %s (%s:%dms) with a -ve period&quot;,</a>
+<a name="ln192">                timer_desc, fsa_input2string(timer-&gt;fsa_input), timer-&gt;period_ms);</a>
+<a name="ln193"> </a>
+<a name="ln194">    } else {</a>
+<a name="ln195">        crm_debug(&quot;%s (%s:%dms) already running: src=%d&quot;,</a>
+<a name="ln196">                  timer_desc, fsa_input2string(timer-&gt;fsa_input),</a>
+<a name="ln197">                  timer-&gt;period_ms, timer-&gt;source_id);</a>
+<a name="ln198">        return FALSE;</a>
+<a name="ln199">    }</a>
+<a name="ln200">    return TRUE;</a>
+<a name="ln201">}</a>
+<a name="ln202"> </a>
+<a name="ln203">gboolean</a>
+<a name="ln204">crm_timer_stop(fsa_timer_t * timer)</a>
+<a name="ln205">{</a>
+<a name="ln206">    const char *timer_desc = get_timer_desc(timer);</a>
+<a name="ln207"> </a>
+<a name="ln208">    if (timer == NULL) {</a>
+<a name="ln209">        crm_err(&quot;Attempted to stop NULL timer&quot;);</a>
+<a name="ln210">        return FALSE;</a>
+<a name="ln211"> </a>
+<a name="ln212">    } else if (timer-&gt;source_id != 0) {</a>
+<a name="ln213">        crm_trace(&quot;Stopping %s (%s:%dms), src=%d&quot;,</a>
+<a name="ln214">                  timer_desc, fsa_input2string(timer-&gt;fsa_input),</a>
+<a name="ln215">                  timer-&gt;period_ms, timer-&gt;source_id);</a>
+<a name="ln216">        g_source_remove(timer-&gt;source_id);</a>
+<a name="ln217">        timer-&gt;source_id = 0;</a>
+<a name="ln218"> </a>
+<a name="ln219">    } else {</a>
+<a name="ln220">        crm_trace(&quot;%s (%s:%dms) already stopped&quot;,</a>
+<a name="ln221">                  timer_desc, fsa_input2string(timer-&gt;fsa_input), timer-&gt;period_ms);</a>
+<a name="ln222">        return FALSE;</a>
+<a name="ln223">    }</a>
+<a name="ln224">    return TRUE;</a>
+<a name="ln225">}</a>
+<a name="ln226"> </a>
+<a name="ln227">const char *</a>
+<a name="ln228">fsa_input2string(enum crmd_fsa_input input)</a>
+<a name="ln229">{</a>
+<a name="ln230">    const char *inputAsText = NULL;</a>
+<a name="ln231"> </a>
+<a name="ln232">    switch (input) {</a>
+<a name="ln233">        case I_NULL:</a>
+<a name="ln234">            inputAsText = &quot;I_NULL&quot;;</a>
+<a name="ln235">            break;</a>
+<a name="ln236">        case I_CIB_OP:</a>
+<a name="ln237">            inputAsText = &quot;I_CIB_OP (unused)&quot;;</a>
+<a name="ln238">            break;</a>
+<a name="ln239">        case I_CIB_UPDATE:</a>
+<a name="ln240">            inputAsText = &quot;I_CIB_UPDATE&quot;;</a>
+<a name="ln241">            break;</a>
+<a name="ln242">        case I_DC_TIMEOUT:</a>
+<a name="ln243">            inputAsText = &quot;I_DC_TIMEOUT&quot;;</a>
+<a name="ln244">            break;</a>
+<a name="ln245">        case I_ELECTION:</a>
+<a name="ln246">            inputAsText = &quot;I_ELECTION&quot;;</a>
+<a name="ln247">            break;</a>
+<a name="ln248">        case I_PE_CALC:</a>
+<a name="ln249">            inputAsText = &quot;I_PE_CALC&quot;;</a>
+<a name="ln250">            break;</a>
+<a name="ln251">        case I_RELEASE_DC:</a>
+<a name="ln252">            inputAsText = &quot;I_RELEASE_DC&quot;;</a>
+<a name="ln253">            break;</a>
+<a name="ln254">        case I_ELECTION_DC:</a>
+<a name="ln255">            inputAsText = &quot;I_ELECTION_DC&quot;;</a>
+<a name="ln256">            break;</a>
+<a name="ln257">        case I_ERROR:</a>
+<a name="ln258">            inputAsText = &quot;I_ERROR&quot;;</a>
+<a name="ln259">            break;</a>
+<a name="ln260">        case I_FAIL:</a>
+<a name="ln261">            inputAsText = &quot;I_FAIL&quot;;</a>
+<a name="ln262">            break;</a>
+<a name="ln263">        case I_INTEGRATED:</a>
+<a name="ln264">            inputAsText = &quot;I_INTEGRATED&quot;;</a>
+<a name="ln265">            break;</a>
+<a name="ln266">        case I_FINALIZED:</a>
+<a name="ln267">            inputAsText = &quot;I_FINALIZED&quot;;</a>
+<a name="ln268">            break;</a>
+<a name="ln269">        case I_NODE_JOIN:</a>
+<a name="ln270">            inputAsText = &quot;I_NODE_JOIN&quot;;</a>
+<a name="ln271">            break;</a>
+<a name="ln272">        case I_JOIN_OFFER:</a>
+<a name="ln273">            inputAsText = &quot;I_JOIN_OFFER&quot;;</a>
+<a name="ln274">            break;</a>
+<a name="ln275">        case I_JOIN_REQUEST:</a>
+<a name="ln276">            inputAsText = &quot;I_JOIN_REQUEST&quot;;</a>
+<a name="ln277">            break;</a>
+<a name="ln278">        case I_JOIN_RESULT:</a>
+<a name="ln279">            inputAsText = &quot;I_JOIN_RESULT&quot;;</a>
+<a name="ln280">            break;</a>
+<a name="ln281">        case I_NOT_DC:</a>
+<a name="ln282">            inputAsText = &quot;I_NOT_DC&quot;;</a>
+<a name="ln283">            break;</a>
+<a name="ln284">        case I_RECOVERED:</a>
+<a name="ln285">            inputAsText = &quot;I_RECOVERED&quot;;</a>
+<a name="ln286">            break;</a>
+<a name="ln287">        case I_RELEASE_FAIL:</a>
+<a name="ln288">            inputAsText = &quot;I_RELEASE_FAIL&quot;;</a>
+<a name="ln289">            break;</a>
+<a name="ln290">        case I_RELEASE_SUCCESS:</a>
+<a name="ln291">            inputAsText = &quot;I_RELEASE_SUCCESS&quot;;</a>
+<a name="ln292">            break;</a>
+<a name="ln293">        case I_RESTART:</a>
+<a name="ln294">            inputAsText = &quot;I_RESTART&quot;;</a>
+<a name="ln295">            break;</a>
+<a name="ln296">        case I_PE_SUCCESS:</a>
+<a name="ln297">            inputAsText = &quot;I_PE_SUCCESS&quot;;</a>
+<a name="ln298">            break;</a>
+<a name="ln299">        case I_ROUTER:</a>
+<a name="ln300">            inputAsText = &quot;I_ROUTER&quot;;</a>
+<a name="ln301">            break;</a>
+<a name="ln302">        case I_SHUTDOWN:</a>
+<a name="ln303">            inputAsText = &quot;I_SHUTDOWN&quot;;</a>
+<a name="ln304">            break;</a>
+<a name="ln305">        case I_STARTUP:</a>
+<a name="ln306">            inputAsText = &quot;I_STARTUP&quot;;</a>
+<a name="ln307">            break;</a>
+<a name="ln308">        case I_TE_SUCCESS:</a>
+<a name="ln309">            inputAsText = &quot;I_TE_SUCCESS&quot;;</a>
+<a name="ln310">            break;</a>
+<a name="ln311">        case I_STOP:</a>
+<a name="ln312">            inputAsText = &quot;I_STOP&quot;;</a>
+<a name="ln313">            break;</a>
+<a name="ln314">        case I_DC_HEARTBEAT:</a>
+<a name="ln315">            inputAsText = &quot;I_DC_HEARTBEAT&quot;;</a>
+<a name="ln316">            break;</a>
+<a name="ln317">        case I_WAIT_FOR_EVENT:</a>
+<a name="ln318">            inputAsText = &quot;I_WAIT_FOR_EVENT&quot;;</a>
+<a name="ln319">            break;</a>
+<a name="ln320">        case I_LRM_EVENT:</a>
+<a name="ln321">            inputAsText = &quot;I_LRM_EVENT&quot;;</a>
+<a name="ln322">            break;</a>
+<a name="ln323">        case I_PENDING:</a>
+<a name="ln324">            inputAsText = &quot;I_PENDING&quot;;</a>
+<a name="ln325">            break;</a>
+<a name="ln326">        case I_HALT:</a>
+<a name="ln327">            inputAsText = &quot;I_HALT&quot;;</a>
+<a name="ln328">            break;</a>
+<a name="ln329">        case I_TERMINATE:</a>
+<a name="ln330">            inputAsText = &quot;I_TERMINATE&quot;;</a>
+<a name="ln331">            break;</a>
+<a name="ln332">        case I_ILLEGAL:</a>
+<a name="ln333">            inputAsText = &quot;I_ILLEGAL&quot;;</a>
+<a name="ln334">            break;</a>
+<a name="ln335">    }</a>
+<a name="ln336"> </a>
+<a name="ln337">    if (inputAsText == NULL) {</a>
+<a name="ln338">        crm_err(&quot;Input %d is unknown&quot;, input);</a>
+<a name="ln339">        inputAsText = &quot;&lt;UNKNOWN_INPUT&gt;&quot;;</a>
+<a name="ln340">    }</a>
+<a name="ln341"> </a>
+<a name="ln342">    return inputAsText;</a>
+<a name="ln343">}</a>
+<a name="ln344"> </a>
+<a name="ln345">const char *</a>
+<a name="ln346">fsa_state2string(enum crmd_fsa_state state)</a>
+<a name="ln347">{</a>
+<a name="ln348">    const char *stateAsText = NULL;</a>
+<a name="ln349"> </a>
+<a name="ln350">    switch (state) {</a>
+<a name="ln351">        case S_IDLE:</a>
+<a name="ln352">            stateAsText = &quot;S_IDLE&quot;;</a>
+<a name="ln353">            break;</a>
+<a name="ln354">        case S_ELECTION:</a>
+<a name="ln355">            stateAsText = &quot;S_ELECTION&quot;;</a>
+<a name="ln356">            break;</a>
+<a name="ln357">        case S_INTEGRATION:</a>
+<a name="ln358">            stateAsText = &quot;S_INTEGRATION&quot;;</a>
+<a name="ln359">            break;</a>
+<a name="ln360">        case S_FINALIZE_JOIN:</a>
+<a name="ln361">            stateAsText = &quot;S_FINALIZE_JOIN&quot;;</a>
+<a name="ln362">            break;</a>
+<a name="ln363">        case S_NOT_DC:</a>
+<a name="ln364">            stateAsText = &quot;S_NOT_DC&quot;;</a>
+<a name="ln365">            break;</a>
+<a name="ln366">        case S_POLICY_ENGINE:</a>
+<a name="ln367">            stateAsText = &quot;S_POLICY_ENGINE&quot;;</a>
+<a name="ln368">            break;</a>
+<a name="ln369">        case S_RECOVERY:</a>
+<a name="ln370">            stateAsText = &quot;S_RECOVERY&quot;;</a>
+<a name="ln371">            break;</a>
+<a name="ln372">        case S_RELEASE_DC:</a>
+<a name="ln373">            stateAsText = &quot;S_RELEASE_DC&quot;;</a>
+<a name="ln374">            break;</a>
+<a name="ln375">        case S_PENDING:</a>
+<a name="ln376">            stateAsText = &quot;S_PENDING&quot;;</a>
+<a name="ln377">            break;</a>
+<a name="ln378">        case S_STOPPING:</a>
+<a name="ln379">            stateAsText = &quot;S_STOPPING&quot;;</a>
+<a name="ln380">            break;</a>
+<a name="ln381">        case S_TERMINATE:</a>
+<a name="ln382">            stateAsText = &quot;S_TERMINATE&quot;;</a>
+<a name="ln383">            break;</a>
+<a name="ln384">        case S_TRANSITION_ENGINE:</a>
+<a name="ln385">            stateAsText = &quot;S_TRANSITION_ENGINE&quot;;</a>
+<a name="ln386">            break;</a>
+<a name="ln387">        case S_STARTING:</a>
+<a name="ln388">            stateAsText = &quot;S_STARTING&quot;;</a>
+<a name="ln389">            break;</a>
+<a name="ln390">        case S_HALT:</a>
+<a name="ln391">            stateAsText = &quot;S_HALT&quot;;</a>
+<a name="ln392">            break;</a>
+<a name="ln393">        case S_ILLEGAL:</a>
+<a name="ln394">            stateAsText = &quot;S_ILLEGAL&quot;;</a>
+<a name="ln395">            break;</a>
+<a name="ln396">    }</a>
+<a name="ln397"> </a>
+<a name="ln398">    if (stateAsText == NULL) {</a>
+<a name="ln399">        crm_err(&quot;State %d is unknown&quot;, state);</a>
+<a name="ln400">        stateAsText = &quot;&lt;UNKNOWN_STATE&gt;&quot;;</a>
+<a name="ln401">    }</a>
+<a name="ln402"> </a>
+<a name="ln403">    return stateAsText;</a>
+<a name="ln404">}</a>
+<a name="ln405"> </a>
+<a name="ln406">const char *</a>
+<a name="ln407">fsa_cause2string(enum crmd_fsa_cause cause)</a>
+<a name="ln408">{</a>
+<a name="ln409">    const char *causeAsText = NULL;</a>
+<a name="ln410"> </a>
+<a name="ln411">    switch (cause) {</a>
+<a name="ln412">        case C_UNKNOWN:</a>
+<a name="ln413">            causeAsText = &quot;C_UNKNOWN&quot;;</a>
+<a name="ln414">            break;</a>
+<a name="ln415">        case C_STARTUP:</a>
+<a name="ln416">            causeAsText = &quot;C_STARTUP&quot;;</a>
+<a name="ln417">            break;</a>
+<a name="ln418">        case C_IPC_MESSAGE:</a>
+<a name="ln419">            causeAsText = &quot;C_IPC_MESSAGE&quot;;</a>
+<a name="ln420">            break;</a>
+<a name="ln421">        case C_HA_MESSAGE:</a>
+<a name="ln422">            causeAsText = &quot;C_HA_MESSAGE&quot;;</a>
+<a name="ln423">            break;</a>
+<a name="ln424">        case C_CCM_CALLBACK:</a>
+<a name="ln425">            causeAsText = &quot;C_CCM_CALLBACK&quot;;</a>
+<a name="ln426">            break;</a>
+<a name="ln427">        case C_TIMER_POPPED:</a>
+<a name="ln428">            causeAsText = &quot;C_TIMER_POPPED&quot;;</a>
+<a name="ln429">            break;</a>
+<a name="ln430">        case C_SHUTDOWN:</a>
+<a name="ln431">            causeAsText = &quot;C_SHUTDOWN&quot;;</a>
+<a name="ln432">            break;</a>
+<a name="ln433">        case C_HEARTBEAT_FAILED:</a>
+<a name="ln434">            causeAsText = &quot;C_HEARTBEAT_FAILED&quot;;</a>
+<a name="ln435">            break;</a>
+<a name="ln436">        case C_SUBSYSTEM_CONNECT:</a>
+<a name="ln437">            causeAsText = &quot;C_SUBSYSTEM_CONNECT&quot;;</a>
+<a name="ln438">            break;</a>
+<a name="ln439">        case C_LRM_OP_CALLBACK:</a>
+<a name="ln440">            causeAsText = &quot;C_LRM_OP_CALLBACK&quot;;</a>
+<a name="ln441">            break;</a>
+<a name="ln442">        case C_LRM_MONITOR_CALLBACK:</a>
+<a name="ln443">            causeAsText = &quot;C_LRM_MONITOR_CALLBACK&quot;;</a>
+<a name="ln444">            break;</a>
+<a name="ln445">        case C_CRMD_STATUS_CALLBACK:</a>
+<a name="ln446">            causeAsText = &quot;C_CRMD_STATUS_CALLBACK&quot;;</a>
+<a name="ln447">            break;</a>
+<a name="ln448">        case C_HA_DISCONNECT:</a>
+<a name="ln449">            causeAsText = &quot;C_HA_DISCONNECT&quot;;</a>
+<a name="ln450">            break;</a>
+<a name="ln451">        case C_FSA_INTERNAL:</a>
+<a name="ln452">            causeAsText = &quot;C_FSA_INTERNAL&quot;;</a>
+<a name="ln453">            break;</a>
+<a name="ln454">        case C_ILLEGAL:</a>
+<a name="ln455">            causeAsText = &quot;C_ILLEGAL&quot;;</a>
+<a name="ln456">            break;</a>
+<a name="ln457">    }</a>
+<a name="ln458"> </a>
+<a name="ln459">    if (causeAsText == NULL) {</a>
+<a name="ln460">        crm_err(&quot;Cause %d is unknown&quot;, cause);</a>
+<a name="ln461">        causeAsText = &quot;&lt;UNKNOWN_CAUSE&gt;&quot;;</a>
+<a name="ln462">    }</a>
+<a name="ln463"> </a>
+<a name="ln464">    return causeAsText;</a>
+<a name="ln465">}</a>
+<a name="ln466"> </a>
+<a name="ln467">const char *</a>
+<a name="ln468">fsa_action2string(long long action)</a>
+<a name="ln469">{</a>
+<a name="ln470">    const char *actionAsText = NULL;</a>
+<a name="ln471"> </a>
+<a name="ln472">    switch (action) {</a>
+<a name="ln473"> </a>
+<a name="ln474">        case A_NOTHING:</a>
+<a name="ln475">            actionAsText = &quot;A_NOTHING&quot;;</a>
+<a name="ln476">            break;</a>
+<a name="ln477">        case A_ELECTION_START:</a>
+<a name="ln478">            actionAsText = &quot;A_ELECTION_START&quot;;</a>
+<a name="ln479">            break;</a>
+<a name="ln480">        case A_DC_JOIN_FINAL:</a>
+<a name="ln481">            actionAsText = &quot;A_DC_JOIN_FINAL&quot;;</a>
+<a name="ln482">            break;</a>
+<a name="ln483">        case A_READCONFIG:</a>
+<a name="ln484">            actionAsText = &quot;A_READCONFIG&quot;;</a>
+<a name="ln485">            break;</a>
+<a name="ln486">        case O_RELEASE:</a>
+<a name="ln487">            actionAsText = &quot;O_RELEASE&quot;;</a>
+<a name="ln488">            break;</a>
+<a name="ln489">        case A_STARTUP:</a>
+<a name="ln490">            actionAsText = &quot;A_STARTUP&quot;;</a>
+<a name="ln491">            break;</a>
+<a name="ln492">        case A_STARTED:</a>
+<a name="ln493">            actionAsText = &quot;A_STARTED&quot;;</a>
+<a name="ln494">            break;</a>
+<a name="ln495">        case A_HA_CONNECT:</a>
+<a name="ln496">            actionAsText = &quot;A_HA_CONNECT&quot;;</a>
+<a name="ln497">            break;</a>
+<a name="ln498">        case A_HA_DISCONNECT:</a>
+<a name="ln499">            actionAsText = &quot;A_HA_DISCONNECT&quot;;</a>
+<a name="ln500">            break;</a>
+<a name="ln501">        case A_LRM_CONNECT:</a>
+<a name="ln502">            actionAsText = &quot;A_LRM_CONNECT&quot;;</a>
+<a name="ln503">            break;</a>
+<a name="ln504">        case A_LRM_EVENT:</a>
+<a name="ln505">            actionAsText = &quot;A_LRM_EVENT&quot;;</a>
+<a name="ln506">            break;</a>
+<a name="ln507">        case A_LRM_INVOKE:</a>
+<a name="ln508">            actionAsText = &quot;A_LRM_INVOKE&quot;;</a>
+<a name="ln509">            break;</a>
+<a name="ln510">        case A_LRM_DISCONNECT:</a>
+<a name="ln511">            actionAsText = &quot;A_LRM_DISCONNECT&quot;;</a>
+<a name="ln512">            break;</a>
+<a name="ln513">        case O_LRM_RECONNECT:</a>
+<a name="ln514">            actionAsText = &quot;O_LRM_RECONNECT&quot;;</a>
+<a name="ln515">            break;</a>
+<a name="ln516">        case A_CL_JOIN_QUERY:</a>
+<a name="ln517">            actionAsText = &quot;A_CL_JOIN_QUERY&quot;;</a>
+<a name="ln518">            break;</a>
+<a name="ln519">        case A_DC_TIMER_STOP:</a>
+<a name="ln520">            actionAsText = &quot;A_DC_TIMER_STOP&quot;;</a>
+<a name="ln521">            break;</a>
+<a name="ln522">        case A_DC_TIMER_START:</a>
+<a name="ln523">            actionAsText = &quot;A_DC_TIMER_START&quot;;</a>
+<a name="ln524">            break;</a>
+<a name="ln525">        case A_INTEGRATE_TIMER_START:</a>
+<a name="ln526">            actionAsText = &quot;A_INTEGRATE_TIMER_START&quot;;</a>
+<a name="ln527">            break;</a>
+<a name="ln528">        case A_INTEGRATE_TIMER_STOP:</a>
+<a name="ln529">            actionAsText = &quot;A_INTEGRATE_TIMER_STOP&quot;;</a>
+<a name="ln530">            break;</a>
+<a name="ln531">        case A_FINALIZE_TIMER_START:</a>
+<a name="ln532">            actionAsText = &quot;A_FINALIZE_TIMER_START&quot;;</a>
+<a name="ln533">            break;</a>
+<a name="ln534">        case A_FINALIZE_TIMER_STOP:</a>
+<a name="ln535">            actionAsText = &quot;A_FINALIZE_TIMER_STOP&quot;;</a>
+<a name="ln536">            break;</a>
+<a name="ln537">        case A_ELECTION_COUNT:</a>
+<a name="ln538">            actionAsText = &quot;A_ELECTION_COUNT&quot;;</a>
+<a name="ln539">            break;</a>
+<a name="ln540">        case A_ELECTION_VOTE:</a>
+<a name="ln541">            actionAsText = &quot;A_ELECTION_VOTE&quot;;</a>
+<a name="ln542">            break;</a>
+<a name="ln543">        case A_ELECTION_CHECK:</a>
+<a name="ln544">            actionAsText = &quot;A_ELECTION_CHECK&quot;;</a>
+<a name="ln545">            break;</a>
+<a name="ln546">        case A_CL_JOIN_ANNOUNCE:</a>
+<a name="ln547">            actionAsText = &quot;A_CL_JOIN_ANNOUNCE&quot;;</a>
+<a name="ln548">            break;</a>
+<a name="ln549">        case A_CL_JOIN_REQUEST:</a>
+<a name="ln550">            actionAsText = &quot;A_CL_JOIN_REQUEST&quot;;</a>
+<a name="ln551">            break;</a>
+<a name="ln552">        case A_CL_JOIN_RESULT:</a>
+<a name="ln553">            actionAsText = &quot;A_CL_JOIN_RESULT&quot;;</a>
+<a name="ln554">            break;</a>
+<a name="ln555">        case A_DC_JOIN_OFFER_ALL:</a>
+<a name="ln556">            actionAsText = &quot;A_DC_JOIN_OFFER_ALL&quot;;</a>
+<a name="ln557">            break;</a>
+<a name="ln558">        case A_DC_JOIN_OFFER_ONE:</a>
+<a name="ln559">            actionAsText = &quot;A_DC_JOIN_OFFER_ONE&quot;;</a>
+<a name="ln560">            break;</a>
+<a name="ln561">        case A_DC_JOIN_PROCESS_REQ:</a>
+<a name="ln562">            actionAsText = &quot;A_DC_JOIN_PROCESS_REQ&quot;;</a>
+<a name="ln563">            break;</a>
+<a name="ln564">        case A_DC_JOIN_PROCESS_ACK:</a>
+<a name="ln565">            actionAsText = &quot;A_DC_JOIN_PROCESS_ACK&quot;;</a>
+<a name="ln566">            break;</a>
+<a name="ln567">        case A_DC_JOIN_FINALIZE:</a>
+<a name="ln568">            actionAsText = &quot;A_DC_JOIN_FINALIZE&quot;;</a>
+<a name="ln569">            break;</a>
+<a name="ln570">        case A_MSG_PROCESS:</a>
+<a name="ln571">            actionAsText = &quot;A_MSG_PROCESS&quot;;</a>
+<a name="ln572">            break;</a>
+<a name="ln573">        case A_MSG_ROUTE:</a>
+<a name="ln574">            actionAsText = &quot;A_MSG_ROUTE&quot;;</a>
+<a name="ln575">            break;</a>
+<a name="ln576">        case A_RECOVER:</a>
+<a name="ln577">            actionAsText = &quot;A_RECOVER&quot;;</a>
+<a name="ln578">            break;</a>
+<a name="ln579">        case A_DC_RELEASE:</a>
+<a name="ln580">            actionAsText = &quot;A_DC_RELEASE&quot;;</a>
+<a name="ln581">            break;</a>
+<a name="ln582">        case A_DC_RELEASED:</a>
+<a name="ln583">            actionAsText = &quot;A_DC_RELEASED&quot;;</a>
+<a name="ln584">            break;</a>
+<a name="ln585">        case A_DC_TAKEOVER:</a>
+<a name="ln586">            actionAsText = &quot;A_DC_TAKEOVER&quot;;</a>
+<a name="ln587">            break;</a>
+<a name="ln588">        case A_SHUTDOWN:</a>
+<a name="ln589">            actionAsText = &quot;A_SHUTDOWN&quot;;</a>
+<a name="ln590">            break;</a>
+<a name="ln591">        case A_SHUTDOWN_REQ:</a>
+<a name="ln592">            actionAsText = &quot;A_SHUTDOWN_REQ&quot;;</a>
+<a name="ln593">            break;</a>
+<a name="ln594">        case A_STOP:</a>
+<a name="ln595">            actionAsText = &quot;A_STOP  &quot;;</a>
+<a name="ln596">            break;</a>
+<a name="ln597">        case A_EXIT_0:</a>
+<a name="ln598">            actionAsText = &quot;A_EXIT_0&quot;;</a>
+<a name="ln599">            break;</a>
+<a name="ln600">        case A_EXIT_1:</a>
+<a name="ln601">            actionAsText = &quot;A_EXIT_1&quot;;</a>
+<a name="ln602">            break;</a>
+<a name="ln603">        case A_CCM_CONNECT:</a>
+<a name="ln604">            actionAsText = &quot;A_CCM_CONNECT&quot;;</a>
+<a name="ln605">            break;</a>
+<a name="ln606">        case A_CCM_DISCONNECT:</a>
+<a name="ln607">            actionAsText = &quot;A_CCM_DISCONNECT&quot;;</a>
+<a name="ln608">            break;</a>
+<a name="ln609">        case O_CIB_RESTART:</a>
+<a name="ln610">            actionAsText = &quot;O_CIB_RESTART&quot;;</a>
+<a name="ln611">            break;</a>
+<a name="ln612">        case A_CIB_START:</a>
+<a name="ln613">            actionAsText = &quot;A_CIB_START&quot;;</a>
+<a name="ln614">            break;</a>
+<a name="ln615">        case A_CIB_STOP:</a>
+<a name="ln616">            actionAsText = &quot;A_CIB_STOP&quot;;</a>
+<a name="ln617">            break;</a>
+<a name="ln618">        case A_TE_INVOKE:</a>
+<a name="ln619">            actionAsText = &quot;A_TE_INVOKE&quot;;</a>
+<a name="ln620">            break;</a>
+<a name="ln621">        case O_TE_RESTART:</a>
+<a name="ln622">            actionAsText = &quot;O_TE_RESTART&quot;;</a>
+<a name="ln623">            break;</a>
+<a name="ln624">        case A_TE_START:</a>
+<a name="ln625">            actionAsText = &quot;A_TE_START&quot;;</a>
+<a name="ln626">            break;</a>
+<a name="ln627">        case A_TE_STOP:</a>
+<a name="ln628">            actionAsText = &quot;A_TE_STOP&quot;;</a>
+<a name="ln629">            break;</a>
+<a name="ln630">        case A_TE_HALT:</a>
+<a name="ln631">            actionAsText = &quot;A_TE_HALT&quot;;</a>
+<a name="ln632">            break;</a>
+<a name="ln633">        case A_TE_CANCEL:</a>
+<a name="ln634">            actionAsText = &quot;A_TE_CANCEL&quot;;</a>
+<a name="ln635">            break;</a>
+<a name="ln636">        case A_PE_INVOKE:</a>
+<a name="ln637">            actionAsText = &quot;A_PE_INVOKE&quot;;</a>
+<a name="ln638">            break;</a>
+<a name="ln639">        case O_PE_RESTART:</a>
+<a name="ln640">            actionAsText = &quot;O_PE_RESTART&quot;;</a>
+<a name="ln641">            break;</a>
+<a name="ln642">        case A_PE_START:</a>
+<a name="ln643">            actionAsText = &quot;A_PE_START&quot;;</a>
+<a name="ln644">            break;</a>
+<a name="ln645">        case A_PE_STOP:</a>
+<a name="ln646">            actionAsText = &quot;A_PE_STOP&quot;;</a>
+<a name="ln647">            break;</a>
+<a name="ln648">        case A_NODE_BLOCK:</a>
+<a name="ln649">            actionAsText = &quot;A_NODE_BLOCK&quot;;</a>
+<a name="ln650">            break;</a>
+<a name="ln651">        case A_UPDATE_NODESTATUS:</a>
+<a name="ln652">            actionAsText = &quot;A_UPDATE_NODESTATUS&quot;;</a>
+<a name="ln653">            break;</a>
+<a name="ln654">        case A_LOG:</a>
+<a name="ln655">            actionAsText = &quot;A_LOG   &quot;;</a>
+<a name="ln656">            break;</a>
+<a name="ln657">        case A_ERROR:</a>
+<a name="ln658">            actionAsText = &quot;A_ERROR &quot;;</a>
+<a name="ln659">            break;</a>
+<a name="ln660">        case A_WARN:</a>
+<a name="ln661">            actionAsText = &quot;A_WARN  &quot;;</a>
+<a name="ln662">            break;</a>
+<a name="ln663">            /* Composite actions */</a>
+<a name="ln664">        case A_DC_TIMER_START | A_CL_JOIN_QUERY:</a>
+<a name="ln665">            actionAsText = &quot;A_DC_TIMER_START|A_CL_JOIN_QUERY&quot;;</a>
+<a name="ln666">            break;</a>
+<a name="ln667">    }</a>
+<a name="ln668"> </a>
+<a name="ln669">    if (actionAsText == NULL) {</a>
+<a name="ln670">        crm_err(&quot;Action %.16llx is unknown&quot;, action);</a>
+<a name="ln671">        actionAsText = &quot;&lt;UNKNOWN_ACTION&gt;&quot;;</a>
+<a name="ln672">    }</a>
+<a name="ln673"> </a>
+<a name="ln674">    return actionAsText;</a>
+<a name="ln675">}</a>
+<a name="ln676"> </a>
+<a name="ln677">void</a>
+<a name="ln678">fsa_dump_inputs(int log_level, const char *text, long long input_register)</a>
+<a name="ln679">{</a>
+<a name="ln680">    if (input_register == A_NOTHING) {</a>
+<a name="ln681">        return;</a>
+<a name="ln682">    }</a>
+<a name="ln683">    if (text == NULL) {</a>
+<a name="ln684">        text = &quot;Input register contents:&quot;;</a>
+<a name="ln685">    }</a>
+<a name="ln686"> </a>
+<a name="ln687">    if (is_set(input_register, R_THE_DC)) {</a>
+<a name="ln688">        crm_trace(&quot;%s %.16llx (R_THE_DC)&quot;, text, R_THE_DC);</a>
+<a name="ln689">    }</a>
+<a name="ln690">    if (is_set(input_register, R_STARTING)) {</a>
+<a name="ln691">        crm_trace(&quot;%s %.16llx (R_STARTING)&quot;, text, R_STARTING);</a>
+<a name="ln692">    }</a>
+<a name="ln693">    if (is_set(input_register, R_SHUTDOWN)) {</a>
+<a name="ln694">        crm_trace(&quot;%s %.16llx (R_SHUTDOWN)&quot;, text, R_SHUTDOWN);</a>
+<a name="ln695">    }</a>
+<a name="ln696">    if (is_set(input_register, R_STAYDOWN)) {</a>
+<a name="ln697">        crm_trace(&quot;%s %.16llx (R_STAYDOWN)&quot;, text, R_STAYDOWN);</a>
+<a name="ln698">    }</a>
+<a name="ln699">    if (is_set(input_register, R_JOIN_OK)) {</a>
+<a name="ln700">        crm_trace(&quot;%s %.16llx (R_JOIN_OK)&quot;, text, R_JOIN_OK);</a>
+<a name="ln701">    }</a>
+<a name="ln702">    if (is_set(input_register, R_READ_CONFIG)) {</a>
+<a name="ln703">        crm_trace(&quot;%s %.16llx (R_READ_CONFIG)&quot;, text, R_READ_CONFIG);</a>
+<a name="ln704">    }</a>
+<a name="ln705">    if (is_set(input_register, R_INVOKE_PE)) {</a>
+<a name="ln706">        crm_trace(&quot;%s %.16llx (R_INVOKE_PE)&quot;, text, R_INVOKE_PE);</a>
+<a name="ln707">    }</a>
+<a name="ln708">    if (is_set(input_register, R_CIB_CONNECTED)) {</a>
+<a name="ln709">        crm_trace(&quot;%s %.16llx (R_CIB_CONNECTED)&quot;, text, R_CIB_CONNECTED);</a>
+<a name="ln710">    }</a>
+<a name="ln711">    if (is_set(input_register, R_PE_CONNECTED)) {</a>
+<a name="ln712">        crm_trace(&quot;%s %.16llx (R_PE_CONNECTED)&quot;, text, R_PE_CONNECTED);</a>
+<a name="ln713">    }</a>
+<a name="ln714">    if (is_set(input_register, R_TE_CONNECTED)) {</a>
+<a name="ln715">        crm_trace(&quot;%s %.16llx (R_TE_CONNECTED)&quot;, text, R_TE_CONNECTED);</a>
+<a name="ln716">    }</a>
+<a name="ln717">    if (is_set(input_register, R_LRM_CONNECTED)) {</a>
+<a name="ln718">        crm_trace(&quot;%s %.16llx (R_LRM_CONNECTED)&quot;, text, R_LRM_CONNECTED);</a>
+<a name="ln719">    }</a>
+<a name="ln720">    if (is_set(input_register, R_CIB_REQUIRED)) {</a>
+<a name="ln721">        crm_trace(&quot;%s %.16llx (R_CIB_REQUIRED)&quot;, text, R_CIB_REQUIRED);</a>
+<a name="ln722">    }</a>
+<a name="ln723">    if (is_set(input_register, R_PE_REQUIRED)) {</a>
+<a name="ln724">        crm_trace(&quot;%s %.16llx (R_PE_REQUIRED)&quot;, text, R_PE_REQUIRED);</a>
+<a name="ln725">    }</a>
+<a name="ln726">    if (is_set(input_register, R_TE_REQUIRED)) {</a>
+<a name="ln727">        crm_trace(&quot;%s %.16llx (R_TE_REQUIRED)&quot;, text, R_TE_REQUIRED);</a>
+<a name="ln728">    }</a>
+<a name="ln729">    if (is_set(input_register, R_REQ_PEND)) {</a>
+<a name="ln730">        crm_trace(&quot;%s %.16llx (R_REQ_PEND)&quot;, text, R_REQ_PEND);</a>
+<a name="ln731">    }</a>
+<a name="ln732">    if (is_set(input_register, R_PE_PEND)) {</a>
+<a name="ln733">        crm_trace(&quot;%s %.16llx (R_PE_PEND)&quot;, text, R_PE_PEND);</a>
+<a name="ln734">    }</a>
+<a name="ln735">    if (is_set(input_register, R_TE_PEND)) {</a>
+<a name="ln736">        crm_trace(&quot;%s %.16llx (R_TE_PEND)&quot;, text, R_TE_PEND);</a>
+<a name="ln737">    }</a>
+<a name="ln738">    if (is_set(input_register, R_RESP_PEND)) {</a>
+<a name="ln739">        crm_trace(&quot;%s %.16llx (R_RESP_PEND)&quot;, text, R_RESP_PEND);</a>
+<a name="ln740">    }</a>
+<a name="ln741">    if (is_set(input_register, R_CIB_DONE)) {</a>
+<a name="ln742">        crm_trace(&quot;%s %.16llx (R_CIB_DONE)&quot;, text, R_CIB_DONE);</a>
+<a name="ln743">    }</a>
+<a name="ln744">    if (is_set(input_register, R_HAVE_CIB)) {</a>
+<a name="ln745">        crm_trace(&quot;%s %.16llx (R_HAVE_CIB)&quot;, text, R_HAVE_CIB);</a>
+<a name="ln746">    }</a>
+<a name="ln747">    if (is_set(input_register, R_CIB_ASKED)) {</a>
+<a name="ln748">        crm_trace(&quot;%s %.16llx (R_CIB_ASKED)&quot;, text, R_CIB_ASKED);</a>
+<a name="ln749">    }</a>
+<a name="ln750">    if (is_set(input_register, R_MEMBERSHIP)) {</a>
+<a name="ln751">        crm_trace(&quot;%s %.16llx (R_MEMBERSHIP)&quot;, text, R_MEMBERSHIP);</a>
+<a name="ln752">    }</a>
+<a name="ln753">    if (is_set(input_register, R_PEER_DATA)) {</a>
+<a name="ln754">        crm_trace(&quot;%s %.16llx (R_PEER_DATA)&quot;, text, R_PEER_DATA);</a>
+<a name="ln755">    }</a>
+<a name="ln756">    if (is_set(input_register, R_IN_RECOVERY)) {</a>
+<a name="ln757">        crm_trace(&quot;%s %.16llx (R_IN_RECOVERY)&quot;, text, R_IN_RECOVERY);</a>
+<a name="ln758">    }</a>
+<a name="ln759">}</a>
+<a name="ln760"> </a>
+<a name="ln761">void</a>
+<a name="ln762">fsa_dump_actions(long long action, const char *text)</a>
+<a name="ln763">{</a>
+<a name="ln764">    if (is_set(action, A_READCONFIG)) {</a>
+<a name="ln765">        crm_trace(&quot;Action %.16llx (A_READCONFIG) %s&quot;, A_READCONFIG, text);</a>
+<a name="ln766">    }</a>
+<a name="ln767">    if (is_set(action, A_STARTUP)) {</a>
+<a name="ln768">        crm_trace(&quot;Action %.16llx (A_STARTUP) %s&quot;, A_STARTUP, text);</a>
+<a name="ln769">    }</a>
+<a name="ln770">    if (is_set(action, A_STARTED)) {</a>
+<a name="ln771">        crm_trace(&quot;Action %.16llx (A_STARTED) %s&quot;, A_STARTED, text);</a>
+<a name="ln772">    }</a>
+<a name="ln773">    if (is_set(action, A_HA_CONNECT)) {</a>
+<a name="ln774">        crm_trace(&quot;Action %.16llx (A_CONNECT) %s&quot;, A_HA_CONNECT, text);</a>
+<a name="ln775">    }</a>
+<a name="ln776">    if (is_set(action, A_HA_DISCONNECT)) {</a>
+<a name="ln777">        crm_trace(&quot;Action %.16llx (A_DISCONNECT) %s&quot;, A_HA_DISCONNECT, text);</a>
+<a name="ln778">    }</a>
+<a name="ln779">    if (is_set(action, A_LRM_CONNECT)) {</a>
+<a name="ln780">        crm_trace(&quot;Action %.16llx (A_LRM_CONNECT) %s&quot;, A_LRM_CONNECT, text);</a>
+<a name="ln781">    }</a>
+<a name="ln782">    if (is_set(action, A_LRM_EVENT)) {</a>
+<a name="ln783">        crm_trace(&quot;Action %.16llx (A_LRM_EVENT) %s&quot;, A_LRM_EVENT, text);</a>
+<a name="ln784">    }</a>
+<a name="ln785">    if (is_set(action, A_LRM_INVOKE)) {</a>
+<a name="ln786">        crm_trace(&quot;Action %.16llx (A_LRM_INVOKE) %s&quot;, A_LRM_INVOKE, text);</a>
+<a name="ln787">    }</a>
+<a name="ln788">    if (is_set(action, A_LRM_DISCONNECT)) {</a>
+<a name="ln789">        crm_trace(&quot;Action %.16llx (A_LRM_DISCONNECT) %s&quot;, A_LRM_DISCONNECT, text);</a>
+<a name="ln790">    }</a>
+<a name="ln791">    if (is_set(action, A_DC_TIMER_STOP)) {</a>
+<a name="ln792">        crm_trace(&quot;Action %.16llx (A_DC_TIMER_STOP) %s&quot;, A_DC_TIMER_STOP, text);</a>
+<a name="ln793">    }</a>
+<a name="ln794">    if (is_set(action, A_DC_TIMER_START)) {</a>
+<a name="ln795">        crm_trace(&quot;Action %.16llx (A_DC_TIMER_START) %s&quot;, A_DC_TIMER_START, text);</a>
+<a name="ln796">    }</a>
+<a name="ln797">    if (is_set(action, A_INTEGRATE_TIMER_START)) {</a>
+<a name="ln798">        crm_trace(&quot;Action %.16llx (A_INTEGRATE_TIMER_START) %s&quot;, A_INTEGRATE_TIMER_START, text);</a>
+<a name="ln799">    }</a>
+<a name="ln800">    if (is_set(action, A_INTEGRATE_TIMER_STOP)) {</a>
+<a name="ln801">        crm_trace(&quot;Action %.16llx (A_INTEGRATE_TIMER_STOP) %s&quot;, A_INTEGRATE_TIMER_STOP, text);</a>
+<a name="ln802">    }</a>
+<a name="ln803">    if (is_set(action, A_FINALIZE_TIMER_START)) {</a>
+<a name="ln804">        crm_trace(&quot;Action %.16llx (A_FINALIZE_TIMER_START) %s&quot;, A_FINALIZE_TIMER_START, text);</a>
+<a name="ln805">    }</a>
+<a name="ln806">    if (is_set(action, A_FINALIZE_TIMER_STOP)) {</a>
+<a name="ln807">        crm_trace(&quot;Action %.16llx (A_FINALIZE_TIMER_STOP) %s&quot;, A_FINALIZE_TIMER_STOP, text);</a>
+<a name="ln808">    }</a>
+<a name="ln809">    if (is_set(action, A_ELECTION_COUNT)) {</a>
+<a name="ln810">        crm_trace(&quot;Action %.16llx (A_ELECTION_COUNT) %s&quot;, A_ELECTION_COUNT, text);</a>
+<a name="ln811">    }</a>
+<a name="ln812">    if (is_set(action, A_ELECTION_VOTE)) {</a>
+<a name="ln813">        crm_trace(&quot;Action %.16llx (A_ELECTION_VOTE) %s&quot;, A_ELECTION_VOTE, text);</a>
+<a name="ln814">    }</a>
+<a name="ln815">    if (is_set(action, A_ELECTION_CHECK)) {</a>
+<a name="ln816">        crm_trace(&quot;Action %.16llx (A_ELECTION_CHECK) %s&quot;, A_ELECTION_CHECK, text);</a>
+<a name="ln817">    }</a>
+<a name="ln818">    if (is_set(action, A_CL_JOIN_ANNOUNCE)) {</a>
+<a name="ln819">        crm_trace(&quot;Action %.16llx (A_CL_JOIN_ANNOUNCE) %s&quot;, A_CL_JOIN_ANNOUNCE, text);</a>
+<a name="ln820">    }</a>
+<a name="ln821">    if (is_set(action, A_CL_JOIN_REQUEST)) {</a>
+<a name="ln822">        crm_trace(&quot;Action %.16llx (A_CL_JOIN_REQUEST) %s&quot;, A_CL_JOIN_REQUEST, text);</a>
+<a name="ln823">    }</a>
+<a name="ln824">    if (is_set(action, A_CL_JOIN_RESULT)) {</a>
+<a name="ln825">        crm_trace(&quot;Action %.16llx (A_CL_JOIN_RESULT) %s&quot;, A_CL_JOIN_RESULT, text);</a>
+<a name="ln826">    }</a>
+<a name="ln827">    if (is_set(action, A_DC_JOIN_OFFER_ALL)) {</a>
+<a name="ln828">        crm_trace(&quot;Action %.16llx (A_DC_JOIN_OFFER_ALL) %s&quot;, A_DC_JOIN_OFFER_ALL, text);</a>
+<a name="ln829">    }</a>
+<a name="ln830">    if (is_set(action, A_DC_JOIN_OFFER_ONE)) {</a>
+<a name="ln831">        crm_trace(&quot;Action %.16llx (A_DC_JOIN_OFFER_ONE) %s&quot;, A_DC_JOIN_OFFER_ONE, text);</a>
+<a name="ln832">    }</a>
+<a name="ln833">    if (is_set(action, A_DC_JOIN_PROCESS_REQ)) {</a>
+<a name="ln834">        crm_trace(&quot;Action %.16llx (A_DC_JOIN_PROCESS_REQ) %s&quot;, A_DC_JOIN_PROCESS_REQ, text);</a>
+<a name="ln835">    }</a>
+<a name="ln836">    if (is_set(action, A_DC_JOIN_PROCESS_ACK)) {</a>
+<a name="ln837">        crm_trace(&quot;Action %.16llx (A_DC_JOIN_PROCESS_ACK) %s&quot;, A_DC_JOIN_PROCESS_ACK, text);</a>
+<a name="ln838">    }</a>
+<a name="ln839">    if (is_set(action, A_DC_JOIN_FINALIZE)) {</a>
+<a name="ln840">        crm_trace(&quot;Action %.16llx (A_DC_JOIN_FINALIZE) %s&quot;, A_DC_JOIN_FINALIZE, text);</a>
+<a name="ln841">    }</a>
+<a name="ln842">    if (is_set(action, A_MSG_PROCESS)) {</a>
+<a name="ln843">        crm_trace(&quot;Action %.16llx (A_MSG_PROCESS) %s&quot;, A_MSG_PROCESS, text);</a>
+<a name="ln844">    }</a>
+<a name="ln845">    if (is_set(action, A_MSG_ROUTE)) {</a>
+<a name="ln846">        crm_trace(&quot;Action %.16llx (A_MSG_ROUTE) %s&quot;, A_MSG_ROUTE, text);</a>
+<a name="ln847">    }</a>
+<a name="ln848">    if (is_set(action, A_RECOVER)) {</a>
+<a name="ln849">        crm_trace(&quot;Action %.16llx (A_RECOVER) %s&quot;, A_RECOVER, text);</a>
+<a name="ln850">    }</a>
+<a name="ln851">    if (is_set(action, A_DC_RELEASE)) {</a>
+<a name="ln852">        crm_trace(&quot;Action %.16llx (A_DC_RELEASE) %s&quot;, A_DC_RELEASE, text);</a>
+<a name="ln853">    }</a>
+<a name="ln854">    if (is_set(action, A_DC_RELEASED)) {</a>
+<a name="ln855">        crm_trace(&quot;Action %.16llx (A_DC_RELEASED) %s&quot;, A_DC_RELEASED, text);</a>
+<a name="ln856">    }</a>
+<a name="ln857">    if (is_set(action, A_DC_TAKEOVER)) {</a>
+<a name="ln858">        crm_trace(&quot;Action %.16llx (A_DC_TAKEOVER) %s&quot;, A_DC_TAKEOVER, text);</a>
+<a name="ln859">    }</a>
+<a name="ln860">    if (is_set(action, A_SHUTDOWN)) {</a>
+<a name="ln861">        crm_trace(&quot;Action %.16llx (A_SHUTDOWN) %s&quot;, A_SHUTDOWN, text);</a>
+<a name="ln862">    }</a>
+<a name="ln863">    if (is_set(action, A_SHUTDOWN_REQ)) {</a>
+<a name="ln864">        crm_trace(&quot;Action %.16llx (A_SHUTDOWN_REQ) %s&quot;, A_SHUTDOWN_REQ, text);</a>
+<a name="ln865">    }</a>
+<a name="ln866">    if (is_set(action, A_STOP)) {</a>
+<a name="ln867">        crm_trace(&quot;Action %.16llx (A_STOP  ) %s&quot;, A_STOP, text);</a>
+<a name="ln868">    }</a>
+<a name="ln869">    if (is_set(action, A_EXIT_0)) {</a>
+<a name="ln870">        crm_trace(&quot;Action %.16llx (A_EXIT_0) %s&quot;, A_EXIT_0, text);</a>
+<a name="ln871">    }</a>
+<a name="ln872">    if (is_set(action, A_EXIT_1)) {</a>
+<a name="ln873">        crm_trace(&quot;Action %.16llx (A_EXIT_1) %s&quot;, A_EXIT_1, text);</a>
+<a name="ln874">    }</a>
+<a name="ln875">    if (is_set(action, A_CCM_CONNECT)) {</a>
+<a name="ln876">        crm_trace(&quot;Action %.16llx (A_CCM_CONNECT) %s&quot;, A_CCM_CONNECT, text);</a>
+<a name="ln877">    }</a>
+<a name="ln878">    if (is_set(action, A_CCM_DISCONNECT)) {</a>
+<a name="ln879">        crm_trace(&quot;Action %.16llx (A_CCM_DISCONNECT) %s&quot;, A_CCM_DISCONNECT, text);</a>
+<a name="ln880">    }</a>
+<a name="ln881">    if (is_set(action, A_CIB_START)) {</a>
+<a name="ln882">        crm_trace(&quot;Action %.16llx (A_CIB_START) %s&quot;, A_CIB_START, text);</a>
+<a name="ln883">    }</a>
+<a name="ln884">    if (is_set(action, A_CIB_STOP)) {</a>
+<a name="ln885">        crm_trace(&quot;Action %.16llx (A_CIB_STOP) %s&quot;, A_CIB_STOP, text);</a>
+<a name="ln886">    }</a>
+<a name="ln887">    if (is_set(action, A_TE_INVOKE)) {</a>
+<a name="ln888">        crm_trace(&quot;Action %.16llx (A_TE_INVOKE) %s&quot;, A_TE_INVOKE, text);</a>
+<a name="ln889">    }</a>
+<a name="ln890">    if (is_set(action, A_TE_START)) {</a>
+<a name="ln891">        crm_trace(&quot;Action %.16llx (A_TE_START) %s&quot;, A_TE_START, text);</a>
+<a name="ln892">    }</a>
+<a name="ln893">    if (is_set(action, A_TE_STOP)) {</a>
+<a name="ln894">        crm_trace(&quot;Action %.16llx (A_TE_STOP) %s&quot;, A_TE_STOP, text);</a>
+<a name="ln895">    }</a>
+<a name="ln896">    if (is_set(action, A_TE_CANCEL)) {</a>
+<a name="ln897">        crm_trace(&quot;Action %.16llx (A_TE_CANCEL) %s&quot;, A_TE_CANCEL, text);</a>
+<a name="ln898">    }</a>
+<a name="ln899">    if (is_set(action, A_PE_INVOKE)) {</a>
+<a name="ln900">        crm_trace(&quot;Action %.16llx (A_PE_INVOKE) %s&quot;, A_PE_INVOKE, text);</a>
+<a name="ln901">    }</a>
+<a name="ln902">    if (is_set(action, A_PE_START)) {</a>
+<a name="ln903">        crm_trace(&quot;Action %.16llx (A_PE_START) %s&quot;, A_PE_START, text);</a>
+<a name="ln904">    }</a>
+<a name="ln905">    if (is_set(action, A_PE_STOP)) {</a>
+<a name="ln906">        crm_trace(&quot;Action %.16llx (A_PE_STOP) %s&quot;, A_PE_STOP, text);</a>
+<a name="ln907">    }</a>
+<a name="ln908">    if (is_set(action, A_NODE_BLOCK)) {</a>
+<a name="ln909">        crm_trace(&quot;Action %.16llx (A_NODE_BLOCK) %s&quot;, A_NODE_BLOCK, text);</a>
+<a name="ln910">    }</a>
+<a name="ln911">    if (is_set(action, A_UPDATE_NODESTATUS)) {</a>
+<a name="ln912">        crm_trace(&quot;Action %.16llx (A_UPDATE_NODESTATUS) %s&quot;, A_UPDATE_NODESTATUS, text);</a>
+<a name="ln913">    }</a>
+<a name="ln914">    if (is_set(action, A_LOG)) {</a>
+<a name="ln915">        crm_trace(&quot;Action %.16llx (A_LOG   ) %s&quot;, A_LOG, text);</a>
+<a name="ln916">    }</a>
+<a name="ln917">    if (is_set(action, A_ERROR)) {</a>
+<a name="ln918">        crm_trace(&quot;Action %.16llx (A_ERROR ) %s&quot;, A_ERROR, text);</a>
+<a name="ln919">    }</a>
+<a name="ln920">    if (is_set(action, A_WARN)) {</a>
+<a name="ln921">        crm_trace(&quot;Action %.16llx (A_WARN  ) %s&quot;, A_WARN, text);</a>
+<a name="ln922">    }</a>
+<a name="ln923">}</a>
+<a name="ln924"> </a>
+<a name="ln925">gboolean</a>
+<a name="ln926">update_dc(xmlNode * msg)</a>
+<a name="ln927">{</a>
+<a name="ln928">    char *last_dc = fsa_our_dc;</a>
+<a name="ln929">    const char *dc_version = NULL;</a>
+<a name="ln930">    const char *welcome_from = NULL;</a>
+<a name="ln931"> </a>
+<a name="ln932">    if (msg != NULL) {</a>
+<a name="ln933">        gboolean invalid = FALSE;</a>
+<a name="ln934"> </a>
+<a name="ln935">        dc_version = crm_element_value(msg, F_CRM_VERSION);</a>
+<a name="ln936">        welcome_from = crm_element_value(msg, F_CRM_HOST_FROM);</a>
+<a name="ln937"> </a>
+<a name="ln938">        CRM_CHECK(dc_version != NULL, return FALSE);</a>
+<a name="ln939">        CRM_CHECK(welcome_from != NULL, return FALSE);</a>
+<a name="ln940"> </a>
+<a name="ln941">        if (AM_I_DC &amp;&amp; safe_str_neq(welcome_from, fsa_our_uname)) {</a>
+<a name="ln942">            invalid = TRUE;</a>
+<a name="ln943"> </a>
+<a name="ln944">        } else if (fsa_our_dc &amp;&amp; safe_str_neq(welcome_from, fsa_our_dc)) {</a>
+<a name="ln945">            invalid = TRUE;</a>
+<a name="ln946">        }</a>
+<a name="ln947"> </a>
+<a name="ln948">        if (invalid) {</a>
+<a name="ln949">            CRM_CHECK(fsa_our_dc != NULL, crm_err(&quot;We have no DC&quot;));</a>
+<a name="ln950">            if (AM_I_DC) {</a>
+<a name="ln951">                crm_err(&quot;Not updating DC to %s (%s): we are also a DC&quot;, welcome_from, dc_version);</a>
+<a name="ln952">            } else {</a>
+<a name="ln953">                crm_warn(&quot;New DC %s is not %s&quot;, welcome_from, fsa_our_dc);</a>
+<a name="ln954">            }</a>
+<a name="ln955"> </a>
+<a name="ln956">            register_fsa_action(A_CL_JOIN_QUERY | A_DC_TIMER_START);</a>
+<a name="ln957">            return FALSE;</a>
+<a name="ln958">        }</a>
+<a name="ln959">    }</a>
+<a name="ln960"> </a>
+<a name="ln961">    free(fsa_our_dc_version);</a>
+<a name="ln962">    fsa_our_dc_version = NULL;</a>
+<a name="ln963"> </a>
+<a name="ln964">    fsa_our_dc = NULL;          /* Free'd as last_dc */</a>
+<a name="ln965"> </a>
+<a name="ln966">    if (welcome_from != NULL) {</a>
+<a name="ln967">        fsa_our_dc = strdup(welcome_from);</a>
+<a name="ln968">    }</a>
+<a name="ln969">    if (dc_version != NULL) {</a>
+<a name="ln970">        fsa_our_dc_version = strdup(dc_version);</a>
+<a name="ln971">    }</a>
+<a name="ln972"> </a>
+<a name="ln973">    if (safe_str_eq(fsa_our_dc, last_dc)) {</a>
+<a name="ln974">        /* do nothing */</a>
+<a name="ln975"> </a>
+<a name="ln976">    } else if (fsa_our_dc != NULL) {</a>
+<a name="ln977">        crm_node_t *dc_node = crm_get_peer(0, fsa_our_dc);</a>
+<a name="ln978"> </a>
+<a name="ln979">        crm_info(&quot;Set DC to %s (%s)&quot;, crm_str(fsa_our_dc), crm_str(fsa_our_dc_version));</a>
+<a name="ln980">        crm_update_peer_expected(__FUNCTION__, dc_node, CRMD_JOINSTATE_MEMBER);</a>
+<a name="ln981"> </a>
+<a name="ln982">    } else if (last_dc != NULL) {</a>
+<a name="ln983">        crm_info(&quot;Unset DC. Was %s&quot;, crm_str(last_dc));</a>
+<a name="ln984">    }</a>
+<a name="ln985"> </a>
+<a name="ln986">    free(last_dc);</a>
+<a name="ln987">    return TRUE;</a>
+<a name="ln988">}</a>
+<a name="ln989"> </a>
+<a name="ln990">#define STATUS_PATH_MAX 512</a>
+<a name="ln991">static void</a>
+<a name="ln992">erase_xpath_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln993">{</a>
+<a name="ln994">    char *xpath = user_data;</a>
+<a name="ln995"> </a>
+<a name="ln996">    do_crm_log_unlikely(rc == 0 ? LOG_DEBUG : LOG_NOTICE,</a>
+<a name="ln997">                        &quot;Deletion of \&quot;%s\&quot;: %s (rc=%d)&quot;, xpath, pcmk_strerror(rc), rc);</a>
+<a name="ln998">}</a>
+<a name="ln999"> </a>
+<a name="ln1000">void</a>
+<a name="ln1001">erase_status_tag(const char *uname, const char *tag, int options)</a>
+<a name="ln1002">{</a>
+<a name="ln1003">    int rc = pcmk_ok;</a>
+<a name="ln1004">    char xpath[STATUS_PATH_MAX];</a>
+<a name="ln1005">    int cib_opts = cib_quorum_override | cib_xpath | options;</a>
+<a name="ln1006"> </a>
+<a name="ln1007">    if (fsa_cib_conn &amp;&amp; uname) {</a>
+<a name="ln1008">        snprintf(xpath, STATUS_PATH_MAX, &quot;//node_state[@uname='%s']/%s&quot;, uname, tag);</a>
+<a name="ln1009">        crm_info(&quot;Deleting xpath: %s&quot;, xpath);</a>
+<a name="ln1010">        rc = fsa_cib_conn-&gt;cmds-&gt;delete(fsa_cib_conn, xpath, NULL, cib_opts);</a>
+<a name="ln1011">        fsa_register_cib_callback(rc, FALSE, strdup(xpath), erase_xpath_callback);</a>
+<a name="ln1012">    }</a>
+<a name="ln1013">}</a>
+<a name="ln1014"> </a>
+<a name="ln1015">void crmd_peer_down(crm_node_t *peer, bool full) </a>
+<a name="ln1016">{</a>
+<a name="ln1017">    if(full &amp;&amp; peer-&gt;state == NULL) {</a>
+<a name="ln1018">        crm_update_peer_state(__FUNCTION__, peer, CRM_NODE_LOST, 0);</a>
+<a name="ln1019">        crm_update_peer_proc(__FUNCTION__, peer, crm_proc_none, NULL);</a>
+<a name="ln1020">    }</a>
+<a name="ln1021">    crm_update_peer_join(__FUNCTION__, peer, crm_join_none);</a>
+<a name="ln1022">    crm_update_peer_expected(__FUNCTION__, peer, CRMD_JOINSTATE_DOWN);</a>
+<a name="ln1023">}</a>
+
+</code></pre>
+<div class="balloon" rel="185"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (timer->source_id != 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

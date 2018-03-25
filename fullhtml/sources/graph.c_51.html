@@ -1,0 +1,1692 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;crm/crm.h&gt;</a>
+<a name="ln27">#include &lt;crm/cib.h&gt;</a>
+<a name="ln28">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln29">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;glib.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;allocate.h&gt;</a>
+<a name="ln34">#include &lt;utils.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">void update_colo_start_chain(action_t * action);</a>
+<a name="ln37">gboolean rsc_update_action(action_t * first, action_t * then, enum pe_ordering type);</a>
+<a name="ln38"> </a>
+<a name="ln39">static enum pe_action_flags</a>
+<a name="ln40">get_action_flags(action_t * action, node_t * node)</a>
+<a name="ln41">{</a>
+<a name="ln42">    enum pe_action_flags flags = action-&gt;flags;</a>
+<a name="ln43"> </a>
+<a name="ln44">    if (action-&gt;rsc) {</a>
+<a name="ln45">        flags = action-&gt;rsc-&gt;cmds-&gt;action_flags(action, NULL);</a>
+<a name="ln46"> </a>
+<a name="ln47">        if (pe_rsc_is_clone(action-&gt;rsc) &amp;&amp; node) {</a>
+<a name="ln48"> </a>
+<a name="ln49">            /* We only care about activity on $node */</a>
+<a name="ln50">            enum pe_action_flags clone_flags = action-&gt;rsc-&gt;cmds-&gt;action_flags(action, node);</a>
+<a name="ln51"> </a>
+<a name="ln52">            /* Go to great lengths to ensure the correct value for pe_action_runnable...</a>
+<a name="ln53">             *</a>
+<a name="ln54">             * If we are a clone, then for _ordering_ constraints, it's only relevant</a>
+<a name="ln55">             * if we are runnable _anywhere_.</a>
+<a name="ln56">             *</a>
+<a name="ln57">             * This only applies to _runnable_ though, and only for ordering constraints.</a>
+<a name="ln58">             * If this function is ever used during colocation, then we'll need additional logic</a>
+<a name="ln59">             *</a>
+<a name="ln60">             * Not very satisfying, but it's logical and appears to work well.</a>
+<a name="ln61">             */</a>
+<a name="ln62">            if (is_not_set(clone_flags, pe_action_runnable)</a>
+<a name="ln63">                &amp;&amp; is_set(flags, pe_action_runnable)) {</a>
+<a name="ln64">                pe_rsc_trace(action-&gt;rsc, &quot;Fixing up runnable flag for %s&quot;, action-&gt;uuid);</a>
+<a name="ln65">                set_bit(clone_flags, pe_action_runnable);</a>
+<a name="ln66">            }</a>
+<a name="ln67">            flags = clone_flags;</a>
+<a name="ln68">        }</a>
+<a name="ln69">    }</a>
+<a name="ln70">    return flags;</a>
+<a name="ln71">}</a>
+<a name="ln72"> </a>
+<a name="ln73">static char *</a>
+<a name="ln74">convert_non_atomic_uuid(char *old_uuid, resource_t * rsc, gboolean allow_notify,</a>
+<a name="ln75">                        gboolean free_original)</a>
+<a name="ln76">{</a>
+<a name="ln77">    int interval = 0;</a>
+<a name="ln78">    char *uuid = NULL;</a>
+<a name="ln79">    char *rid = NULL;</a>
+<a name="ln80">    char *raw_task = NULL;</a>
+<a name="ln81">    int task = no_action;</a>
+<a name="ln82"> </a>
+<a name="ln83">    CRM_ASSERT(rsc);</a>
+<a name="ln84">    pe_rsc_trace(rsc, &quot;Processing %s&quot;, old_uuid);</a>
+<a name="ln85">    if (old_uuid == NULL) {</a>
+<a name="ln86">        return NULL;</a>
+<a name="ln87"> </a>
+<a name="ln88">    } else if (strstr(old_uuid, &quot;notify&quot;) != NULL) {</a>
+<a name="ln89">        goto done;              /* no conversion */</a>
+<a name="ln90"> </a>
+<a name="ln91">    } else if (rsc-&gt;variant &lt; pe_group) {</a>
+<a name="ln92">        goto done;              /* no conversion */</a>
+<a name="ln93">    }</a>
+<a name="ln94"> </a>
+<a name="ln95">    CRM_ASSERT(parse_op_key(old_uuid, &amp;rid, &amp;raw_task, &amp;interval));</a>
+<a name="ln96">    if (interval &gt; 0) {</a>
+<a name="ln97">        goto done;              /* no conversion */</a>
+<a name="ln98">    }</a>
+<a name="ln99"> </a>
+<a name="ln100">    task = text2task(raw_task);</a>
+<a name="ln101">    switch (task) {</a>
+<a name="ln102">        case stop_rsc:</a>
+<a name="ln103">        case start_rsc:</a>
+<a name="ln104">        case action_notify:</a>
+<a name="ln105">        case action_promote:</a>
+<a name="ln106">        case action_demote:</a>
+<a name="ln107">            break;</a>
+<a name="ln108">        case stopped_rsc:</a>
+<a name="ln109">        case started_rsc:</a>
+<a name="ln110">        case action_notified:</a>
+<a name="ln111">        case action_promoted:</a>
+<a name="ln112">        case action_demoted:</a>
+<a name="ln113">            task--;</a>
+<a name="ln114">            break;</a>
+<a name="ln115">        case monitor_rsc:</a>
+<a name="ln116">        case shutdown_crm:</a>
+<a name="ln117">        case stonith_node:</a>
+<a name="ln118">            task = no_action;</a>
+<a name="ln119">            break;</a>
+<a name="ln120">        default:</a>
+<a name="ln121">            crm_err(&quot;Unknown action: %s&quot;, raw_task);</a>
+<a name="ln122">            task = no_action;</a>
+<a name="ln123">            break;</a>
+<a name="ln124">    }</a>
+<a name="ln125"> </a>
+<a name="ln126">    if (task != no_action) {</a>
+<a name="ln127">        if (is_set(rsc-&gt;flags, pe_rsc_notify) &amp;&amp; allow_notify) {</a>
+<a name="ln128">            uuid = generate_notify_key(rid, &quot;confirmed-post&quot;, task2text(task + 1));</a>
+<a name="ln129"> </a>
+<a name="ln130">        } else {</a>
+<a name="ln131">            uuid = generate_op_key(rid, task2text(task + 1), 0);</a>
+<a name="ln132">        }</a>
+<a name="ln133">        pe_rsc_trace(rsc, &quot;Converted %s -&gt; %s&quot;, old_uuid, uuid);</a>
+<a name="ln134">    }</a>
+<a name="ln135"> </a>
+<a name="ln136">  done:</a>
+<a name="ln137">    if (uuid == NULL) {</a>
+<a name="ln138">        uuid = strdup(old_uuid);</a>
+<a name="ln139">    }</a>
+<a name="ln140"> </a>
+<a name="ln141">    if (free_original) {</a>
+<a name="ln142">        free(old_uuid);</a>
+<a name="ln143">    }</a>
+<a name="ln144"> </a>
+<a name="ln145">    free(raw_task);</a>
+<a name="ln146">    free(rid);</a>
+<a name="ln147">    return uuid;</a>
+<a name="ln148">}</a>
+<a name="ln149"> </a>
+<a name="ln150">static action_t *</a>
+<a name="ln151">rsc_expand_action(action_t * action)</a>
+<a name="ln152">{</a>
+<a name="ln153">    action_t *result = action;</a>
+<a name="ln154"> </a>
+<a name="ln155">    if (action-&gt;rsc &amp;&amp; action-&gt;rsc-&gt;variant &gt;= pe_group) {</a>
+<a name="ln156">        /* Expand 'start' -&gt; 'started' */</a>
+<a name="ln157">        char *uuid = NULL;</a>
+<a name="ln158">        gboolean notify = FALSE;</a>
+<a name="ln159"> </a>
+<a name="ln160">        if (action-&gt;rsc-&gt;parent == NULL) {</a>
+<a name="ln161">            /* Only outermost resources have notification actions */</a>
+<a name="ln162">            notify = is_set(action-&gt;rsc-&gt;flags, pe_rsc_notify);</a>
+<a name="ln163">        }</a>
+<a name="ln164"> </a>
+<a name="ln165">        uuid = convert_non_atomic_uuid(action-&gt;uuid, action-&gt;rsc, notify, FALSE);</a>
+<a name="ln166">        if (uuid) {</a>
+<a name="ln167">            pe_rsc_trace(action-&gt;rsc, &quot;Converting %s to %s %d&quot;, action-&gt;uuid, uuid,</a>
+<a name="ln168">                         is_set(action-&gt;rsc-&gt;flags, pe_rsc_notify));</a>
+<a name="ln169">            result = find_first_action(action-&gt;rsc-&gt;actions, uuid, NULL, NULL);</a>
+<a name="ln170">            if (result == NULL) {</a>
+<a name="ln171">                crm_err(&quot;Couldn't expand %s&quot;, action-&gt;uuid);</a>
+<a name="ln172">                result = action;</a>
+<a name="ln173">            }</a>
+<a name="ln174">            free(uuid);</a>
+<a name="ln175">        }</a>
+<a name="ln176">    }</a>
+<a name="ln177">    return result;</a>
+<a name="ln178">}</a>
+<a name="ln179"> </a>
+<a name="ln180">static enum pe_graph_flags</a>
+<a name="ln181">graph_update_action(action_t * first, action_t * then, node_t * node, enum pe_action_flags flags,</a>
+<a name="ln182">                    enum pe_ordering type)</a>
+<a name="ln183">{</a>
+<a name="ln184">    enum pe_graph_flags changed = pe_graph_none;</a>
+<a name="ln185">    gboolean processed = FALSE;</a>
+<a name="ln186"> </a>
+<a name="ln187">    /* TODO: Do as many of these in parallel as possible */</a>
+<a name="ln188"> </a>
+<a name="ln189">    if (type &amp; pe_order_implies_then) {</a>
+<a name="ln190">        processed = TRUE;</a>
+<a name="ln191">        if (then-&gt;rsc) {</a>
+<a name="ln192">            changed |=</a>
+<a name="ln193">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags &amp; pe_action_optional,</a>
+<a name="ln194">                                                pe_action_optional, pe_order_implies_then);</a>
+<a name="ln195"> </a>
+<a name="ln196">        } else if (is_set(flags, pe_action_optional) == FALSE) {</a>
+<a name="ln197">            if (update_action_flags(then, pe_action_optional | pe_action_clear, __FUNCTION__, __LINE__)) {</a>
+<a name="ln198">                changed |= pe_graph_updated_then;</a>
+<a name="ln199">            }</a>
+<a name="ln200">        }</a>
+<a name="ln201">        if (changed) {</a>
+<a name="ln202">            pe_rsc_trace(then-&gt;rsc, &quot;implies right: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln203">        } else {</a>
+<a name="ln204">            crm_trace(&quot;implies right: %s then %s %p&quot;, first-&gt;uuid, then-&gt;uuid, then-&gt;rsc);</a>
+<a name="ln205">        }</a>
+<a name="ln206">    }</a>
+<a name="ln207"> </a>
+<a name="ln208">    if ((type &amp; pe_order_restart) &amp;&amp; then-&gt;rsc) {</a>
+<a name="ln209">        enum pe_action_flags restart = (pe_action_optional | pe_action_runnable);</a>
+<a name="ln210"> </a>
+<a name="ln211">        processed = TRUE;</a>
+<a name="ln212">        changed |=</a>
+<a name="ln213">            then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags, restart, pe_order_restart);</a>
+<a name="ln214">        if (changed) {</a>
+<a name="ln215">            pe_rsc_trace(then-&gt;rsc, &quot;restart: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln216">        } else {</a>
+<a name="ln217">            crm_trace(&quot;restart: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln218">        }</a>
+<a name="ln219">    }</a>
+<a name="ln220"> </a>
+<a name="ln221">    if (type &amp; pe_order_implies_first) {</a>
+<a name="ln222">        processed = TRUE;</a>
+<a name="ln223">        if (first-&gt;rsc) {</a>
+<a name="ln224">            changed |=</a>
+<a name="ln225">                first-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln226">                                                 pe_action_optional, pe_order_implies_first);</a>
+<a name="ln227"> </a>
+<a name="ln228">        } else if (is_set(flags, pe_action_optional) == FALSE) {</a>
+<a name="ln229">            pe_rsc_trace(first-&gt;rsc, &quot;first unrunnable: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln230">            if (update_action_flags(first, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__)) {</a>
+<a name="ln231">                changed |= pe_graph_updated_first;</a>
+<a name="ln232">            }</a>
+<a name="ln233">        }</a>
+<a name="ln234"> </a>
+<a name="ln235">        if (changed) {</a>
+<a name="ln236">            pe_rsc_trace(then-&gt;rsc, &quot;implies left: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln237">        } else {</a>
+<a name="ln238">            crm_trace(&quot;implies left: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln239">        }</a>
+<a name="ln240">    }</a>
+<a name="ln241"> </a>
+<a name="ln242">    if (type &amp; pe_order_implies_first_master) {</a>
+<a name="ln243">        processed = TRUE;</a>
+<a name="ln244">        if (then-&gt;rsc) {</a>
+<a name="ln245">            changed |=</a>
+<a name="ln246">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags &amp; pe_action_optional,</a>
+<a name="ln247">                                                pe_action_optional, pe_order_implies_first_master);</a>
+<a name="ln248">        }</a>
+<a name="ln249"> </a>
+<a name="ln250">        if (changed) {</a>
+<a name="ln251">            pe_rsc_trace(then-&gt;rsc,</a>
+<a name="ln252">                         &quot;implies left when right rsc is Master role: %s then %s: changed&quot;,</a>
+<a name="ln253">                         first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln254">        } else {</a>
+<a name="ln255">            crm_trace(&quot;implies left when right rsc is Master role: %s then %s&quot;, first-&gt;uuid,</a>
+<a name="ln256">                      then-&gt;uuid);</a>
+<a name="ln257">        }</a>
+<a name="ln258">    }</a>
+<a name="ln259"> </a>
+<a name="ln260">    if (type &amp; pe_order_one_or_more) {</a>
+<a name="ln261">        processed = TRUE;</a>
+<a name="ln262">        if (then-&gt;rsc) {</a>
+<a name="ln263">            changed |=</a>
+<a name="ln264">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln265">                                                pe_action_runnable, pe_order_one_or_more);</a>
+<a name="ln266"> </a>
+<a name="ln267">        } else if (is_set(flags, pe_action_runnable)) {</a>
+<a name="ln268">            /* alright. a &quot;first&quot; action is considered runnable, incremente</a>
+<a name="ln269">             * the 'runnable_before' counter */</a>
+<a name="ln270">            then-&gt;runnable_before++;</a>
+<a name="ln271"> </a>
+<a name="ln272">            /* if the runnable before count for then exceeds the required number</a>
+<a name="ln273">             * of &quot;before&quot; runnable actions... mark then as runnable */</a>
+<a name="ln274">            if (then-&gt;runnable_before &gt;= then-&gt;required_runnable_before) {</a>
+<a name="ln275">                if (update_action_flags(then, pe_action_runnable, __FUNCTION__, __LINE__)) {</a>
+<a name="ln276">                    changed |= pe_graph_updated_then;</a>
+<a name="ln277">                }</a>
+<a name="ln278">            }</a>
+<a name="ln279">        }</a>
+<a name="ln280">        if (changed) {</a>
+<a name="ln281">            pe_rsc_trace(then-&gt;rsc, &quot;runnable_one_or_more: %s then %s: changed&quot;, first-&gt;uuid,</a>
+<a name="ln282">                         then-&gt;uuid);</a>
+<a name="ln283">        } else {</a>
+<a name="ln284">            crm_trace(&quot;runnable_one_or_more: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln285">        }</a>
+<a name="ln286">    }</a>
+<a name="ln287"> </a>
+<a name="ln288">    if (type &amp; pe_order_runnable_left) {</a>
+<a name="ln289">        processed = TRUE;</a>
+<a name="ln290">        if (then-&gt;rsc) {</a>
+<a name="ln291">            changed |=</a>
+<a name="ln292">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln293">                                                pe_action_runnable, pe_order_runnable_left);</a>
+<a name="ln294"> </a>
+<a name="ln295">        } else if (is_set(flags, pe_action_runnable) == FALSE) {</a>
+<a name="ln296">            pe_rsc_trace(then-&gt;rsc, &quot;then unrunnable: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln297">            if (update_action_flags(then, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__)) {</a>
+<a name="ln298">                changed |= pe_graph_updated_then;</a>
+<a name="ln299">            }</a>
+<a name="ln300">        }</a>
+<a name="ln301">        if (changed) {</a>
+<a name="ln302">            pe_rsc_trace(then-&gt;rsc, &quot;runnable: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln303">        } else {</a>
+<a name="ln304">            crm_trace(&quot;runnable: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln305">        }</a>
+<a name="ln306">    }</a>
+<a name="ln307"> </a>
+<a name="ln308">    if (type &amp; pe_order_implies_first_migratable) {</a>
+<a name="ln309">        processed = TRUE;</a>
+<a name="ln310">        if (then-&gt;rsc) {</a>
+<a name="ln311">            changed |=</a>
+<a name="ln312">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln313">                                                pe_action_optional, pe_order_implies_first_migratable);</a>
+<a name="ln314">        }</a>
+<a name="ln315">        if (changed) {</a>
+<a name="ln316">            pe_rsc_trace(then-&gt;rsc, &quot;optional: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln317">        } else {</a>
+<a name="ln318">            crm_trace(&quot;optional: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln319">        }</a>
+<a name="ln320">    }</a>
+<a name="ln321"> </a>
+<a name="ln322">    if (type &amp; pe_order_pseudo_left) {</a>
+<a name="ln323">        processed = TRUE;</a>
+<a name="ln324">        if (then-&gt;rsc) {</a>
+<a name="ln325">            changed |=</a>
+<a name="ln326">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln327">                                                pe_action_optional, pe_order_pseudo_left);</a>
+<a name="ln328">        }</a>
+<a name="ln329">        if (changed) {</a>
+<a name="ln330">            pe_rsc_trace(then-&gt;rsc, &quot;optional: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln331">        } else {</a>
+<a name="ln332">            crm_trace(&quot;optional: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln333">        }</a>
+<a name="ln334">    }</a>
+<a name="ln335"> </a>
+<a name="ln336">    if (type &amp; pe_order_optional) {</a>
+<a name="ln337">        processed = TRUE;</a>
+<a name="ln338">        if (then-&gt;rsc) {</a>
+<a name="ln339">            changed |=</a>
+<a name="ln340">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln341">                                                pe_action_runnable, pe_order_optional);</a>
+<a name="ln342">        }</a>
+<a name="ln343">        if (changed) {</a>
+<a name="ln344">            pe_rsc_trace(then-&gt;rsc, &quot;optional: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln345">        } else {</a>
+<a name="ln346">            crm_trace(&quot;optional: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln347">        }</a>
+<a name="ln348">    }</a>
+<a name="ln349"> </a>
+<a name="ln350">    if (type &amp; pe_order_asymmetrical) {</a>
+<a name="ln351">        processed = TRUE;</a>
+<a name="ln352">        if (then-&gt;rsc) {</a>
+<a name="ln353">            changed |=</a>
+<a name="ln354">                then-&gt;rsc-&gt;cmds-&gt;update_actions(first, then, node, flags,</a>
+<a name="ln355">                                                pe_action_runnable, pe_order_asymmetrical);</a>
+<a name="ln356">        }</a>
+<a name="ln357"> </a>
+<a name="ln358">        if (changed) {</a>
+<a name="ln359">            pe_rsc_trace(then-&gt;rsc, &quot;asymmetrical: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln360">        } else {</a>
+<a name="ln361">            crm_trace(&quot;asymmetrical: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln362">        }</a>
+<a name="ln363"> </a>
+<a name="ln364">    }</a>
+<a name="ln365"> </a>
+<a name="ln366">    if ((first-&gt;flags &amp; pe_action_runnable) &amp;&amp; (type &amp; pe_order_implies_then_printed)</a>
+<a name="ln367">        &amp;&amp; (flags &amp; pe_action_optional) == 0) {</a>
+<a name="ln368">        processed = TRUE;</a>
+<a name="ln369">        crm_trace(&quot;%s implies %s printed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln370">        update_action_flags(then, pe_action_print_always, __FUNCTION__, __LINE__);  /* don't care about changed */</a>
+<a name="ln371">    }</a>
+<a name="ln372"> </a>
+<a name="ln373">    if ((type &amp; pe_order_implies_first_printed) &amp;&amp; (flags &amp; pe_action_optional) == 0) {</a>
+<a name="ln374">        processed = TRUE;</a>
+<a name="ln375">        crm_trace(&quot;%s implies %s printed&quot;, then-&gt;uuid, first-&gt;uuid);</a>
+<a name="ln376">        update_action_flags(first, pe_action_print_always, __FUNCTION__, __LINE__); /* don't care about changed */</a>
+<a name="ln377">    }</a>
+<a name="ln378"> </a>
+<a name="ln379">    if ((type &amp; pe_order_implies_then</a>
+<a name="ln380">         || type &amp; pe_order_implies_first</a>
+<a name="ln381">         || type &amp; pe_order_restart)</a>
+<a name="ln382">        &amp;&amp; first-&gt;rsc</a>
+<a name="ln383">        &amp;&amp; safe_str_eq(first-&gt;task, RSC_STOP)</a>
+<a name="ln384">        &amp;&amp; is_not_set(first-&gt;rsc-&gt;flags, pe_rsc_managed)</a>
+<a name="ln385">        &amp;&amp; is_set(first-&gt;rsc-&gt;flags, pe_rsc_block)</a>
+<a name="ln386">        &amp;&amp; is_not_set(first-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln387"> </a>
+<a name="ln388">        if (update_action_flags(then, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__)) {</a>
+<a name="ln389">            changed |= pe_graph_updated_then;</a>
+<a name="ln390">        }</a>
+<a name="ln391"> </a>
+<a name="ln392">        if (changed) {</a>
+<a name="ln393">            pe_rsc_trace(then-&gt;rsc, &quot;unmanaged left: %s then %s: changed&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln394">        } else {</a>
+<a name="ln395">            crm_trace(&quot;unmanaged left: %s then %s&quot;, first-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln396">        }</a>
+<a name="ln397">    }</a>
+<a name="ln398"> </a>
+<a name="ln399">    if (processed == FALSE) {</a>
+<a name="ln400">        crm_trace(&quot;Constraint 0x%.6x not applicable&quot;, type);</a>
+<a name="ln401">    }</a>
+<a name="ln402"> </a>
+<a name="ln403">    return changed;</a>
+<a name="ln404">}</a>
+<a name="ln405"> </a>
+<a name="ln406">static void</a>
+<a name="ln407">mark_start_blocked(resource_t *rsc)</a>
+<a name="ln408">{</a>
+<a name="ln409">    GListPtr gIter = rsc-&gt;actions;</a>
+<a name="ln410"> </a>
+<a name="ln411">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln412">        action_t *action = (action_t *) gIter-&gt;data;</a>
+<a name="ln413"> </a>
+<a name="ln414">        if (safe_str_neq(action-&gt;task, RSC_START)) {</a>
+<a name="ln415">            continue;</a>
+<a name="ln416">        }</a>
+<a name="ln417">        if (is_set(action-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln418">            clear_bit(action-&gt;flags, pe_action_runnable);</a>
+<a name="ln419">            update_colo_start_chain(action);</a>
+<a name="ln420">            update_action(action);</a>
+<a name="ln421">        }</a>
+<a name="ln422">    }</a>
+<a name="ln423">}</a>
+<a name="ln424"> </a>
+<a name="ln425">void</a>
+<a name="ln426">update_colo_start_chain(action_t *action)</a>
+<a name="ln427">{</a>
+<a name="ln428">    GListPtr gIter = NULL;</a>
+<a name="ln429">    resource_t *rsc = NULL;</a>
+<a name="ln430"> </a>
+<a name="ln431">    if (is_not_set(action-&gt;flags, pe_action_runnable) &amp;&amp; safe_str_eq(action-&gt;task, RSC_START)) {</a>
+<a name="ln432">        rsc = uber_parent(action-&gt;rsc);</a>
+<a name="ln433">    }</a>
+<a name="ln434"> </a>
+<a name="ln435">    if (rsc == NULL || rsc-&gt;rsc_cons_lhs == NULL) {</a>
+<a name="ln436">        return;</a>
+<a name="ln437">    }</a>
+<a name="ln438"> </a>
+<a name="ln439">    /* if rsc has children, all the children need to have start set to</a>
+<a name="ln440">     * unrunnable before we follow the colo chain for the parent. */</a>
+<a name="ln441">    for (gIter = rsc-&gt;children; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln442">        resource_t *child = (resource_t *)gIter-&gt;data;</a>
+<a name="ln443">        action_t *start = find_first_action(child-&gt;actions, NULL, RSC_START, NULL);</a>
+<a name="ln444">        if (start == NULL || is_set(start-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln445">            return;</a>
+<a name="ln446">        }</a>
+<a name="ln447">    }</a>
+<a name="ln448"> </a>
+<a name="ln449">    for (gIter = rsc-&gt;rsc_cons_lhs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln450">        rsc_colocation_t *colocate_with = (rsc_colocation_t *)gIter-&gt;data;</a>
+<a name="ln451">        if (colocate_with-&gt;score == INFINITY) {</a>
+<a name="ln452">            mark_start_blocked(colocate_with-&gt;rsc_lh);</a>
+<a name="ln453">        }</a>
+<a name="ln454">    }</a>
+<a name="ln455">}</a>
+<a name="ln456"> </a>
+<a name="ln457">gboolean</a>
+<a name="ln458">update_action(action_t * then)</a>
+<a name="ln459">{</a>
+<a name="ln460">    GListPtr lpc = NULL;</a>
+<a name="ln461">    enum pe_graph_flags changed = pe_graph_none;</a>
+<a name="ln462">    int last_flags = then-&gt;flags;</a>
+<a name="ln463"> </a>
+<a name="ln464">    crm_trace(&quot;Processing %s (%s %s %s)&quot;,</a>
+<a name="ln465">              then-&gt;uuid,</a>
+<a name="ln466">              is_set(then-&gt;flags, pe_action_optional) ? &quot;optional&quot; : &quot;required&quot;,</a>
+<a name="ln467">              is_set(then-&gt;flags, pe_action_runnable) ? &quot;runnable&quot; : &quot;unrunnable&quot;,</a>
+<a name="ln468">              is_set(then-&gt;flags,</a>
+<a name="ln469">                     pe_action_pseudo) ? &quot;pseudo&quot; : then-&gt;node ? then-&gt;node-&gt;details-&gt;uname : &quot;&quot;);</a>
+<a name="ln470"> </a>
+<a name="ln471">    if (is_set(then-&gt;flags, pe_action_requires_any)) {</a>
+<a name="ln472">        /* initialize current known runnable before actions to 0</a>
+<a name="ln473">         * from here as graph_update_action is called for each of</a>
+<a name="ln474">         * then's before actions, this number will increment as</a>
+<a name="ln475">         * runnable 'first' actions are encountered */</a>
+<a name="ln476">        then-&gt;runnable_before = 0;</a>
+<a name="ln477"> </a>
+<a name="ln478">        /* for backwards compatibility with previous options that use</a>
+<a name="ln479">         * the 'requires_any' flag, initialize required to 1 if it is</a>
+<a name="ln480">         * not set. */ </a>
+<a name="ln481">        if (then-&gt;required_runnable_before == 0) {</a>
+<a name="ln482">            then-&gt;required_runnable_before = 1;</a>
+<a name="ln483">        }</a>
+<a name="ln484">        clear_bit(then-&gt;flags, pe_action_runnable);</a>
+<a name="ln485">        /* We are relying on the pe_order_one_or_more clause of</a>
+<a name="ln486">         * graph_update_action(), called as part of the:</a>
+<a name="ln487">         *</a>
+<a name="ln488">         *    'if (first == other-&gt;action)'</a>
+<a name="ln489">         *</a>
+<a name="ln490">         * block below, to set this back if appropriate</a>
+<a name="ln491">         */</a>
+<a name="ln492">    }</a>
+<a name="ln493"> </a>
+<a name="ln494">    for (lpc = then-&gt;actions_before; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln495">        action_wrapper_t *other = (action_wrapper_t *) lpc-&gt;data;</a>
+<a name="ln496">        action_t *first = other-&gt;action;</a>
+<a name="ln497"> </a>
+<a name="ln498">        node_t *then_node = then-&gt;node;</a>
+<a name="ln499">        node_t *first_node = first-&gt;node;</a>
+<a name="ln500"> </a>
+<a name="ln501">        enum pe_action_flags then_flags = 0;</a>
+<a name="ln502">        enum pe_action_flags first_flags = 0;</a>
+<a name="ln503"> </a>
+<a name="ln504">        if (first-&gt;rsc &amp;&amp; first-&gt;rsc-&gt;variant == pe_group &amp;&amp; safe_str_eq(first-&gt;task, RSC_START)) {</a>
+<a name="ln505">            first_node = first-&gt;rsc-&gt;fns-&gt;location(first-&gt;rsc, NULL, FALSE);</a>
+<a name="ln506">            if (first_node) {</a>
+<a name="ln507">                crm_trace(&quot;First: Found node %s for %s&quot;, first_node-&gt;details-&gt;uname, first-&gt;uuid);</a>
+<a name="ln508">            }</a>
+<a name="ln509">        }</a>
+<a name="ln510"> </a>
+<a name="ln511">        if (then-&gt;rsc &amp;&amp; then-&gt;rsc-&gt;variant == pe_group &amp;&amp; safe_str_eq(then-&gt;task, RSC_START)) {</a>
+<a name="ln512">            then_node = then-&gt;rsc-&gt;fns-&gt;location(then-&gt;rsc, NULL, FALSE);</a>
+<a name="ln513">            if (then_node) {</a>
+<a name="ln514">                crm_trace(&quot;Then: Found node %s for %s&quot;, then_node-&gt;details-&gt;uname, then-&gt;uuid);</a>
+<a name="ln515">            }</a>
+<a name="ln516">        }</a>
+<a name="ln517"> </a>
+<a name="ln518">        /* Disable constraint if it only applies when on same node, but isn't */</a>
+<a name="ln519">        if (is_set(other-&gt;type, pe_order_same_node) &amp;&amp; first_node &amp;&amp; then_node</a>
+<a name="ln520">            &amp;&amp; (first_node-&gt;details != then_node-&gt;details)) {</a>
+<a name="ln521"> </a>
+<a name="ln522">            crm_trace(&quot;Disabled constraint %s on %s -&gt; %s on %s&quot;,</a>
+<a name="ln523">                       other-&gt;action-&gt;uuid, first_node-&gt;details-&gt;uname,</a>
+<a name="ln524">                       then-&gt;uuid, then_node-&gt;details-&gt;uname);</a>
+<a name="ln525">            other-&gt;type = pe_order_none;</a>
+<a name="ln526">            continue;</a>
+<a name="ln527">        }</a>
+<a name="ln528"> </a>
+<a name="ln529">        clear_bit(changed, pe_graph_updated_first);</a>
+<a name="ln530"> </a>
+<a name="ln531">        if (first-&gt;rsc != then-&gt;rsc</a>
+<a name="ln532">            &amp;&amp; first-&gt;rsc != NULL &amp;&amp; then-&gt;rsc != NULL &amp;&amp; first-&gt;rsc != then-&gt;rsc-&gt;parent) {</a>
+<a name="ln533">            first = rsc_expand_action(first);</a>
+<a name="ln534">        }</a>
+<a name="ln535">        if (first != other-&gt;action) {</a>
+<a name="ln536">            crm_trace(&quot;Ordering %s after %s instead of %s&quot;, then-&gt;uuid, first-&gt;uuid,</a>
+<a name="ln537">                      other-&gt;action-&gt;uuid);</a>
+<a name="ln538">        }</a>
+<a name="ln539"> </a>
+<a name="ln540">        first_flags = get_action_flags(first, then_node);</a>
+<a name="ln541">        then_flags = get_action_flags(then, first_node);</a>
+<a name="ln542"> </a>
+<a name="ln543">        crm_trace(&quot;Checking %s (%s %s %s) against %s (%s %s %s) filter=0x%.6x type=0x%.6x&quot;,</a>
+<a name="ln544">                  then-&gt;uuid,</a>
+<a name="ln545">                  is_set(then_flags, pe_action_optional) ? &quot;optional&quot; : &quot;required&quot;,</a>
+<a name="ln546">                  is_set(then_flags, pe_action_runnable) ? &quot;runnable&quot; : &quot;unrunnable&quot;,</a>
+<a name="ln547">                  is_set(then_flags,</a>
+<a name="ln548">                         pe_action_pseudo) ? &quot;pseudo&quot; : then-&gt;node ? then-&gt;node-&gt;details-&gt;</a>
+<a name="ln549">                  uname : &quot;&quot;, first-&gt;uuid, is_set(first_flags,</a>
+<a name="ln550">                                                  pe_action_optional) ? &quot;optional&quot; : &quot;required&quot;,</a>
+<a name="ln551">                  is_set(first_flags, pe_action_runnable) ? &quot;runnable&quot; : &quot;unrunnable&quot;,</a>
+<a name="ln552">                  is_set(first_flags,</a>
+<a name="ln553">                         pe_action_pseudo) ? &quot;pseudo&quot; : first-&gt;node ? first-&gt;node-&gt;details-&gt;</a>
+<a name="ln554">                  uname : &quot;&quot;, first_flags, other-&gt;type);</a>
+<a name="ln555"> </a>
+<a name="ln556">        if (first == other-&gt;action) {</a>
+<a name="ln557">            /*</a>
+<a name="ln558">             * 'first' was not expanded (ie. from 'start' to 'running'), which could mean it:</a>
+<a name="ln559">             * - has no associated resource,</a>
+<a name="ln560">             * - was a primitive,</a>
+<a name="ln561">             * - was pre-expanded (ie. 'running' instead of 'start')</a>
+<a name="ln562">             *</a>
+<a name="ln563">             * The third argument here to graph_update_action() is a node which is used under two conditions:</a>
+<a name="ln564">             * - Interleaving, in which case first-&gt;node and</a>
+<a name="ln565">             *   then-&gt;node are equal (and NULL)</a>
+<a name="ln566">             * - If 'then' is a clone, to limit the scope of the</a>
+<a name="ln567">             *   constraint to instances on the supplied node</a>
+<a name="ln568">             *</a>
+<a name="ln569">             */</a>
+<a name="ln570">            int otype = other-&gt;type;</a>
+<a name="ln571">            node_t *node = then-&gt;node;</a>
+<a name="ln572"> </a>
+<a name="ln573">            if(is_set(otype, pe_order_implies_then_on_node)) {</a>
+<a name="ln574">                /* Normally we want the _whole_ 'then' clone to</a>
+<a name="ln575">                 * restart if 'first' is restarted, so then-&gt;node is</a>
+<a name="ln576">                 * needed.</a>
+<a name="ln577">                 *</a>
+<a name="ln578">                 * However for unfencing, we want to limit this to</a>
+<a name="ln579">                 * instances on the same node as 'first' (the</a>
+<a name="ln580">                 * unfencing operation), so first-&gt;node is supplied.</a>
+<a name="ln581">                 *</a>
+<a name="ln582">                 * Swap the node, from then on we can can treat it</a>
+<a name="ln583">                 * like any other 'pe_order_implies_then'</a>
+<a name="ln584">                 */</a>
+<a name="ln585"> </a>
+<a name="ln586">                clear_bit(otype, pe_order_implies_then_on_node);</a>
+<a name="ln587">                set_bit(otype, pe_order_implies_then);</a>
+<a name="ln588">                node = first-&gt;node;</a>
+<a name="ln589">            }</a>
+<a name="ln590">            clear_bit(first_flags, pe_action_pseudo);</a>
+<a name="ln591">            changed |= graph_update_action(first, then, node, first_flags, otype);</a>
+<a name="ln592"> </a>
+<a name="ln593">            /* 'first' was for a complex resource (clone, group, etc),</a>
+<a name="ln594">             * create a new dependency if necessary</a>
+<a name="ln595">             */</a>
+<a name="ln596">        } else if (order_actions(first, then, other-&gt;type)) {</a>
+<a name="ln597">            /* This was the first time 'first' and 'then' were associated,</a>
+<a name="ln598">             * start again to get the new actions_before list</a>
+<a name="ln599">             */</a>
+<a name="ln600">            changed |= (pe_graph_updated_then | pe_graph_disable);</a>
+<a name="ln601">        }</a>
+<a name="ln602"> </a>
+<a name="ln603">        if (changed &amp; pe_graph_disable) {</a>
+<a name="ln604">            crm_trace(&quot;Disabled constraint %s -&gt; %s&quot;, other-&gt;action-&gt;uuid, then-&gt;uuid);</a>
+<a name="ln605">            clear_bit(changed, pe_graph_disable);</a>
+<a name="ln606">            other-&gt;type = pe_order_none;</a>
+<a name="ln607">        }</a>
+<a name="ln608"> </a>
+<a name="ln609">        if (changed &amp; pe_graph_updated_first) {</a>
+<a name="ln610">            GListPtr lpc2 = NULL;</a>
+<a name="ln611"> </a>
+<a name="ln612">            crm_trace(&quot;Updated %s (first %s %s %s), processing dependents &quot;,</a>
+<a name="ln613">                      first-&gt;uuid,</a>
+<a name="ln614">                      is_set(first-&gt;flags, pe_action_optional) ? &quot;optional&quot; : &quot;required&quot;,</a>
+<a name="ln615">                      is_set(first-&gt;flags, pe_action_runnable) ? &quot;runnable&quot; : &quot;unrunnable&quot;,</a>
+<a name="ln616">                      is_set(first-&gt;flags,</a>
+<a name="ln617">                             pe_action_pseudo) ? &quot;pseudo&quot; : first-&gt;node ? first-&gt;node-&gt;details-&gt;</a>
+<a name="ln618">                      uname : &quot;&quot;);</a>
+<a name="ln619">            for (lpc2 = first-&gt;actions_after; lpc2 != NULL; lpc2 = lpc2-&gt;next) {</a>
+<a name="ln620">                action_wrapper_t *other = (action_wrapper_t *) lpc2-&gt;data;</a>
+<a name="ln621"> </a>
+<a name="ln622">                update_action(other-&gt;action);</a>
+<a name="ln623">            }</a>
+<a name="ln624">            update_action(first);</a>
+<a name="ln625">        }</a>
+<a name="ln626">    }</a>
+<a name="ln627"> </a>
+<a name="ln628">    if (is_set(then-&gt;flags, pe_action_requires_any)) {</a>
+<a name="ln629">        if (last_flags != then-&gt;flags) {</a>
+<a name="ln630">            changed |= pe_graph_updated_then;</a>
+<a name="ln631">        } else {</a>
+<a name="ln632">            clear_bit(changed, pe_graph_updated_then);</a>
+<a name="ln633">        }</a>
+<a name="ln634">    }</a>
+<a name="ln635"> </a>
+<a name="ln636">    if (changed &amp; pe_graph_updated_then) {</a>
+<a name="ln637">        crm_trace(&quot;Updated %s (then %s %s %s), processing dependents &quot;,</a>
+<a name="ln638">                  then-&gt;uuid,</a>
+<a name="ln639">                  is_set(then-&gt;flags, pe_action_optional) ? &quot;optional&quot; : &quot;required&quot;,</a>
+<a name="ln640">                  is_set(then-&gt;flags, pe_action_runnable) ? &quot;runnable&quot; : &quot;unrunnable&quot;,</a>
+<a name="ln641">                  is_set(then-&gt;flags,</a>
+<a name="ln642">                         pe_action_pseudo) ? &quot;pseudo&quot; : then-&gt;node ? then-&gt;node-&gt;details-&gt;</a>
+<a name="ln643">                  uname : &quot;&quot;);</a>
+<a name="ln644"> </a>
+<a name="ln645">        if (is_set(last_flags, pe_action_runnable) &amp;&amp; is_not_set(then-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln646">            update_colo_start_chain(then);</a>
+<a name="ln647">        }</a>
+<a name="ln648">        update_action(then);</a>
+<a name="ln649">        for (lpc = then-&gt;actions_after; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln650">            action_wrapper_t *other = (action_wrapper_t *) lpc-&gt;data;</a>
+<a name="ln651"> </a>
+<a name="ln652">            update_action(other-&gt;action);</a>
+<a name="ln653">        }</a>
+<a name="ln654">    }</a>
+<a name="ln655"> </a>
+<a name="ln656">    return FALSE;</a>
+<a name="ln657">}</a>
+<a name="ln658"> </a>
+<a name="ln659">gboolean</a>
+<a name="ln660">shutdown_constraints(node_t * node, action_t * shutdown_op, pe_working_set_t * data_set)</a>
+<a name="ln661">{</a>
+<a name="ln662">    /* add the stop to the before lists so it counts as a pre-req</a>
+<a name="ln663">     * for the shutdown</a>
+<a name="ln664">     */</a>
+<a name="ln665">    GListPtr lpc = NULL;</a>
+<a name="ln666"> </a>
+<a name="ln667">    for (lpc = data_set-&gt;actions; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln668">        action_t *action = (action_t *) lpc-&gt;data;</a>
+<a name="ln669"> </a>
+<a name="ln670">        if (action-&gt;rsc == NULL || action-&gt;node == NULL) {</a>
+<a name="ln671">            continue;</a>
+<a name="ln672">        } else if (action-&gt;node-&gt;details != node-&gt;details) {</a>
+<a name="ln673">            continue;</a>
+<a name="ln674">        } else if (is_set(action-&gt;rsc-&gt;flags, pe_rsc_maintenance)) {</a>
+<a name="ln675">            pe_rsc_trace(action-&gt;rsc, &quot;Skipping %s: maintenance mode&quot;, action-&gt;uuid);</a>
+<a name="ln676">            continue;</a>
+<a name="ln677">        } else if (node-&gt;details-&gt;maintenance) {</a>
+<a name="ln678">            pe_rsc_trace(action-&gt;rsc, &quot;Skipping %s: node %s is in maintenance mode&quot;,</a>
+<a name="ln679">                         action-&gt;uuid, node-&gt;details-&gt;uname);</a>
+<a name="ln680">            continue;</a>
+<a name="ln681">        } else if (safe_str_neq(action-&gt;task, RSC_STOP)) {</a>
+<a name="ln682">            continue;</a>
+<a name="ln683">        } else if (is_not_set(action-&gt;rsc-&gt;flags, pe_rsc_managed)</a>
+<a name="ln684">                   &amp;&amp; is_not_set(action-&gt;rsc-&gt;flags, pe_rsc_block)) {</a>
+<a name="ln685">            /*</a>
+<a name="ln686">             * If another action depends on this one, we may still end up blocking</a>
+<a name="ln687">             */</a>
+<a name="ln688">            pe_rsc_trace(action-&gt;rsc, &quot;Skipping %s: unmanaged&quot;, action-&gt;uuid);</a>
+<a name="ln689">            continue;</a>
+<a name="ln690">        }</a>
+<a name="ln691"> </a>
+<a name="ln692">        pe_rsc_trace(action-&gt;rsc, &quot;Ordering %s before shutdown on %s&quot;, action-&gt;uuid,</a>
+<a name="ln693">                     node-&gt;details-&gt;uname);</a>
+<a name="ln694">        pe_clear_action_bit(action, pe_action_optional);</a>
+<a name="ln695">        custom_action_order(action-&gt;rsc, NULL, action,</a>
+<a name="ln696">                            NULL, strdup(CRM_OP_SHUTDOWN), shutdown_op,</a>
+<a name="ln697">                            pe_order_optional | pe_order_runnable_left, data_set);</a>
+<a name="ln698">    }</a>
+<a name="ln699"> </a>
+<a name="ln700">    return TRUE;</a>
+<a name="ln701">}</a>
+<a name="ln702"> </a>
+<a name="ln703">/*!</a>
+<a name="ln704"> * \internal</a>
+<a name="ln705"> * \brief Order all actions appropriately relative to a fencing operation</a>
+<a name="ln706"> *</a>
+<a name="ln707"> * Ensure start operations of affected resources are ordered after fencing,</a>
+<a name="ln708"> * imply stop and demote operations of affected resources by marking them as</a>
+<a name="ln709"> * pseudo-actions, etc.</a>
+<a name="ln710"> *</a>
+<a name="ln711"> * \param[in]     node        Node to be fenced</a>
+<a name="ln712"> * \param[in]     stonith_op  Fencing operation</a>
+<a name="ln713"> * \param[in/out] data_set    Working set of cluster</a>
+<a name="ln714"> */</a>
+<a name="ln715">gboolean</a>
+<a name="ln716">stonith_constraints(node_t * node, action_t * stonith_op, pe_working_set_t * data_set)</a>
+<a name="ln717">{</a>
+<a name="ln718">    GListPtr r = NULL;</a>
+<a name="ln719"> </a>
+<a name="ln720">    CRM_CHECK(stonith_op != NULL, return FALSE);</a>
+<a name="ln721">    for (r = data_set-&gt;resources; r != NULL; r = r-&gt;next) {</a>
+<a name="ln722">        rsc_stonith_ordering((resource_t *) r-&gt;data, stonith_op, data_set);</a>
+<a name="ln723">    }</a>
+<a name="ln724">    return TRUE;</a>
+<a name="ln725">}</a>
+<a name="ln726"> </a>
+<a name="ln727">static node_t *</a>
+<a name="ln728">get_router_node(action_t *action)</a>
+<a name="ln729">{</a>
+<a name="ln730">    node_t *began_on = NULL;</a>
+<a name="ln731">    node_t *ended_on = NULL;</a>
+<a name="ln732">    node_t *router_node = NULL;</a>
+<a name="ln733"> </a>
+<a name="ln734">    if (safe_str_eq(action-&gt;task, CRM_OP_FENCE) || is_remote_node(action-&gt;node) == FALSE) {</a>
+<a name="ln735">        return NULL;</a>
+<a name="ln736">    }</a>
+<a name="ln737"> </a>
+<a name="ln738">    CRM_ASSERT(action-&gt;node-&gt;details-&gt;remote_rsc != NULL);</a>
+<a name="ln739"> </a>
+<a name="ln740">    if (action-&gt;node-&gt;details-&gt;remote_rsc-&gt;running_on) {</a>
+<a name="ln741">        began_on = action-&gt;node-&gt;details-&gt;remote_rsc-&gt;running_on-&gt;data;</a>
+<a name="ln742">    }</a>
+<a name="ln743">    ended_on = action-&gt;node-&gt;details-&gt;remote_rsc-&gt;allocated_to;</a>
+<a name="ln744"> </a>
+<a name="ln745">    /* if there is only one location to choose from,</a>
+<a name="ln746">     * this is easy. Check for those conditions first */</a>
+<a name="ln747">    if (!began_on || !ended_on) {</a>
+<a name="ln748">        /* remote rsc is either shutting down or starting up */</a>
+<a name="ln749">        return began_on ? began_on : ended_on;</a>
+<a name="ln750">    } else if (began_on-&gt;details == ended_on-&gt;details) {</a>
+<a name="ln751">        /* remote rsc didn't move nodes. */</a>
+<a name="ln752">        return began_on;</a>
+<a name="ln753">    }</a>
+<a name="ln754"> </a>
+<a name="ln755">    /* If we have get here, we know the remote resource</a>
+<a name="ln756">     * began on one node and is moving to another node.</a>
+<a name="ln757">     *</a>
+<a name="ln758">     * This means some actions will get routed through the cluster</a>
+<a name="ln759">     * node the connection rsc began on, and others are routed through</a>
+<a name="ln760">     * the cluster node the connection rsc ends up on.</a>
+<a name="ln761">     *</a>
+<a name="ln762">     * 1. stop, demote, migrate actions of resources living in the remote</a>
+<a name="ln763">     *    node _MUST_ occur _BEFORE_ the connection can move (these actions</a>
+<a name="ln764">     *    are all required before the remote rsc stop action can occur.) In</a>
+<a name="ln765">     *    this case, we know these actions have to be routed through the initial</a>
+<a name="ln766">     *    cluster node the connection resource lived on before the move takes place.</a>
+<a name="ln767">     *</a>
+<a name="ln768">     * 2. Everything else (start, promote, monitor, probe, refresh, clear failcount</a>
+<a name="ln769">     *    delete ....) must occur after the resource starts on the node it is</a>
+<a name="ln770">     *    moving to.</a>
+<a name="ln771">     */</a>
+<a name="ln772"> </a>
+<a name="ln773">    /* 1. before connection rsc moves. */</a>
+<a name="ln774">    if (safe_str_eq(action-&gt;task, &quot;stop&quot;) ||</a>
+<a name="ln775">        safe_str_eq(action-&gt;task, &quot;demote&quot;) ||</a>
+<a name="ln776">        safe_str_eq(action-&gt;task, &quot;migrate_from&quot;) ||</a>
+<a name="ln777">        safe_str_eq(action-&gt;task, &quot;migrate_to&quot;)) {</a>
+<a name="ln778"> </a>
+<a name="ln779">        router_node = began_on;</a>
+<a name="ln780"> </a>
+<a name="ln781">    /* 2. after connection rsc moves. */</a>
+<a name="ln782">    } else {</a>
+<a name="ln783">        router_node = ended_on;</a>
+<a name="ln784">    }</a>
+<a name="ln785">    return router_node;</a>
+<a name="ln786">}</a>
+<a name="ln787"> </a>
+<a name="ln788">/*!</a>
+<a name="ln789"> * \internal</a>
+<a name="ln790"> * \brief Add an XML node tag for a specified ID</a>
+<a name="ln791"> *</a>
+<a name="ln792"> * \param[in]     id      Node UUID to add</a>
+<a name="ln793"> * \param[in,out] xml     Parent XML tag to add to</a>
+<a name="ln794"> */</a>
+<a name="ln795">static xmlNode*</a>
+<a name="ln796">add_node_to_xml_by_id(const char *id, xmlNode *xml)</a>
+<a name="ln797">{</a>
+<a name="ln798">    xmlNode *node_xml;</a>
+<a name="ln799"> </a>
+<a name="ln800">    node_xml = create_xml_node(xml, XML_CIB_TAG_NODE);</a>
+<a name="ln801">    crm_xml_add(node_xml, XML_ATTR_UUID, id);</a>
+<a name="ln802"> </a>
+<a name="ln803">    return node_xml;</a>
+<a name="ln804">}</a>
+<a name="ln805"> </a>
+<a name="ln806">/*!</a>
+<a name="ln807"> * \internal</a>
+<a name="ln808"> * \brief Add an XML node tag for a specified node</a>
+<a name="ln809"> *</a>
+<a name="ln810"> * \param[in]     node  Node to add</a>
+<a name="ln811"> * \param[in/out] xml   XML to add node to</a>
+<a name="ln812"> */</a>
+<a name="ln813">static void</a>
+<a name="ln814">add_node_to_xml(const node_t *node, void *xml)</a>
+<a name="ln815">{</a>
+<a name="ln816">    add_node_to_xml_by_id(node-&gt;details-&gt;id, (xmlNode *) xml);</a>
+<a name="ln817">}</a>
+<a name="ln818"> </a>
+<a name="ln819">/*!</a>
+<a name="ln820"> * \internal</a>
+<a name="ln821"> * \brief Add XML with nodes that need an update of their maintenance state</a>
+<a name="ln822"> *</a>
+<a name="ln823"> * \param[in,out] xml       Parent XML tag to add to</a>
+<a name="ln824"> * \param[in]     data_set  Working set for cluster</a>
+<a name="ln825"> */</a>
+<a name="ln826">static int</a>
+<a name="ln827">add_maintenance_nodes(xmlNode *xml, const pe_working_set_t *data_set)</a>
+<a name="ln828">{</a>
+<a name="ln829">    GListPtr gIter = NULL;</a>
+<a name="ln830">    xmlNode *maintenance =</a>
+<a name="ln831">        xml?create_xml_node(xml, XML_GRAPH_TAG_MAINTENANCE):NULL;</a>
+<a name="ln832">    int count = 0;</a>
+<a name="ln833"> </a>
+<a name="ln834">    for (gIter = data_set-&gt;nodes; gIter != NULL;</a>
+<a name="ln835">         gIter = gIter-&gt;next) {</a>
+<a name="ln836">        node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln837">        struct node_shared_s *details = node-&gt;details;</a>
+<a name="ln838"> </a>
+<a name="ln839">        if (!(is_remote_node(node))) {</a>
+<a name="ln840">            continue; /* just remote nodes need to know atm */</a>
+<a name="ln841">        }</a>
+<a name="ln842"> </a>
+<a name="ln843">        if (details-&gt;maintenance != details-&gt;remote_maintenance) {</a>
+<a name="ln844">            if (maintenance) {</a>
+<a name="ln845">                crm_xml_add(</a>
+<a name="ln846">                    add_node_to_xml_by_id(node-&gt;details-&gt;id, maintenance),</a>
+<a name="ln847">                    XML_NODE_IS_MAINTENANCE, details-&gt;maintenance?&quot;1&quot;:&quot;0&quot;);</a>
+<a name="ln848">            }</a>
+<a name="ln849">            count++;</a>
+<a name="ln850">        }</a>
+<a name="ln851">    }</a>
+<a name="ln852">    crm_trace(&quot;%s %d nodes to adjust maintenance-mode &quot;</a>
+<a name="ln853">              &quot;to transition&quot;, maintenance?&quot;Added&quot;:&quot;Counted&quot;, count);</a>
+<a name="ln854">    return count;</a>
+<a name="ln855">}</a>
+<a name="ln856"> </a>
+<a name="ln857">/*!</a>
+<a name="ln858"> * \internal</a>
+<a name="ln859"> * \brief Add pseudo action with nodes needing maintenance state update</a>
+<a name="ln860"> *</a>
+<a name="ln861"> * \param[in,out] data_set  Working set for cluster</a>
+<a name="ln862"> */</a>
+<a name="ln863">void</a>
+<a name="ln864">add_maintenance_update(pe_working_set_t *data_set)</a>
+<a name="ln865">{</a>
+<a name="ln866">    action_t *action = NULL;</a>
+<a name="ln867"> </a>
+<a name="ln868">    if (add_maintenance_nodes(NULL, data_set)) {</a>
+<a name="ln869">        crm_trace(&quot;adding maintenance state update pseudo action&quot;);</a>
+<a name="ln870">        action = get_pseudo_op(CRM_OP_MAINTENANCE_NODES, data_set);</a>
+<a name="ln871">        set_bit(action-&gt;flags, pe_action_print_always);</a>
+<a name="ln872">    }</a>
+<a name="ln873">}</a>
+<a name="ln874"> </a>
+<a name="ln875">/*!</a>
+<a name="ln876"> * \internal</a>
+<a name="ln877"> * \brief Add XML with nodes that an action is expected to bring down</a>
+<a name="ln878"> *</a>
+<a name="ln879"> * If a specified action is expected to bring any nodes down, add an XML block</a>
+<a name="ln880"> * with their UUIDs. When a node is lost, this allows the crmd to determine</a>
+<a name="ln881"> * whether it was expected.</a>
+<a name="ln882"> *</a>
+<a name="ln883"> * \param[in,out] xml       Parent XML tag to add to</a>
+<a name="ln884"> * \param[in]     action    Action to check for downed nodes</a>
+<a name="ln885"> * \param[in]     data_set  Working set for cluster</a>
+<a name="ln886"> */</a>
+<a name="ln887">static void</a>
+<a name="ln888">add_downed_nodes(xmlNode *xml, const action_t *action,</a>
+<a name="ln889">                 const pe_working_set_t *data_set)</a>
+<a name="ln890">{</a>
+<a name="ln891">    CRM_CHECK(xml &amp;&amp; action &amp;&amp; action-&gt;node &amp;&amp; data_set, return);</a>
+<a name="ln892"> </a>
+<a name="ln893">    if (safe_str_eq(action-&gt;task, CRM_OP_SHUTDOWN)) {</a>
+<a name="ln894"> </a>
+<a name="ln895">        /* Shutdown makes the action's node down */</a>
+<a name="ln896">        xmlNode *downed = create_xml_node(xml, XML_GRAPH_TAG_DOWNED);</a>
+<a name="ln897">        add_node_to_xml_by_id(action-&gt;node-&gt;details-&gt;id, downed);</a>
+<a name="ln898"> </a>
+<a name="ln899">    } else if (safe_str_eq(action-&gt;task, CRM_OP_FENCE)) {</a>
+<a name="ln900"> </a>
+<a name="ln901">        /* Fencing makes the action's node and any hosted guest nodes down */</a>
+<a name="ln902">        const char *fence = g_hash_table_lookup(action-&gt;meta, &quot;stonith_action&quot;);</a>
+<a name="ln903"> </a>
+<a name="ln904">        if (safe_str_eq(fence, &quot;off&quot;) || safe_str_eq(fence, &quot;reboot&quot;)) {</a>
+<a name="ln905">            xmlNode *downed = create_xml_node(xml, XML_GRAPH_TAG_DOWNED);</a>
+<a name="ln906">            add_node_to_xml_by_id(action-&gt;node-&gt;details-&gt;id, downed);</a>
+<a name="ln907">            pe_foreach_guest_node(data_set, action-&gt;node, add_node_to_xml, downed);</a>
+<a name="ln908">        }</a>
+<a name="ln909"> </a>
+<a name="ln910">    } else if (action-&gt;rsc &amp;&amp; action-&gt;rsc-&gt;is_remote_node</a>
+<a name="ln911">               &amp;&amp; safe_str_eq(action-&gt;task, CRMD_ACTION_STOP)) {</a>
+<a name="ln912"> </a>
+<a name="ln913">        /* Stopping a remote connection resource makes connected node down,</a>
+<a name="ln914">         * unless it's part of a migration</a>
+<a name="ln915">         */</a>
+<a name="ln916">        GListPtr iter;</a>
+<a name="ln917">        action_t *input;</a>
+<a name="ln918">        gboolean migrating = FALSE;</a>
+<a name="ln919"> </a>
+<a name="ln920">        for (iter = action-&gt;actions_before; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln921">            input = ((action_wrapper_t *) iter-&gt;data)-&gt;action;</a>
+<a name="ln922">            if (input-&gt;rsc &amp;&amp; safe_str_eq(action-&gt;rsc-&gt;id, input-&gt;rsc-&gt;id)</a>
+<a name="ln923">               &amp;&amp; safe_str_eq(input-&gt;task, CRMD_ACTION_MIGRATED)) {</a>
+<a name="ln924">                migrating = TRUE;</a>
+<a name="ln925">                break;</a>
+<a name="ln926">            }</a>
+<a name="ln927">        }</a>
+<a name="ln928">        if (!migrating) {</a>
+<a name="ln929">            xmlNode *downed = create_xml_node(xml, XML_GRAPH_TAG_DOWNED);</a>
+<a name="ln930">            add_node_to_xml_by_id(action-&gt;rsc-&gt;id, downed);</a>
+<a name="ln931">        }</a>
+<a name="ln932">    }</a>
+<a name="ln933">}</a>
+<a name="ln934"> </a>
+<a name="ln935">static xmlNode *</a>
+<a name="ln936">action2xml(action_t * action, gboolean as_input, pe_working_set_t *data_set)</a>
+<a name="ln937">{</a>
+<a name="ln938">    gboolean needs_node_info = TRUE;</a>
+<a name="ln939">    gboolean needs_maintenance_info = FALSE;</a>
+<a name="ln940">    xmlNode *action_xml = NULL;</a>
+<a name="ln941">    xmlNode *args_xml = NULL;</a>
+<a name="ln942"> </a>
+<a name="ln943">    if (action == NULL) {</a>
+<a name="ln944">        return NULL;</a>
+<a name="ln945">    }</a>
+<a name="ln946"> </a>
+<a name="ln947">    if (safe_str_eq(action-&gt;task, CRM_OP_FENCE)) {</a>
+<a name="ln948">        /* All fences need node info; guest node fences are pseudo-events */</a>
+<a name="ln949">        action_xml = create_xml_node(NULL,</a>
+<a name="ln950">                                     is_set(action-&gt;flags, pe_action_pseudo)?</a>
+<a name="ln951">                                     XML_GRAPH_TAG_PSEUDO_EVENT :</a>
+<a name="ln952">                                     XML_GRAPH_TAG_CRM_EVENT);</a>
+<a name="ln953"> </a>
+<a name="ln954">    } else if (safe_str_eq(action-&gt;task, CRM_OP_SHUTDOWN)) {</a>
+<a name="ln955">        action_xml = create_xml_node(NULL, XML_GRAPH_TAG_CRM_EVENT);</a>
+<a name="ln956"> </a>
+<a name="ln957">    } else if (safe_str_eq(action-&gt;task, CRM_OP_CLEAR_FAILCOUNT)) {</a>
+<a name="ln958">        action_xml = create_xml_node(NULL, XML_GRAPH_TAG_CRM_EVENT);</a>
+<a name="ln959"> </a>
+<a name="ln960">    } else if (safe_str_eq(action-&gt;task, CRM_OP_LRM_REFRESH)) {</a>
+<a name="ln961">        action_xml = create_xml_node(NULL, XML_GRAPH_TAG_CRM_EVENT);</a>
+<a name="ln962"> </a>
+<a name="ln963">/* 	} else if(safe_str_eq(action-&gt;task, RSC_PROBED)) { */</a>
+<a name="ln964">/* 		action_xml = create_xml_node(NULL, XML_GRAPH_TAG_CRM_EVENT); */</a>
+<a name="ln965"> </a>
+<a name="ln966">    } else if (is_set(action-&gt;flags, pe_action_pseudo)) {</a>
+<a name="ln967">        if (safe_str_eq(action-&gt;task, CRM_OP_MAINTENANCE_NODES)) {</a>
+<a name="ln968">            needs_maintenance_info = TRUE;</a>
+<a name="ln969">        }</a>
+<a name="ln970">        action_xml = create_xml_node(NULL, XML_GRAPH_TAG_PSEUDO_EVENT);</a>
+<a name="ln971">        needs_node_info = FALSE;</a>
+<a name="ln972"> </a>
+<a name="ln973">    } else {</a>
+<a name="ln974">        action_xml = create_xml_node(NULL, XML_GRAPH_TAG_RSC_OP);</a>
+<a name="ln975">    }</a>
+<a name="ln976"> </a>
+<a name="ln977">    crm_xml_add_int(action_xml, XML_ATTR_ID, action-&gt;id);</a>
+<a name="ln978">    crm_xml_add(action_xml, XML_LRM_ATTR_TASK, action-&gt;task);</a>
+<a name="ln979">    if (action-&gt;rsc != NULL &amp;&amp; action-&gt;rsc-&gt;clone_name != NULL) {</a>
+<a name="ln980">        char *clone_key = NULL;</a>
+<a name="ln981">        const char *interval_s = g_hash_table_lookup(action-&gt;meta, XML_LRM_ATTR_INTERVAL);</a>
+<a name="ln982">        int interval = crm_parse_int(interval_s, &quot;0&quot;);</a>
+<a name="ln983"> </a>
+<a name="ln984">        if (safe_str_eq(action-&gt;task, RSC_NOTIFY)) {</a>
+<a name="ln985">            const char *n_type = g_hash_table_lookup(action-&gt;meta, &quot;notify_type&quot;);</a>
+<a name="ln986">            const char *n_task = g_hash_table_lookup(action-&gt;meta, &quot;notify_operation&quot;);</a>
+<a name="ln987"> </a>
+<a name="ln988">            CRM_CHECK(n_type != NULL, crm_err(&quot;No notify type value found for %s&quot;, action-&gt;uuid));</a>
+<a name="ln989">            CRM_CHECK(n_task != NULL,</a>
+<a name="ln990">                      crm_err(&quot;No notify operation value found for %s&quot;, action-&gt;uuid));</a>
+<a name="ln991">            clone_key = generate_notify_key(action-&gt;rsc-&gt;clone_name, n_type, n_task);</a>
+<a name="ln992"> </a>
+<a name="ln993">        } else if(action-&gt;cancel_task) {</a>
+<a name="ln994">            clone_key = generate_op_key(action-&gt;rsc-&gt;clone_name, action-&gt;cancel_task, interval);</a>
+<a name="ln995">        } else {</a>
+<a name="ln996">            clone_key = generate_op_key(action-&gt;rsc-&gt;clone_name, action-&gt;task, interval);</a>
+<a name="ln997">        }</a>
+<a name="ln998"> </a>
+<a name="ln999">        CRM_CHECK(clone_key != NULL, crm_err(&quot;Could not generate a key for %s&quot;, action-&gt;uuid));</a>
+<a name="ln1000">        crm_xml_add(action_xml, XML_LRM_ATTR_TASK_KEY, clone_key);</a>
+<a name="ln1001">        crm_xml_add(action_xml, &quot;internal_&quot; XML_LRM_ATTR_TASK_KEY, action-&gt;uuid);</a>
+<a name="ln1002">        free(clone_key);</a>
+<a name="ln1003"> </a>
+<a name="ln1004">    } else {</a>
+<a name="ln1005">        crm_xml_add(action_xml, XML_LRM_ATTR_TASK_KEY, action-&gt;uuid);</a>
+<a name="ln1006">    }</a>
+<a name="ln1007"> </a>
+<a name="ln1008">    if (needs_node_info &amp;&amp; action-&gt;node != NULL) {</a>
+<a name="ln1009">        node_t *router_node = get_router_node(action);</a>
+<a name="ln1010"> </a>
+<a name="ln1011">        crm_xml_add(action_xml, XML_LRM_ATTR_TARGET, action-&gt;node-&gt;details-&gt;uname);</a>
+<a name="ln1012">        crm_xml_add(action_xml, XML_LRM_ATTR_TARGET_UUID, action-&gt;node-&gt;details-&gt;id);</a>
+<a name="ln1013">        if (router_node) {</a>
+<a name="ln1014">            crm_xml_add(action_xml, XML_LRM_ATTR_ROUTER_NODE, router_node-&gt;details-&gt;uname);</a>
+<a name="ln1015">        }</a>
+<a name="ln1016"> </a>
+<a name="ln1017">        g_hash_table_insert(action-&gt;meta, strdup(XML_LRM_ATTR_TARGET), strdup(action-&gt;node-&gt;details-&gt;uname));</a>
+<a name="ln1018">        g_hash_table_insert(action-&gt;meta, strdup(XML_LRM_ATTR_TARGET_UUID), strdup(action-&gt;node-&gt;details-&gt;id));</a>
+<a name="ln1019">    }</a>
+<a name="ln1020"> </a>
+<a name="ln1021">    /* No details if this action is only being listed in the inputs section */</a>
+<a name="ln1022">    if (as_input) {</a>
+<a name="ln1023">        return action_xml;</a>
+<a name="ln1024">    }</a>
+<a name="ln1025"> </a>
+<a name="ln1026">    /* List affected resource */</a>
+<a name="ln1027">    if (action-&gt;rsc) {</a>
+<a name="ln1028">        if (is_set(action-&gt;flags, pe_action_pseudo) == FALSE) {</a>
+<a name="ln1029">            int lpc = 0;</a>
+<a name="ln1030"> </a>
+<a name="ln1031">            xmlNode *rsc_xml = create_xml_node(action_xml, crm_element_name(action-&gt;rsc-&gt;xml));</a>
+<a name="ln1032"> </a>
+<a name="ln1033">            const char *attr_list[] = {</a>
+<a name="ln1034">                XML_AGENT_ATTR_CLASS,</a>
+<a name="ln1035">                XML_AGENT_ATTR_PROVIDER,</a>
+<a name="ln1036">                XML_ATTR_TYPE</a>
+<a name="ln1037">            };</a>
+<a name="ln1038"> </a>
+<a name="ln1039">            if (is_set(action-&gt;rsc-&gt;flags, pe_rsc_orphan) &amp;&amp; action-&gt;rsc-&gt;clone_name) {</a>
+<a name="ln1040">                /* Do not use the 'instance free' name here as that</a>
+<a name="ln1041">                 * might interfere with the instance we plan to keep.</a>
+<a name="ln1042">                 * Ie. if there are more than two named /anonymous/</a>
+<a name="ln1043">                 * instances on a given node, we need to make sure the</a>
+<a name="ln1044">                 * command goes to the right one.</a>
+<a name="ln1045">                 *</a>
+<a name="ln1046">                 * Keep this block, even when everyone is using</a>
+<a name="ln1047">                 * 'instance free' anonymous clone names - it means</a>
+<a name="ln1048">                 * we'll do the right thing if anyone toggles the</a>
+<a name="ln1049">                 * unique flag to 'off'</a>
+<a name="ln1050">                 */</a>
+<a name="ln1051">                crm_debug(&quot;Using orphan clone name %s instead of %s&quot;, action-&gt;rsc-&gt;id,</a>
+<a name="ln1052">                          action-&gt;rsc-&gt;clone_name);</a>
+<a name="ln1053">                crm_xml_add(rsc_xml, XML_ATTR_ID, action-&gt;rsc-&gt;clone_name);</a>
+<a name="ln1054">                crm_xml_add(rsc_xml, XML_ATTR_ID_LONG, action-&gt;rsc-&gt;id);</a>
+<a name="ln1055"> </a>
+<a name="ln1056">            } else if (is_not_set(action-&gt;rsc-&gt;flags, pe_rsc_unique)) {</a>
+<a name="ln1057">                const char *xml_id = ID(action-&gt;rsc-&gt;xml);</a>
+<a name="ln1058"> </a>
+<a name="ln1059">                crm_debug(&quot;Using anonymous clone name %s for %s (aka. %s)&quot;, xml_id, action-&gt;rsc-&gt;id,</a>
+<a name="ln1060">                          action-&gt;rsc-&gt;clone_name);</a>
+<a name="ln1061"> </a>
+<a name="ln1062">                /* ID is what we'd like client to use</a>
+<a name="ln1063">                 * ID_LONG is what they might know it as instead</a>
+<a name="ln1064">                 *</a>
+<a name="ln1065">                 * ID_LONG is only strictly needed /here/ during the</a>
+<a name="ln1066">                 * transition period until all nodes in the cluster</a>
+<a name="ln1067">                 * are running the new software /and/ have rebooted</a>
+<a name="ln1068">                 * once (meaning that they've only ever spoken to a DC</a>
+<a name="ln1069">                 * supporting this feature).</a>
+<a name="ln1070">                 *</a>
+<a name="ln1071">                 * If anyone toggles the unique flag to 'on', the</a>
+<a name="ln1072">                 * 'instance free' name will correspond to an orphan</a>
+<a name="ln1073">                 * and fall into the clause above instead</a>
+<a name="ln1074">                 */</a>
+<a name="ln1075">                crm_xml_add(rsc_xml, XML_ATTR_ID, xml_id);</a>
+<a name="ln1076">                if (action-&gt;rsc-&gt;clone_name &amp;&amp; safe_str_neq(xml_id, action-&gt;rsc-&gt;clone_name)) {</a>
+<a name="ln1077">                    crm_xml_add(rsc_xml, XML_ATTR_ID_LONG, action-&gt;rsc-&gt;clone_name);</a>
+<a name="ln1078">                } else {</a>
+<a name="ln1079">                    crm_xml_add(rsc_xml, XML_ATTR_ID_LONG, action-&gt;rsc-&gt;id);</a>
+<a name="ln1080">                }</a>
+<a name="ln1081"> </a>
+<a name="ln1082">            } else {</a>
+<a name="ln1083">                CRM_ASSERT(action-&gt;rsc-&gt;clone_name == NULL);</a>
+<a name="ln1084">                crm_xml_add(rsc_xml, XML_ATTR_ID, action-&gt;rsc-&gt;id);</a>
+<a name="ln1085">            }</a>
+<a name="ln1086"> </a>
+<a name="ln1087">            for (lpc = 0; lpc &lt; DIMOF(attr_list); lpc++) {</a>
+<a name="ln1088">                crm_xml_add(rsc_xml, attr_list[lpc],</a>
+<a name="ln1089">                            g_hash_table_lookup(action-&gt;rsc-&gt;meta, attr_list[lpc]));</a>
+<a name="ln1090">            }</a>
+<a name="ln1091">        }</a>
+<a name="ln1092">    }</a>
+<a name="ln1093"> </a>
+<a name="ln1094">    /* List any attributes in effect */</a>
+<a name="ln1095">    args_xml = create_xml_node(NULL, XML_TAG_ATTRS);</a>
+<a name="ln1096">    crm_xml_add(args_xml, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln1097"> </a>
+<a name="ln1098">    g_hash_table_foreach(action-&gt;extra, hash2field, args_xml);</a>
+<a name="ln1099">    if (action-&gt;rsc != NULL &amp;&amp; action-&gt;node) {</a>
+<a name="ln1100">        GHashTable *p = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln1101">        xmlNode *versioned_parameters = create_xml_node(NULL, XML_TAG_RSC_VER_ATTRS);</a>
+<a name="ln1102"> </a>
+<a name="ln1103">        get_rsc_attributes(p, action-&gt;rsc, action-&gt;node, data_set);</a>
+<a name="ln1104">        g_hash_table_foreach(p, hash2smartfield, args_xml);</a>
+<a name="ln1105"> </a>
+<a name="ln1106">        pe_get_versioned_attributes(versioned_parameters, action-&gt;rsc, action-&gt;node, data_set);</a>
+<a name="ln1107">        if (xml_has_children(versioned_parameters)) {</a>
+<a name="ln1108">            add_node_copy(action_xml, versioned_parameters);</a>
+<a name="ln1109">        }</a>
+<a name="ln1110"> </a>
+<a name="ln1111">        g_hash_table_destroy(p);</a>
+<a name="ln1112">        free_xml(versioned_parameters);</a>
+<a name="ln1113">    } else if(action-&gt;rsc &amp;&amp; action-&gt;rsc-&gt;variant &lt;= pe_native) {</a>
+<a name="ln1114">        g_hash_table_foreach(action-&gt;rsc-&gt;parameters, hash2smartfield, args_xml);</a>
+<a name="ln1115"> </a>
+<a name="ln1116">        if (xml_has_children(action-&gt;rsc-&gt;versioned_parameters)) {</a>
+<a name="ln1117">            add_node_copy(action_xml, action-&gt;rsc-&gt;versioned_parameters);</a>
+<a name="ln1118">        }</a>
+<a name="ln1119">    }</a>
+<a name="ln1120"> </a>
+<a name="ln1121">    if (xml_has_children(action-&gt;versioned_parameters)) {</a>
+<a name="ln1122">        add_node_copy(action_xml, action-&gt;versioned_parameters);</a>
+<a name="ln1123">    }</a>
+<a name="ln1124"> </a>
+<a name="ln1125">    if (xml_has_children(action-&gt;versioned_meta)) {</a>
+<a name="ln1126">        add_node_copy(action_xml, action-&gt;versioned_meta);</a>
+<a name="ln1127">    }</a>
+<a name="ln1128"> </a>
+<a name="ln1129">    g_hash_table_foreach(action-&gt;meta, hash2metafield, args_xml);</a>
+<a name="ln1130">    if (action-&gt;rsc != NULL) {</a>
+<a name="ln1131">        int isolated = 0;</a>
+<a name="ln1132">        const char *value = g_hash_table_lookup(action-&gt;rsc-&gt;meta, &quot;external-ip&quot;);</a>
+<a name="ln1133">        resource_t *parent = action-&gt;rsc;</a>
+<a name="ln1134"> </a>
+<a name="ln1135">        while (parent != NULL) {</a>
+<a name="ln1136">            isolated |= parent-&gt;isolation_wrapper ? 1 : 0;</a>
+<a name="ln1137">            parent-&gt;cmds-&gt;append_meta(parent, args_xml);</a>
+<a name="ln1138">            parent = parent-&gt;parent;</a>
+<a name="ln1139">        }</a>
+<a name="ln1140"> </a>
+<a name="ln1141">        if (isolated &amp;&amp; action-&gt;node) {</a>
+<a name="ln1142">            char *nodeattr = crm_meta_name(XML_RSC_ATTR_ISOLATION_HOST);</a>
+<a name="ln1143">            crm_xml_add(args_xml, nodeattr, action-&gt;node-&gt;details-&gt;uname);</a>
+<a name="ln1144">            free(nodeattr);</a>
+<a name="ln1145">        }</a>
+<a name="ln1146"> </a>
+<a name="ln1147">        if(value) {</a>
+<a name="ln1148">            hash2smartfield((gpointer)&quot;pcmk_external_ip&quot;, (gpointer)value, (gpointer)args_xml);</a>
+<a name="ln1149">        }</a>
+<a name="ln1150"> </a>
+<a name="ln1151">    } else if (safe_str_eq(action-&gt;task, CRM_OP_FENCE) &amp;&amp; action-&gt;node) {</a>
+<a name="ln1152">        /* Pass the node's attributes as meta-attributes.</a>
+<a name="ln1153">         *</a>
+<a name="ln1154">         * @TODO: Determine whether it is still necessary to do this. It was</a>
+<a name="ln1155">         * added in 33d99707, probably for the libfence-based implementation in</a>
+<a name="ln1156">         * c9a90bd, which is no longer used.</a>
+<a name="ln1157">         */</a>
+<a name="ln1158">        g_hash_table_foreach(action-&gt;node-&gt;details-&gt;attrs, hash2metafield, args_xml);</a>
+<a name="ln1159">    }</a>
+<a name="ln1160"> </a>
+<a name="ln1161">    sorted_xml(args_xml, action_xml, FALSE);</a>
+<a name="ln1162">    free_xml(args_xml);</a>
+<a name="ln1163"> </a>
+<a name="ln1164">    /* List any nodes this action is expected to make down */</a>
+<a name="ln1165">    if (needs_node_info &amp;&amp; (action-&gt;node != NULL)) {</a>
+<a name="ln1166">        add_downed_nodes(action_xml, action, data_set);</a>
+<a name="ln1167">    }</a>
+<a name="ln1168"> </a>
+<a name="ln1169">    if (needs_maintenance_info) {</a>
+<a name="ln1170">        add_maintenance_nodes(action_xml, data_set);</a>
+<a name="ln1171">    }</a>
+<a name="ln1172"> </a>
+<a name="ln1173">    crm_log_xml_trace(action_xml, &quot;dumped action&quot;);</a>
+<a name="ln1174">    return action_xml;</a>
+<a name="ln1175">}</a>
+<a name="ln1176"> </a>
+<a name="ln1177">static gboolean</a>
+<a name="ln1178">should_dump_action(action_t * action)</a>
+<a name="ln1179">{</a>
+<a name="ln1180">    CRM_CHECK(action != NULL, return FALSE);</a>
+<a name="ln1181"> </a>
+<a name="ln1182">    if (is_set(action-&gt;flags, pe_action_dumped)) {</a>
+<a name="ln1183">        crm_trace(&quot;action %d (%s) was already dumped&quot;, action-&gt;id, action-&gt;uuid);</a>
+<a name="ln1184">        return FALSE;</a>
+<a name="ln1185"> </a>
+<a name="ln1186">    } else if (is_set(action-&gt;flags, pe_action_pseudo) &amp;&amp; safe_str_eq(action-&gt;task, CRM_OP_PROBED)) {</a>
+<a name="ln1187">        GListPtr lpc = NULL;</a>
+<a name="ln1188"> </a>
+<a name="ln1189">        /* This is a horrible but convenient hack</a>
+<a name="ln1190">         *</a>
+<a name="ln1191">         * It mimimizes the number of actions with unsatisfied inputs</a>
+<a name="ln1192">         * (ie. not included in the graph)</a>
+<a name="ln1193">         *</a>
+<a name="ln1194">         * This in turn, means we can be more concise when printing</a>
+<a name="ln1195">         * aborted/incomplete graphs.</a>
+<a name="ln1196">         *</a>
+<a name="ln1197">         * It also makes it obvious which node is preventing</a>
+<a name="ln1198">         * probe_complete from running (presumably because it is only</a>
+<a name="ln1199">         * partially up)</a>
+<a name="ln1200">         *</a>
+<a name="ln1201">         * For these reasons we tolerate such perversions</a>
+<a name="ln1202">         */</a>
+<a name="ln1203"> </a>
+<a name="ln1204">        for (lpc = action-&gt;actions_after; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln1205">            action_wrapper_t *wrapper = (action_wrapper_t *) lpc-&gt;data;</a>
+<a name="ln1206"> </a>
+<a name="ln1207">            if (is_not_set(wrapper-&gt;action-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln1208">                /* Only interested in runnable operations */</a>
+<a name="ln1209">            } else if (safe_str_neq(wrapper-&gt;action-&gt;task, RSC_START)) {</a>
+<a name="ln1210">                /* Only interested in start operations */</a>
+<a name="ln1211">            } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_dumped)) {</a>
+<a name="ln1212">                crm_trace(&quot;action %d (%s) dependency of %s&quot;,</a>
+<a name="ln1213">                          action-&gt;id, action-&gt;uuid, wrapper-&gt;action-&gt;uuid);</a>
+<a name="ln1214">                return TRUE;</a>
+<a name="ln1215"> </a>
+<a name="ln1216">            } else if (should_dump_action(wrapper-&gt;action)) {</a>
+<a name="ln1217">                crm_trace(&quot;action %d (%s) dependency of %s&quot;,</a>
+<a name="ln1218">                          action-&gt;id, action-&gt;uuid, wrapper-&gt;action-&gt;uuid);</a>
+<a name="ln1219">                return TRUE;</a>
+<a name="ln1220">            }</a>
+<a name="ln1221">        }</a>
+<a name="ln1222">    }</a>
+<a name="ln1223"> </a>
+<a name="ln1224">    if (is_set(action-&gt;flags, pe_action_runnable) == FALSE) {</a>
+<a name="ln1225">        crm_trace(&quot;action %d (%s) was not runnable&quot;, action-&gt;id, action-&gt;uuid);</a>
+<a name="ln1226">        return FALSE;</a>
+<a name="ln1227"> </a>
+<a name="ln1228">    } else if (is_set(action-&gt;flags, pe_action_optional)</a>
+<a name="ln1229">               &amp;&amp; is_set(action-&gt;flags, pe_action_print_always) == FALSE) {</a>
+<a name="ln1230">        crm_trace(&quot;action %d (%s) was optional&quot;, action-&gt;id, action-&gt;uuid);</a>
+<a name="ln1231">        return FALSE;</a>
+<a name="ln1232"> </a>
+<a name="ln1233">    } else if (action-&gt;rsc != NULL &amp;&amp; is_not_set(action-&gt;rsc-&gt;flags, pe_rsc_managed)) {</a>
+<a name="ln1234">        const char *interval = NULL;</a>
+<a name="ln1235"> </a>
+<a name="ln1236">        interval = g_hash_table_lookup(action-&gt;meta, XML_LRM_ATTR_INTERVAL);</a>
+<a name="ln1237"> </a>
+<a name="ln1238">        /* make sure probes and recurring monitors go through */</a>
+<a name="ln1239">        if (safe_str_neq(action-&gt;task, RSC_STATUS) &amp;&amp; interval == NULL) {</a>
+<a name="ln1240">            crm_trace(&quot;action %d (%s) was for an unmanaged resource (%s)&quot;,</a>
+<a name="ln1241">                      action-&gt;id, action-&gt;uuid, action-&gt;rsc-&gt;id);</a>
+<a name="ln1242">            return FALSE;</a>
+<a name="ln1243">        }</a>
+<a name="ln1244">    }</a>
+<a name="ln1245"> </a>
+<a name="ln1246">    if (is_set(action-&gt;flags, pe_action_pseudo)</a>
+<a name="ln1247">        || safe_str_eq(action-&gt;task, CRM_OP_FENCE)</a>
+<a name="ln1248">        || safe_str_eq(action-&gt;task, CRM_OP_SHUTDOWN)) {</a>
+<a name="ln1249">        /* skip the next checks */</a>
+<a name="ln1250">        return TRUE;</a>
+<a name="ln1251">    }</a>
+<a name="ln1252"> </a>
+<a name="ln1253">    if (action-&gt;node == NULL) {</a>
+<a name="ln1254">        pe_err(&quot;action %d (%s) was not allocated&quot;, action-&gt;id, action-&gt;uuid);</a>
+<a name="ln1255">        log_action(LOG_DEBUG, &quot;Unallocated action&quot;, action, FALSE);</a>
+<a name="ln1256">        return FALSE;</a>
+<a name="ln1257"> </a>
+<a name="ln1258">    } else if(is_container_remote_node(action-&gt;node) &amp;&amp; action-&gt;node-&gt;details-&gt;remote_requires_reset == FALSE) {</a>
+<a name="ln1259">        crm_trace(&quot;Assuming action %s for %s will be runnable&quot;, action-&gt;uuid, action-&gt;node-&gt;details-&gt;uname);</a>
+<a name="ln1260"> </a>
+<a name="ln1261">    } else if (action-&gt;node-&gt;details-&gt;online == FALSE) {</a>
+<a name="ln1262">        pe_err(&quot;action %d was (%s) scheduled for offline node&quot;, action-&gt;id, action-&gt;uuid);</a>
+<a name="ln1263">        log_action(LOG_DEBUG, &quot;Action for offline node&quot;, action, FALSE);</a>
+<a name="ln1264">        return FALSE;</a>
+<a name="ln1265">#if 0</a>
+<a name="ln1266">        /* but this would also affect resources that can be safely</a>
+<a name="ln1267">         *  migrated before a fencing op</a>
+<a name="ln1268">         */</a>
+<a name="ln1269">    } else if (action-&gt;node-&gt;details-&gt;unclean == FALSE) {</a>
+<a name="ln1270">        pe_err(&quot;action %d was (%s) scheduled for unclean node&quot;, action-&gt;id, action-&gt;uuid);</a>
+<a name="ln1271">        log_action(LOG_DEBUG, &quot;Action for unclean node&quot;, action, FALSE);</a>
+<a name="ln1272">        return FALSE;</a>
+<a name="ln1273">#endif</a>
+<a name="ln1274">    }</a>
+<a name="ln1275">    return TRUE;</a>
+<a name="ln1276">}</a>
+<a name="ln1277"> </a>
+<a name="ln1278">/* lowest to highest */</a>
+<a name="ln1279">static gint</a>
+<a name="ln1280">sort_action_id(gconstpointer a, gconstpointer b)</a>
+<a name="ln1281">{</a>
+<a name="ln1282">    const action_wrapper_t *action_wrapper2 = (const action_wrapper_t *)a;</a>
+<a name="ln1283">    const action_wrapper_t *action_wrapper1 = (const action_wrapper_t *)b;</a>
+<a name="ln1284"> </a>
+<a name="ln1285">    if (a == NULL) {</a>
+<a name="ln1286">        return 1;</a>
+<a name="ln1287">    }</a>
+<a name="ln1288">    if (b == NULL) {</a>
+<a name="ln1289">        return -1;</a>
+<a name="ln1290">    }</a>
+<a name="ln1291"> </a>
+<a name="ln1292">    if (action_wrapper1-&gt;action-&gt;id &gt; action_wrapper2-&gt;action-&gt;id) {</a>
+<a name="ln1293">        return -1;</a>
+<a name="ln1294">    }</a>
+<a name="ln1295"> </a>
+<a name="ln1296">    if (action_wrapper1-&gt;action-&gt;id &lt; action_wrapper2-&gt;action-&gt;id) {</a>
+<a name="ln1297">        return 1;</a>
+<a name="ln1298">    }</a>
+<a name="ln1299">    return 0;</a>
+<a name="ln1300">}</a>
+<a name="ln1301"> </a>
+<a name="ln1302">static gboolean</a>
+<a name="ln1303">check_dump_input(int last_action, action_t * action, action_wrapper_t * wrapper)</a>
+<a name="ln1304">{</a>
+<a name="ln1305">    int type = wrapper-&gt;type;</a>
+<a name="ln1306"> </a>
+<a name="ln1307">    if (wrapper-&gt;state == pe_link_dumped) {</a>
+<a name="ln1308">        return TRUE;</a>
+<a name="ln1309"> </a>
+<a name="ln1310">    } else if (wrapper-&gt;state == pe_link_dup) {</a>
+<a name="ln1311">        return FALSE;</a>
+<a name="ln1312">    }</a>
+<a name="ln1313"> </a>
+<a name="ln1314">    type &amp;= ~pe_order_implies_first_printed;</a>
+<a name="ln1315">    type &amp;= ~pe_order_implies_then_printed;</a>
+<a name="ln1316">    type &amp;= ~pe_order_optional;</a>
+<a name="ln1317"> </a>
+<a name="ln1318">    if (wrapper-&gt;action-&gt;node</a>
+<a name="ln1319">        &amp;&amp; action-&gt;rsc &amp;&amp; action-&gt;rsc-&gt;fillers</a>
+<a name="ln1320">        &amp;&amp; is_not_set(type, pe_order_preserve)</a>
+<a name="ln1321">        &amp;&amp; wrapper-&gt;action-&gt;node-&gt;details-&gt;remote_rsc</a>
+<a name="ln1322">        &amp;&amp; uber_parent(action-&gt;rsc) != uber_parent(wrapper-&gt;action-&gt;rsc)</a>
+<a name="ln1323">        ) {</a>
+<a name="ln1324">        /* This prevents user-defined ordering constraints between</a>
+<a name="ln1325">         * resources in remote nodes and the resources that</a>
+<a name="ln1326">         * define/represent a remote node.</a>
+<a name="ln1327">         *</a>
+<a name="ln1328">         * There is no known valid reason to allow this sort of thing</a>
+<a name="ln1329">         * but if one arises, we'd need to change the</a>
+<a name="ln1330">         * action-&gt;rsc-&gt;fillers clause to be more specific, possibly</a>
+<a name="ln1331">         * to check that it contained wrapper-&gt;action-&gt;rsc</a>
+<a name="ln1332">         */</a>
+<a name="ln1333">        crm_warn(&quot;Invalid ordering constraint between %s and %s&quot;,</a>
+<a name="ln1334">                 wrapper-&gt;action-&gt;rsc-&gt;id, action-&gt;rsc-&gt;id);</a>
+<a name="ln1335">        wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1336">        return FALSE;</a>
+<a name="ln1337">    }</a>
+<a name="ln1338"> </a>
+<a name="ln1339">    if (last_action == wrapper-&gt;action-&gt;id) {</a>
+<a name="ln1340">        crm_trace(&quot;Input (%d) %s duplicated for %s&quot;,</a>
+<a name="ln1341">                  wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1342">        wrapper-&gt;state = pe_link_dup;</a>
+<a name="ln1343">        return FALSE;</a>
+<a name="ln1344"> </a>
+<a name="ln1345">    } else if (wrapper-&gt;type == pe_order_none) {</a>
+<a name="ln1346">        crm_trace(&quot;Input (%d) %s suppressed for %s&quot;,</a>
+<a name="ln1347">                  wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1348">        return FALSE;</a>
+<a name="ln1349"> </a>
+<a name="ln1350">    } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_runnable) == FALSE</a>
+<a name="ln1351">               &amp;&amp; type == pe_order_none &amp;&amp; safe_str_neq(wrapper-&gt;action-&gt;uuid, CRM_OP_PROBED)) {</a>
+<a name="ln1352">        crm_trace(&quot;Input (%d) %s optional (ordering) for %s&quot;,</a>
+<a name="ln1353">                  wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1354">        return FALSE;</a>
+<a name="ln1355"> </a>
+<a name="ln1356">    } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_runnable) == FALSE</a>
+<a name="ln1357">               &amp;&amp; is_set(type, pe_order_one_or_more)) {</a>
+<a name="ln1358">        crm_trace(&quot;Input (%d) %s optional (one-or-more) for %s&quot;,</a>
+<a name="ln1359">                  wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1360">        return FALSE;</a>
+<a name="ln1361"> </a>
+<a name="ln1362">    } else if (is_set(action-&gt;flags, pe_action_pseudo)</a>
+<a name="ln1363">               &amp;&amp; (wrapper-&gt;type &amp; pe_order_stonith_stop)) {</a>
+<a name="ln1364">        crm_trace(&quot;Input (%d) %s suppressed for %s&quot;,</a>
+<a name="ln1365">                  wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1366">        return FALSE;</a>
+<a name="ln1367"> </a>
+<a name="ln1368">    } else if ((wrapper-&gt;type &amp; pe_order_implies_first_migratable) &amp;&amp; (is_set(wrapper-&gt;action-&gt;flags, pe_action_runnable) == FALSE)) {</a>
+<a name="ln1369">        return FALSE;</a>
+<a name="ln1370"> </a>
+<a name="ln1371">    } else if ((wrapper-&gt;type &amp; pe_order_apply_first_non_migratable)</a>
+<a name="ln1372">                &amp;&amp; (is_set(wrapper-&gt;action-&gt;flags, pe_action_migrate_runnable))) {</a>
+<a name="ln1373">        return FALSE;</a>
+<a name="ln1374"> </a>
+<a name="ln1375">    } else if ((wrapper-&gt;type == pe_order_optional)</a>
+<a name="ln1376">               &amp;&amp; crm_ends_with(wrapper-&gt;action-&gt;uuid, &quot;_stop_0&quot;)</a>
+<a name="ln1377">               &amp;&amp; is_set(wrapper-&gt;action-&gt;flags, pe_action_migrate_runnable)) {</a>
+<a name="ln1378"> </a>
+<a name="ln1379">        /* for optional only ordering, ordering is not preserved for</a>
+<a name="ln1380">         * a stop action that is actually involved with a migration. */</a>
+<a name="ln1381">        return FALSE;</a>
+<a name="ln1382"> </a>
+<a name="ln1383">    } else if (wrapper-&gt;type == pe_order_load) {</a>
+<a name="ln1384">        crm_trace(&quot;check load filter %s.%s -&gt; %s.%s&quot;,</a>
+<a name="ln1385">                  wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1386">                  wrapper-&gt;action-&gt;node ? wrapper-&gt;action-&gt;node-&gt;details-&gt;uname : &quot;&quot;, action-&gt;uuid,</a>
+<a name="ln1387">                  action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;);</a>
+<a name="ln1388"> </a>
+<a name="ln1389">        if (action-&gt;rsc &amp;&amp; safe_str_eq(action-&gt;task, RSC_MIGRATE)) {</a>
+<a name="ln1390">            /* Remove the orders like the following if not relevant:</a>
+<a name="ln1391">             *     &quot;load_stopped_node2&quot; -&gt; &quot;rscA_migrate_to node1&quot;</a>
+<a name="ln1392">             * which were created also from: pengine/native.c: MigrateRsc()</a>
+<a name="ln1393">             *     order_actions(other, then, other_w-&gt;type);</a>
+<a name="ln1394">             */</a>
+<a name="ln1395"> </a>
+<a name="ln1396">            /* For migrate_to ops, we care about where it has been</a>
+<a name="ln1397">             * allocated to, not where the action will be executed</a>
+<a name="ln1398">             */</a>
+<a name="ln1399">            if (wrapper-&gt;action-&gt;node == NULL || action-&gt;rsc-&gt;allocated_to == NULL</a>
+<a name="ln1400">                || wrapper-&gt;action-&gt;node-&gt;details != action-&gt;rsc-&gt;allocated_to-&gt;details) {</a>
+<a name="ln1401">                /* Check if the actions are for the same node, ignore otherwise */</a>
+<a name="ln1402">                crm_trace(&quot;load filter - migrate&quot;);</a>
+<a name="ln1403">                wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1404">                return FALSE;</a>
+<a name="ln1405">            }</a>
+<a name="ln1406"> </a>
+<a name="ln1407">        } else if (wrapper-&gt;action-&gt;node == NULL || action-&gt;node == NULL</a>
+<a name="ln1408">                   || wrapper-&gt;action-&gt;node-&gt;details != action-&gt;node-&gt;details) {</a>
+<a name="ln1409">            /* Check if the actions are for the same node, ignore otherwise */</a>
+<a name="ln1410">            crm_trace(&quot;load filter - node&quot;);</a>
+<a name="ln1411">            wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1412">            return FALSE;</a>
+<a name="ln1413"> </a>
+<a name="ln1414">        } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_optional)) {</a>
+<a name="ln1415">            /* Check if the pre-req is optional, ignore if so */</a>
+<a name="ln1416">            crm_trace(&quot;load filter - optional&quot;);</a>
+<a name="ln1417">            wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1418">            return FALSE;</a>
+<a name="ln1419">        }</a>
+<a name="ln1420"> </a>
+<a name="ln1421">    } else if (wrapper-&gt;type == pe_order_anti_colocation) {</a>
+<a name="ln1422">        crm_trace(&quot;check anti-colocation filter %s.%s -&gt; %s.%s&quot;,</a>
+<a name="ln1423">                  wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1424">                  wrapper-&gt;action-&gt;node ? wrapper-&gt;action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1425">                  action-&gt;uuid,</a>
+<a name="ln1426">                  action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;);</a>
+<a name="ln1427"> </a>
+<a name="ln1428">        if (wrapper-&gt;action-&gt;node &amp;&amp; action-&gt;node</a>
+<a name="ln1429">            &amp;&amp; wrapper-&gt;action-&gt;node-&gt;details != action-&gt;node-&gt;details) {</a>
+<a name="ln1430">            /* Check if the actions are for the same node, ignore otherwise */</a>
+<a name="ln1431">            crm_trace(&quot;anti-colocation filter - node&quot;);</a>
+<a name="ln1432">            wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1433">            return FALSE;</a>
+<a name="ln1434"> </a>
+<a name="ln1435">        } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_optional)) {</a>
+<a name="ln1436">            /* Check if the pre-req is optional, ignore if so */</a>
+<a name="ln1437">            crm_trace(&quot;anti-colocation filter - optional&quot;);</a>
+<a name="ln1438">            wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1439">            return FALSE;</a>
+<a name="ln1440">        }</a>
+<a name="ln1441"> </a>
+<a name="ln1442">    } else if (wrapper-&gt;action-&gt;rsc</a>
+<a name="ln1443">               &amp;&amp; wrapper-&gt;action-&gt;rsc != action-&gt;rsc</a>
+<a name="ln1444">               &amp;&amp; is_set(wrapper-&gt;action-&gt;rsc-&gt;flags, pe_rsc_failed)</a>
+<a name="ln1445">               &amp;&amp; is_not_set(wrapper-&gt;action-&gt;rsc-&gt;flags, pe_rsc_managed)</a>
+<a name="ln1446">               &amp;&amp; crm_ends_with(wrapper-&gt;action-&gt;uuid, &quot;_stop_0&quot;)</a>
+<a name="ln1447">               &amp;&amp; action-&gt;rsc &amp;&amp; pe_rsc_is_clone(action-&gt;rsc)) {</a>
+<a name="ln1448">        crm_warn(&quot;Ignoring requirement that %s complete before %s:&quot;</a>
+<a name="ln1449">                 &quot; unmanaged failed resources cannot prevent clone shutdown&quot;,</a>
+<a name="ln1450">                 wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1451">        return FALSE;</a>
+<a name="ln1452"> </a>
+<a name="ln1453">    } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_dumped)</a>
+<a name="ln1454">               || should_dump_action(wrapper-&gt;action)) {</a>
+<a name="ln1455">        crm_trace(&quot;Input (%d) %s should be dumped for %s&quot;, wrapper-&gt;action-&gt;id,</a>
+<a name="ln1456">                  wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1457">        goto dump;</a>
+<a name="ln1458"> </a>
+<a name="ln1459">#if 0</a>
+<a name="ln1460">    } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_runnable)</a>
+<a name="ln1461">               &amp;&amp; is_set(wrapper-&gt;action-&gt;flags, pe_action_pseudo)</a>
+<a name="ln1462">               &amp;&amp; wrapper-&gt;action-&gt;rsc-&gt;variant != pe_native) {</a>
+<a name="ln1463">        crm_crit(&quot;Input (%d) %s should be dumped for %s&quot;,</a>
+<a name="ln1464">                 wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1465">        goto dump;</a>
+<a name="ln1466">#endif</a>
+<a name="ln1467">    } else if (is_set(wrapper-&gt;action-&gt;flags, pe_action_optional) == TRUE</a>
+<a name="ln1468">               &amp;&amp; is_set(wrapper-&gt;action-&gt;flags, pe_action_print_always) == FALSE) {</a>
+<a name="ln1469">        crm_trace(&quot;Input (%d) %s optional for %s&quot;, wrapper-&gt;action-&gt;id,</a>
+<a name="ln1470">                  wrapper-&gt;action-&gt;uuid, action-&gt;uuid);</a>
+<a name="ln1471">        crm_trace(&quot;Input (%d) %s n=%p p=%d r=%d o=%d a=%d f=0x%.6x&quot;,</a>
+<a name="ln1472">                  wrapper-&gt;action-&gt;id, wrapper-&gt;action-&gt;uuid, wrapper-&gt;action-&gt;node,</a>
+<a name="ln1473">                  is_set(wrapper-&gt;action-&gt;flags, pe_action_pseudo),</a>
+<a name="ln1474">                  is_set(wrapper-&gt;action-&gt;flags, pe_action_runnable),</a>
+<a name="ln1475">                  is_set(wrapper-&gt;action-&gt;flags, pe_action_optional),</a>
+<a name="ln1476">                  is_set(wrapper-&gt;action-&gt;flags, pe_action_print_always), wrapper-&gt;type);</a>
+<a name="ln1477">        return FALSE;</a>
+<a name="ln1478"> </a>
+<a name="ln1479">    }</a>
+<a name="ln1480"> </a>
+<a name="ln1481">  dump:</a>
+<a name="ln1482">    return TRUE;</a>
+<a name="ln1483">}</a>
+<a name="ln1484"> </a>
+<a name="ln1485">static gboolean</a>
+<a name="ln1486">graph_has_loop(action_t * init_action, action_t * action, action_wrapper_t * wrapper)</a>
+<a name="ln1487">{</a>
+<a name="ln1488">    GListPtr lpc = NULL;</a>
+<a name="ln1489">    gboolean has_loop = FALSE;</a>
+<a name="ln1490"> </a>
+<a name="ln1491">    if (is_set(wrapper-&gt;action-&gt;flags, pe_action_tracking)) {</a>
+<a name="ln1492">        crm_trace(&quot;Breaking tracking loop: %s.%s -&gt; %s.%s (0x%.6x)&quot;,</a>
+<a name="ln1493">                  wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1494">                  wrapper-&gt;action-&gt;node ? wrapper-&gt;action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1495">                  action-&gt;uuid,</a>
+<a name="ln1496">                  action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1497">                  wrapper-&gt;type);</a>
+<a name="ln1498">        return FALSE;</a>
+<a name="ln1499">    }</a>
+<a name="ln1500"> </a>
+<a name="ln1501">    if (check_dump_input(-1, action, wrapper) == FALSE) {</a>
+<a name="ln1502">        return FALSE;</a>
+<a name="ln1503">    }</a>
+<a name="ln1504"> </a>
+<a name="ln1505">    /* If there's any order like:</a>
+<a name="ln1506">     * &quot;rscB_stop node2&quot;-&gt; &quot;load_stopped_node2&quot; -&gt; &quot;rscA_migrate_to node1&quot;</a>
+<a name="ln1507">     * rscA is being migrated from node1 to node2,</a>
+<a name="ln1508">     * while rscB is being migrated from node2 to node1.</a>
+<a name="ln1509">     * There will be potential graph loop.</a>
+<a name="ln1510">     * Break the order &quot;load_stopped_node2&quot; -&gt; &quot;rscA_migrate_to node1&quot;.</a>
+<a name="ln1511">     */</a>
+<a name="ln1512"> </a>
+<a name="ln1513">    crm_trace(&quot;Checking graph loop: %s.%s -&gt; %s.%s (0x%.6x)&quot;,</a>
+<a name="ln1514">              wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1515">              wrapper-&gt;action-&gt;node ? wrapper-&gt;action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1516">              action-&gt;uuid,</a>
+<a name="ln1517">              action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1518">              wrapper-&gt;type);</a>
+<a name="ln1519"> </a>
+<a name="ln1520">    if (wrapper-&gt;action == init_action) {</a>
+<a name="ln1521">        crm_debug(&quot;Found graph loop: %s.%s -&gt;...-&gt; %s.%s&quot;,</a>
+<a name="ln1522">                  action-&gt;uuid,</a>
+<a name="ln1523">                  action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1524">                  init_action-&gt;uuid,</a>
+<a name="ln1525">                  init_action-&gt;node ? init_action-&gt;node-&gt;details-&gt;uname : &quot;&quot;);</a>
+<a name="ln1526"> </a>
+<a name="ln1527">        return TRUE;</a>
+<a name="ln1528">    }</a>
+<a name="ln1529"> </a>
+<a name="ln1530">    set_bit(wrapper-&gt;action-&gt;flags, pe_action_tracking);</a>
+<a name="ln1531"> </a>
+<a name="ln1532">    for (lpc = wrapper-&gt;action-&gt;actions_before; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln1533">        action_wrapper_t *wrapper_before = (action_wrapper_t *) lpc-&gt;data;</a>
+<a name="ln1534"> </a>
+<a name="ln1535">        if (graph_has_loop(init_action, wrapper-&gt;action, wrapper_before)) {</a>
+<a name="ln1536">            has_loop = TRUE;</a>
+<a name="ln1537">            goto done;</a>
+<a name="ln1538">        }</a>
+<a name="ln1539">    }</a>
+<a name="ln1540"> </a>
+<a name="ln1541">done:</a>
+<a name="ln1542">    clear_bit(wrapper-&gt;action-&gt;flags, pe_action_tracking);</a>
+<a name="ln1543"> </a>
+<a name="ln1544">    return has_loop;</a>
+<a name="ln1545">}</a>
+<a name="ln1546"> </a>
+<a name="ln1547">static gboolean</a>
+<a name="ln1548">should_dump_input(int last_action, action_t * action, action_wrapper_t * wrapper)</a>
+<a name="ln1549">{</a>
+<a name="ln1550">    wrapper-&gt;state = pe_link_not_dumped;</a>
+<a name="ln1551"> </a>
+<a name="ln1552">    if (check_dump_input(last_action, action, wrapper) == FALSE) {</a>
+<a name="ln1553">        return FALSE;</a>
+<a name="ln1554">    }</a>
+<a name="ln1555"> </a>
+<a name="ln1556">    if (wrapper-&gt;type == pe_order_load</a>
+<a name="ln1557">        &amp;&amp; action-&gt;rsc</a>
+<a name="ln1558">        &amp;&amp; safe_str_eq(action-&gt;task, RSC_MIGRATE)) {</a>
+<a name="ln1559">        crm_trace(&quot;Checking graph loop - load migrate: %s.%s -&gt; %s.%s&quot;,</a>
+<a name="ln1560">                  wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1561">                  wrapper-&gt;action-&gt;node ? wrapper-&gt;action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1562">                  action-&gt;uuid,</a>
+<a name="ln1563">                  action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;);</a>
+<a name="ln1564"> </a>
+<a name="ln1565">        if (graph_has_loop(action, action, wrapper)) {</a>
+<a name="ln1566">            /* Remove the orders like the following if they are introducing any graph loops:</a>
+<a name="ln1567">             *     &quot;load_stopped_node2&quot; -&gt; &quot;rscA_migrate_to node1&quot;</a>
+<a name="ln1568">             * which were created also from: pengine/native.c: MigrateRsc()</a>
+<a name="ln1569">             *     order_actions(other, then, other_w-&gt;type);</a>
+<a name="ln1570">             */</a>
+<a name="ln1571">            crm_debug(&quot;Breaking graph loop - load migrate: %s.%s -&gt; %s.%s&quot;,</a>
+<a name="ln1572">                      wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1573">                      wrapper-&gt;action-&gt;node ? wrapper-&gt;action-&gt;node-&gt;details-&gt;uname : &quot;&quot;,</a>
+<a name="ln1574">                      action-&gt;uuid,</a>
+<a name="ln1575">                      action-&gt;node ? action-&gt;node-&gt;details-&gt;uname : &quot;&quot;);</a>
+<a name="ln1576"> </a>
+<a name="ln1577">            wrapper-&gt;type = pe_order_none;</a>
+<a name="ln1578">            return FALSE;</a>
+<a name="ln1579">        }</a>
+<a name="ln1580">    }</a>
+<a name="ln1581"> </a>
+<a name="ln1582">    crm_trace(&quot;Input (%d) %s n=%p p=%d r=%d o=%d a=%d f=0x%.6x dumped for %s&quot;,</a>
+<a name="ln1583">              wrapper-&gt;action-&gt;id,</a>
+<a name="ln1584">              wrapper-&gt;action-&gt;uuid,</a>
+<a name="ln1585">              wrapper-&gt;action-&gt;node,</a>
+<a name="ln1586">              is_set(wrapper-&gt;action-&gt;flags, pe_action_pseudo),</a>
+<a name="ln1587">              is_set(wrapper-&gt;action-&gt;flags, pe_action_runnable),</a>
+<a name="ln1588">              is_set(wrapper-&gt;action-&gt;flags, pe_action_optional),</a>
+<a name="ln1589">              is_set(wrapper-&gt;action-&gt;flags, pe_action_print_always), wrapper-&gt;type, action-&gt;uuid);</a>
+<a name="ln1590">    return TRUE;</a>
+<a name="ln1591">}</a>
+<a name="ln1592"> </a>
+<a name="ln1593">void</a>
+<a name="ln1594">graph_element_from_action(action_t * action, pe_working_set_t * data_set)</a>
+<a name="ln1595">{</a>
+<a name="ln1596">    GListPtr lpc = NULL;</a>
+<a name="ln1597">    int last_action = -1;</a>
+<a name="ln1598">    int synapse_priority = 0;</a>
+<a name="ln1599">    xmlNode *syn = NULL;</a>
+<a name="ln1600">    xmlNode *set = NULL;</a>
+<a name="ln1601">    xmlNode *in = NULL;</a>
+<a name="ln1602">    xmlNode *input = NULL;</a>
+<a name="ln1603">    xmlNode *xml_action = NULL;</a>
+<a name="ln1604"> </a>
+<a name="ln1605">    if (should_dump_action(action) == FALSE) {</a>
+<a name="ln1606">        return;</a>
+<a name="ln1607">    }</a>
+<a name="ln1608"> </a>
+<a name="ln1609">    set_bit(action-&gt;flags, pe_action_dumped);</a>
+<a name="ln1610"> </a>
+<a name="ln1611">    syn = create_xml_node(data_set-&gt;graph, &quot;synapse&quot;);</a>
+<a name="ln1612">    set = create_xml_node(syn, &quot;action_set&quot;);</a>
+<a name="ln1613">    in = create_xml_node(syn, &quot;inputs&quot;);</a>
+<a name="ln1614"> </a>
+<a name="ln1615">    crm_xml_add_int(syn, XML_ATTR_ID, data_set-&gt;num_synapse);</a>
+<a name="ln1616">    data_set-&gt;num_synapse++;</a>
+<a name="ln1617"> </a>
+<a name="ln1618">    if (action-&gt;rsc != NULL) {</a>
+<a name="ln1619">        synapse_priority = action-&gt;rsc-&gt;priority;</a>
+<a name="ln1620">    }</a>
+<a name="ln1621">    if (action-&gt;priority &gt; synapse_priority) {</a>
+<a name="ln1622">        synapse_priority = action-&gt;priority;</a>
+<a name="ln1623">    }</a>
+<a name="ln1624">    if (synapse_priority &gt; 0) {</a>
+<a name="ln1625">        crm_xml_add_int(syn, XML_CIB_ATTR_PRIORITY, synapse_priority);</a>
+<a name="ln1626">    }</a>
+<a name="ln1627"> </a>
+<a name="ln1628">    xml_action = action2xml(action, FALSE, data_set);</a>
+<a name="ln1629">    add_node_nocopy(set, crm_element_name(xml_action), xml_action);</a>
+<a name="ln1630"> </a>
+<a name="ln1631">    action-&gt;actions_before = g_list_sort(action-&gt;actions_before, sort_action_id);</a>
+<a name="ln1632"> </a>
+<a name="ln1633">    for (lpc = action-&gt;actions_before; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln1634">        action_wrapper_t *wrapper = (action_wrapper_t *) lpc-&gt;data;</a>
+<a name="ln1635"> </a>
+<a name="ln1636">        if (should_dump_input(last_action, action, wrapper) == FALSE) {</a>
+<a name="ln1637">            continue;</a>
+<a name="ln1638">        }</a>
+<a name="ln1639"> </a>
+<a name="ln1640">        wrapper-&gt;state = pe_link_dumped;</a>
+<a name="ln1641">        CRM_CHECK(last_action &lt; wrapper-&gt;action-&gt;id,;</a>
+<a name="ln1642">            );</a>
+<a name="ln1643">        last_action = wrapper-&gt;action-&gt;id;</a>
+<a name="ln1644">        input = create_xml_node(in, &quot;trigger&quot;);</a>
+<a name="ln1645"> </a>
+<a name="ln1646">        xml_action = action2xml(wrapper-&gt;action, TRUE, data_set);</a>
+<a name="ln1647">        add_node_nocopy(input, crm_element_name(xml_action), xml_action);</a>
+<a name="ln1648">    }</a>
+<a name="ln1649">}</a>
+
+</code></pre>
+<div class="balloon" rel="543"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V646/" target="_blank">V646</a> Consider inspecting the application's logic. It's possible that 'else' keyword is missing.</p></div>
+<div class="balloon" rel="1017"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 1017, 1017.</p></div>
+<div class="balloon" rel="1018"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 1018, 1018.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

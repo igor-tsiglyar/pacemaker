@@ -1,0 +1,989 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004-2016 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;stdio.h&gt;</a>
+<a name="ln26">#include &lt;string.h&gt;</a>
+<a name="ln27">#include &lt;dirent.h&gt;</a>
+<a name="ln28">#include &lt;errno.h&gt;</a>
+<a name="ln29">#include &lt;math.h&gt;</a>
+<a name="ln30">#include &lt;sys/stat.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#if HAVE_LIBXML2</a>
+<a name="ln33">#  include &lt;libxml/relaxng.h&gt;</a>
+<a name="ln34">#endif</a>
+<a name="ln35"> </a>
+<a name="ln36">#if HAVE_LIBXSLT</a>
+<a name="ln37">#  include &lt;libxslt/xslt.h&gt;</a>
+<a name="ln38">#  include &lt;libxslt/transform.h&gt;</a>
+<a name="ln39">#endif</a>
+<a name="ln40"> </a>
+<a name="ln41">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln42">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln43"> </a>
+<a name="ln44">typedef struct {</a>
+<a name="ln45">    xmlRelaxNGPtr rng;</a>
+<a name="ln46">    xmlRelaxNGValidCtxtPtr valid;</a>
+<a name="ln47">    xmlRelaxNGParserCtxtPtr parser;</a>
+<a name="ln48">} relaxng_ctx_cache_t;</a>
+<a name="ln49"> </a>
+<a name="ln50">struct schema_s {</a>
+<a name="ln51">    int type;</a>
+<a name="ln52">    float version;</a>
+<a name="ln53">    char *name;</a>
+<a name="ln54">    char *location;</a>
+<a name="ln55">    char *transform;</a>
+<a name="ln56">    int after_transform;</a>
+<a name="ln57">    void *cache;</a>
+<a name="ln58">};</a>
+<a name="ln59"> </a>
+<a name="ln60">static struct schema_s *known_schemas = NULL;</a>
+<a name="ln61">static int xml_schema_max = 0;</a>
+<a name="ln62"> </a>
+<a name="ln63">void</a>
+<a name="ln64">xml_log(int priority, const char *fmt, ...)</a>
+<a name="ln65">G_GNUC_PRINTF(2, 3);</a>
+<a name="ln66"> </a>
+<a name="ln67">void</a>
+<a name="ln68">xml_log(int priority, const char *fmt, ...)</a>
+<a name="ln69">{</a>
+<a name="ln70">    va_list ap;</a>
+<a name="ln71"> </a>
+<a name="ln72">    va_start(ap, fmt);</a>
+<a name="ln73">    qb_log_from_external_source_va(__FUNCTION__, __FILE__, fmt, priority,</a>
+<a name="ln74">                                   __LINE__, 0, ap);</a>
+<a name="ln75">    va_end(ap);</a>
+<a name="ln76">}</a>
+<a name="ln77"> </a>
+<a name="ln78">static int</a>
+<a name="ln79">xml_latest_schema_index(void)</a>
+<a name="ln80">{</a>
+<a name="ln81">    return xml_schema_max - 4;</a>
+<a name="ln82">}</a>
+<a name="ln83"> </a>
+<a name="ln84">static int</a>
+<a name="ln85">xml_minimum_schema_index(void)</a>
+<a name="ln86">{</a>
+<a name="ln87">    static int best = 0;</a>
+<a name="ln88">    if (best == 0) {</a>
+<a name="ln89">        int lpc = 0;</a>
+<a name="ln90">        float target = 0.0;</a>
+<a name="ln91"> </a>
+<a name="ln92">        best = xml_latest_schema_index();</a>
+<a name="ln93">        target = floor(known_schemas[best].version);</a>
+<a name="ln94"> </a>
+<a name="ln95">        for (lpc = best; lpc &gt; 0; lpc--) {</a>
+<a name="ln96">            if (known_schemas[lpc].version &lt; target) {</a>
+<a name="ln97">                return best;</a>
+<a name="ln98">            } else {</a>
+<a name="ln99">                best = lpc;</a>
+<a name="ln100">            }</a>
+<a name="ln101">        }</a>
+<a name="ln102">        best = xml_latest_schema_index();</a>
+<a name="ln103">    }</a>
+<a name="ln104">    return best;</a>
+<a name="ln105">}</a>
+<a name="ln106"> </a>
+<a name="ln107">const char *</a>
+<a name="ln108">xml_latest_schema(void)</a>
+<a name="ln109">{</a>
+<a name="ln110">    return get_schema_name(xml_latest_schema_index());</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">static const char *</a>
+<a name="ln114">get_schema_root(void)</a>
+<a name="ln115">{</a>
+<a name="ln116">    static const char *base = NULL;</a>
+<a name="ln117"> </a>
+<a name="ln118">    if (base == NULL) {</a>
+<a name="ln119">        base = getenv(&quot;PCMK_schema_directory&quot;);</a>
+<a name="ln120">    }</a>
+<a name="ln121">    if (base == NULL || strlen(base) == 0) {</a>
+<a name="ln122">        base = CRM_DTD_DIRECTORY;</a>
+<a name="ln123">    }</a>
+<a name="ln124">    return base;</a>
+<a name="ln125">}</a>
+<a name="ln126"> </a>
+<a name="ln127">static char *</a>
+<a name="ln128">get_schema_path(const char *name, const char *file)</a>
+<a name="ln129">{</a>
+<a name="ln130">    const char *base = get_schema_root();</a>
+<a name="ln131"> </a>
+<a name="ln132">    if (file) {</a>
+<a name="ln133">        return crm_strdup_printf(&quot;%s/%s&quot;, base, file);</a>
+<a name="ln134">    }</a>
+<a name="ln135">    return crm_strdup_printf(&quot;%s/%s.rng&quot;, base, name);</a>
+<a name="ln136">}</a>
+<a name="ln137"> </a>
+<a name="ln138">static int</a>
+<a name="ln139">schema_filter(const struct dirent *a)</a>
+<a name="ln140">{</a>
+<a name="ln141">    int rc = 0;</a>
+<a name="ln142">    float version = 0;</a>
+<a name="ln143"> </a>
+<a name="ln144">    if (strstr(a-&gt;d_name, &quot;pacemaker-&quot;) != a-&gt;d_name) {</a>
+<a name="ln145">        /* crm_trace(&quot;%s - wrong prefix&quot;, a-&gt;d_name); */</a>
+<a name="ln146"> </a>
+<a name="ln147">    } else if (!crm_ends_with(a-&gt;d_name, &quot;.rng&quot;)) {</a>
+<a name="ln148">        /* crm_trace(&quot;%s - wrong suffix&quot;, a-&gt;d_name); */</a>
+<a name="ln149"> </a>
+<a name="ln150">    } else if (sscanf(a-&gt;d_name, &quot;pacemaker-%f.rng&quot;, &amp;version) == 0) {</a>
+<a name="ln151">        /* crm_trace(&quot;%s - wrong format&quot;, a-&gt;d_name); */</a>
+<a name="ln152"> </a>
+<a name="ln153">    } else if (strcmp(a-&gt;d_name, &quot;pacemaker-1.1.rng&quot;) == 0) {</a>
+<a name="ln154">        /* &quot;-1.1&quot; was used for what later became &quot;-next&quot; */</a>
+<a name="ln155">        /* crm_trace(&quot;%s - hack&quot;, a-&gt;d_name); */</a>
+<a name="ln156"> </a>
+<a name="ln157">    } else {</a>
+<a name="ln158">        /* crm_debug(&quot;%s - candidate&quot;, a-&gt;d_name); */</a>
+<a name="ln159">        rc = 1;</a>
+<a name="ln160">    }</a>
+<a name="ln161"> </a>
+<a name="ln162">    return rc;</a>
+<a name="ln163">}</a>
+<a name="ln164"> </a>
+<a name="ln165">static int</a>
+<a name="ln166">schema_sort(const struct dirent **a, const struct dirent **b)</a>
+<a name="ln167">{</a>
+<a name="ln168">    int rc = 0;</a>
+<a name="ln169">    float a_version = 0.0;</a>
+<a name="ln170">    float b_version = 0.0;</a>
+<a name="ln171"> </a>
+<a name="ln172">    sscanf(a[0]-&gt;d_name, &quot;pacemaker-%f.rng&quot;, &amp;a_version);</a>
+<a name="ln173">    sscanf(b[0]-&gt;d_name, &quot;pacemaker-%f.rng&quot;, &amp;b_version);</a>
+<a name="ln174"> </a>
+<a name="ln175">    if (a_version &gt; b_version) {</a>
+<a name="ln176">        rc = 1;</a>
+<a name="ln177">    } else if(a_version &lt; b_version) {</a>
+<a name="ln178">        rc = -1;</a>
+<a name="ln179">    }</a>
+<a name="ln180"> </a>
+<a name="ln181">    /* crm_trace(&quot;%s (%f) vs. %s (%f) : %d&quot;, a[0]-&gt;d_name, a_version, b[0]-&gt;d_name, b_version, rc); */</a>
+<a name="ln182">    return rc;</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">static void</a>
+<a name="ln186">__xml_schema_add(int type, float version, const char *name,</a>
+<a name="ln187">                 const char *location, const char *transform,</a>
+<a name="ln188">                 int after_transform)</a>
+<a name="ln189">{</a>
+<a name="ln190">    int last = xml_schema_max;</a>
+<a name="ln191"> </a>
+<a name="ln192">    xml_schema_max++;</a>
+<a name="ln193">    known_schemas = realloc_safe(known_schemas,</a>
+<a name="ln194">                                 xml_schema_max * sizeof(struct schema_s));</a>
+<a name="ln195">    CRM_ASSERT(known_schemas != NULL);</a>
+<a name="ln196">    memset(known_schemas+last, 0, sizeof(struct schema_s));</a>
+<a name="ln197">    known_schemas[last].type = type;</a>
+<a name="ln198">    known_schemas[last].after_transform = after_transform;</a>
+<a name="ln199"> </a>
+<a name="ln200">    if (version &gt; 0.0) {</a>
+<a name="ln201">        known_schemas[last].version = version;</a>
+<a name="ln202">        known_schemas[last].name = crm_strdup_printf(&quot;pacemaker-%.1f&quot;, version);</a>
+<a name="ln203">        known_schemas[last].location = crm_strdup_printf(&quot;%s.rng&quot;, known_schemas[last].name);</a>
+<a name="ln204"> </a>
+<a name="ln205">    } else {</a>
+<a name="ln206">        char dummy[1024];</a>
+<a name="ln207">        CRM_ASSERT(name);</a>
+<a name="ln208">        CRM_ASSERT(location);</a>
+<a name="ln209">        sscanf(name, &quot;%[^-]-%f&quot;, dummy, &amp;version);</a>
+<a name="ln210">        known_schemas[last].version = version;</a>
+<a name="ln211">        known_schemas[last].name = strdup(name);</a>
+<a name="ln212">        known_schemas[last].location = strdup(location);</a>
+<a name="ln213">    }</a>
+<a name="ln214"> </a>
+<a name="ln215">    if (transform) {</a>
+<a name="ln216">        known_schemas[last].transform = strdup(transform);</a>
+<a name="ln217">    }</a>
+<a name="ln218">    if (after_transform == 0) {</a>
+<a name="ln219">        after_transform = xml_schema_max;  /* upgrade is a one-way */</a>
+<a name="ln220">    }</a>
+<a name="ln221">    known_schemas[last].after_transform = after_transform;</a>
+<a name="ln222"> </a>
+<a name="ln223">    if (known_schemas[last].after_transform &lt; 0) {</a>
+<a name="ln224">        crm_debug(&quot;Added supported schema %d: %s (%s)&quot;,</a>
+<a name="ln225">                  last, known_schemas[last].name, known_schemas[last].location);</a>
+<a name="ln226"> </a>
+<a name="ln227">    } else if (known_schemas[last].transform) {</a>
+<a name="ln228">        crm_debug(&quot;Added supported schema %d: %s (%s upgrades to %d with %s)&quot;,</a>
+<a name="ln229">                  last, known_schemas[last].name, known_schemas[last].location,</a>
+<a name="ln230">                  known_schemas[last].after_transform,</a>
+<a name="ln231">                  known_schemas[last].transform);</a>
+<a name="ln232"> </a>
+<a name="ln233">    } else {</a>
+<a name="ln234">        crm_debug(&quot;Added supported schema %d: %s (%s upgrades to %d)&quot;,</a>
+<a name="ln235">                  last, known_schemas[last].name, known_schemas[last].location,</a>
+<a name="ln236">                  known_schemas[last].after_transform);</a>
+<a name="ln237">    }</a>
+<a name="ln238">}</a>
+<a name="ln239"> </a>
+<a name="ln240">/*!</a>
+<a name="ln241"> * \internal</a>
+<a name="ln242"> * \brief Load pacemaker schemas into cache</a>
+<a name="ln243"> */</a>
+<a name="ln244">void</a>
+<a name="ln245">crm_schema_init(void)</a>
+<a name="ln246">{</a>
+<a name="ln247">    int lpc, max;</a>
+<a name="ln248">    const char *base = get_schema_root();</a>
+<a name="ln249">    struct dirent **namelist = NULL;</a>
+<a name="ln250"> </a>
+<a name="ln251">    max = scandir(base, &amp;namelist, schema_filter, schema_sort);</a>
+<a name="ln252">    __xml_schema_add(1, 0.0, &quot;pacemaker-0.6&quot;, &quot;crm.dtd&quot;, &quot;upgrade06.xsl&quot;, 3);</a>
+<a name="ln253">    __xml_schema_add(1, 0.0, &quot;transitional-0.6&quot;, &quot;crm-transitional.dtd&quot;,</a>
+<a name="ln254">                     &quot;upgrade06.xsl&quot;, 3);</a>
+<a name="ln255">    __xml_schema_add(2, 0.0, &quot;pacemaker-0.7&quot;, &quot;pacemaker-1.0.rng&quot;, NULL, 0);</a>
+<a name="ln256"> </a>
+<a name="ln257">    if (max &lt; 0) {</a>
+<a name="ln258">        crm_notice(&quot;scandir(%s) failed: %s (%d)&quot;, base, strerror(errno), errno);</a>
+<a name="ln259"> </a>
+<a name="ln260">    } else {</a>
+<a name="ln261">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln262">            int next = 0;</a>
+<a name="ln263">            float version = 0.0;</a>
+<a name="ln264">            char *transform = NULL;</a>
+<a name="ln265"> </a>
+<a name="ln266">            sscanf(namelist[lpc]-&gt;d_name, &quot;pacemaker-%f.rng&quot;, &amp;version);</a>
+<a name="ln267">            if ((lpc + 1) &lt; max) {</a>
+<a name="ln268">                float next_version = 0.0;</a>
+<a name="ln269"> </a>
+<a name="ln270">                sscanf(namelist[lpc+1]-&gt;d_name, &quot;pacemaker-%f.rng&quot;,</a>
+<a name="ln271">                       &amp;next_version);</a>
+<a name="ln272"> </a>
+<a name="ln273">                if (floor(version) &lt; floor(next_version)) {</a>
+<a name="ln274">                    struct stat s;</a>
+<a name="ln275">                    char *xslt = NULL;</a>
+<a name="ln276"> </a>
+<a name="ln277">                    transform = crm_strdup_printf(&quot;upgrade-%.1f.xsl&quot;, version);</a>
+<a name="ln278">                    xslt = get_schema_path(NULL, transform);</a>
+<a name="ln279">                    if (stat(xslt, &amp;s) != 0) {</a>
+<a name="ln280">                        crm_err(&quot;Transform %s not found&quot;, xslt);</a>
+<a name="ln281">                        free(xslt);</a>
+<a name="ln282">                        __xml_schema_add(2, version, NULL, NULL, NULL, -1);</a>
+<a name="ln283">                        break;</a>
+<a name="ln284">                    } else {</a>
+<a name="ln285">                        free(xslt);</a>
+<a name="ln286">                    }</a>
+<a name="ln287">                }</a>
+<a name="ln288"> </a>
+<a name="ln289">            } else {</a>
+<a name="ln290">                next = -1;</a>
+<a name="ln291">            }</a>
+<a name="ln292">            __xml_schema_add(2, version, NULL, NULL, transform, next);</a>
+<a name="ln293">            free(namelist[lpc]);</a>
+<a name="ln294">            free(transform);</a>
+<a name="ln295">        }</a>
+<a name="ln296">    }</a>
+<a name="ln297"> </a>
+<a name="ln298">    /* 1.1 was the old name for -next */</a>
+<a name="ln299">    __xml_schema_add(2, 0.0, &quot;pacemaker-1.1&quot;, &quot;pacemaker-next.rng&quot;, NULL, 0);</a>
+<a name="ln300">    __xml_schema_add(2, 0.0, &quot;pacemaker-next&quot;, &quot;pacemaker-next.rng&quot;, NULL, -1);</a>
+<a name="ln301">    __xml_schema_add(0, 0.0, &quot;none&quot;, &quot;N/A&quot;, NULL, -1);</a>
+<a name="ln302">    free(namelist);</a>
+<a name="ln303">}</a>
+<a name="ln304"> </a>
+<a name="ln305">static gboolean</a>
+<a name="ln306">validate_with_dtd(xmlDocPtr doc, gboolean to_logs, const char *dtd_file)</a>
+<a name="ln307">{</a>
+<a name="ln308">    gboolean valid = TRUE;</a>
+<a name="ln309"> </a>
+<a name="ln310">    xmlDtdPtr dtd = NULL;</a>
+<a name="ln311">    xmlValidCtxtPtr cvp = NULL;</a>
+<a name="ln312"> </a>
+<a name="ln313">    CRM_CHECK(doc != NULL, return FALSE);</a>
+<a name="ln314">    CRM_CHECK(dtd_file != NULL, return FALSE);</a>
+<a name="ln315"> </a>
+<a name="ln316">    dtd = xmlParseDTD(NULL, (const xmlChar *)dtd_file);</a>
+<a name="ln317">    if (dtd == NULL) {</a>
+<a name="ln318">        crm_err(&quot;Could not locate/parse DTD: %s&quot;, dtd_file);</a>
+<a name="ln319">        return TRUE;</a>
+<a name="ln320">    }</a>
+<a name="ln321"> </a>
+<a name="ln322">    cvp = xmlNewValidCtxt();</a>
+<a name="ln323">    if (cvp) {</a>
+<a name="ln324">        if (to_logs) {</a>
+<a name="ln325">            cvp-&gt;userData = (void *)LOG_ERR;</a>
+<a name="ln326">            cvp-&gt;error = (xmlValidityErrorFunc) xml_log;</a>
+<a name="ln327">            cvp-&gt;warning = (xmlValidityWarningFunc) xml_log;</a>
+<a name="ln328">        } else {</a>
+<a name="ln329">            cvp-&gt;userData = (void *)stderr;</a>
+<a name="ln330">            cvp-&gt;error = (xmlValidityErrorFunc) fprintf;</a>
+<a name="ln331">            cvp-&gt;warning = (xmlValidityWarningFunc) fprintf;</a>
+<a name="ln332">        }</a>
+<a name="ln333"> </a>
+<a name="ln334">        if (!xmlValidateDtd(cvp, doc, dtd)) {</a>
+<a name="ln335">            valid = FALSE;</a>
+<a name="ln336">        }</a>
+<a name="ln337">        xmlFreeValidCtxt(cvp);</a>
+<a name="ln338"> </a>
+<a name="ln339">    } else {</a>
+<a name="ln340">        crm_err(&quot;Internal error: No valid context&quot;);</a>
+<a name="ln341">    }</a>
+<a name="ln342"> </a>
+<a name="ln343">    xmlFreeDtd(dtd);</a>
+<a name="ln344">    return valid;</a>
+<a name="ln345">}</a>
+<a name="ln346"> </a>
+<a name="ln347">#if 0</a>
+<a name="ln348">static void</a>
+<a name="ln349">relaxng_invalid_stderr(void *userData, xmlErrorPtr error)</a>
+<a name="ln350">{</a>
+<a name="ln351">    /*</a>
+<a name="ln352">       Structure xmlError</a>
+<a name="ln353">       struct _xmlError {</a>
+<a name="ln354">       int      domain  : What part of the library raised this er</a>
+<a name="ln355">       int      code    : The error code, e.g. an xmlParserError</a>
+<a name="ln356">       char *   message : human-readable informative error messag</a>
+<a name="ln357">       xmlErrorLevel    level   : how consequent is the error</a>
+<a name="ln358">       char *   file    : the filename</a>
+<a name="ln359">       int      line    : the line number if available</a>
+<a name="ln360">       char *   str1    : extra string information</a>
+<a name="ln361">       char *   str2    : extra string information</a>
+<a name="ln362">       char *   str3    : extra string information</a>
+<a name="ln363">       int      int1    : extra number information</a>
+<a name="ln364">       int      int2    : column number of the error or 0 if N/A</a>
+<a name="ln365">       void *   ctxt    : the parser context if available</a>
+<a name="ln366">       void *   node    : the node in the tree</a>
+<a name="ln367">       }</a>
+<a name="ln368">     */</a>
+<a name="ln369">    crm_err(&quot;Structured error: line=%d, level=%d %s&quot;, error-&gt;line, error-&gt;level, error-&gt;message);</a>
+<a name="ln370">}</a>
+<a name="ln371">#endif</a>
+<a name="ln372"> </a>
+<a name="ln373">static gboolean</a>
+<a name="ln374">validate_with_relaxng(xmlDocPtr doc, gboolean to_logs, const char *relaxng_file,</a>
+<a name="ln375">                      relaxng_ctx_cache_t **cached_ctx)</a>
+<a name="ln376">{</a>
+<a name="ln377">    int rc = 0;</a>
+<a name="ln378">    gboolean valid = TRUE;</a>
+<a name="ln379">    relaxng_ctx_cache_t *ctx = NULL;</a>
+<a name="ln380"> </a>
+<a name="ln381">    CRM_CHECK(doc != NULL, return FALSE);</a>
+<a name="ln382">    CRM_CHECK(relaxng_file != NULL, return FALSE);</a>
+<a name="ln383"> </a>
+<a name="ln384">    if (cached_ctx &amp;&amp; *cached_ctx) {</a>
+<a name="ln385">        ctx = *cached_ctx;</a>
+<a name="ln386"> </a>
+<a name="ln387">    } else {</a>
+<a name="ln388">        crm_info(&quot;Creating RNG parser context&quot;);</a>
+<a name="ln389">        ctx = calloc(1, sizeof(relaxng_ctx_cache_t));</a>
+<a name="ln390"> </a>
+<a name="ln391">        xmlLoadExtDtdDefaultValue = 1;</a>
+<a name="ln392">        ctx-&gt;parser = xmlRelaxNGNewParserCtxt(relaxng_file);</a>
+<a name="ln393">        CRM_CHECK(ctx-&gt;parser != NULL, goto cleanup);</a>
+<a name="ln394"> </a>
+<a name="ln395">        if (to_logs) {</a>
+<a name="ln396">            xmlRelaxNGSetParserErrors(ctx-&gt;parser,</a>
+<a name="ln397">                                      (xmlRelaxNGValidityErrorFunc) xml_log,</a>
+<a name="ln398">                                      (xmlRelaxNGValidityWarningFunc) xml_log,</a>
+<a name="ln399">                                      GUINT_TO_POINTER(LOG_ERR));</a>
+<a name="ln400">        } else {</a>
+<a name="ln401">            xmlRelaxNGSetParserErrors(ctx-&gt;parser,</a>
+<a name="ln402">                                      (xmlRelaxNGValidityErrorFunc) fprintf,</a>
+<a name="ln403">                                      (xmlRelaxNGValidityWarningFunc) fprintf,</a>
+<a name="ln404">                                      stderr);</a>
+<a name="ln405">        }</a>
+<a name="ln406"> </a>
+<a name="ln407">        ctx-&gt;rng = xmlRelaxNGParse(ctx-&gt;parser);</a>
+<a name="ln408">        CRM_CHECK(ctx-&gt;rng != NULL,</a>
+<a name="ln409">                  crm_err(&quot;Could not find/parse %s&quot;, relaxng_file);</a>
+<a name="ln410">                  goto cleanup);</a>
+<a name="ln411"> </a>
+<a name="ln412">        ctx-&gt;valid = xmlRelaxNGNewValidCtxt(ctx-&gt;rng);</a>
+<a name="ln413">        CRM_CHECK(ctx-&gt;valid != NULL, goto cleanup);</a>
+<a name="ln414"> </a>
+<a name="ln415">        if (to_logs) {</a>
+<a name="ln416">            xmlRelaxNGSetValidErrors(ctx-&gt;valid,</a>
+<a name="ln417">                                     (xmlRelaxNGValidityErrorFunc) xml_log,</a>
+<a name="ln418">                                     (xmlRelaxNGValidityWarningFunc) xml_log,</a>
+<a name="ln419">                                     GUINT_TO_POINTER(LOG_ERR));</a>
+<a name="ln420">        } else {</a>
+<a name="ln421">            xmlRelaxNGSetValidErrors(ctx-&gt;valid,</a>
+<a name="ln422">                                     (xmlRelaxNGValidityErrorFunc) fprintf,</a>
+<a name="ln423">                                     (xmlRelaxNGValidityWarningFunc) fprintf,</a>
+<a name="ln424">                                     stderr);</a>
+<a name="ln425">        }</a>
+<a name="ln426">    }</a>
+<a name="ln427"> </a>
+<a name="ln428">    /* xmlRelaxNGSetValidStructuredErrors( */</a>
+<a name="ln429">    /*  valid, relaxng_invalid_stderr, valid); */</a>
+<a name="ln430"> </a>
+<a name="ln431">    xmlLineNumbersDefault(1);</a>
+<a name="ln432">    rc = xmlRelaxNGValidateDoc(ctx-&gt;valid, doc);</a>
+<a name="ln433">    if (rc &gt; 0) {</a>
+<a name="ln434">        valid = FALSE;</a>
+<a name="ln435"> </a>
+<a name="ln436">    } else if (rc &lt; 0) {</a>
+<a name="ln437">        crm_err(&quot;Internal libxml error during validation&quot;);</a>
+<a name="ln438">    }</a>
+<a name="ln439"> </a>
+<a name="ln440">  cleanup:</a>
+<a name="ln441"> </a>
+<a name="ln442">    if (cached_ctx) {</a>
+<a name="ln443">        *cached_ctx = ctx;</a>
+<a name="ln444"> </a>
+<a name="ln445">    } else {</a>
+<a name="ln446">        if (ctx-&gt;parser != NULL) {</a>
+<a name="ln447">            xmlRelaxNGFreeParserCtxt(ctx-&gt;parser);</a>
+<a name="ln448">        }</a>
+<a name="ln449">        if (ctx-&gt;valid != NULL) {</a>
+<a name="ln450">            xmlRelaxNGFreeValidCtxt(ctx-&gt;valid);</a>
+<a name="ln451">        }</a>
+<a name="ln452">        if (ctx-&gt;rng != NULL) {</a>
+<a name="ln453">            xmlRelaxNGFree(ctx-&gt;rng);</a>
+<a name="ln454">        }</a>
+<a name="ln455">        free(ctx);</a>
+<a name="ln456">    }</a>
+<a name="ln457"> </a>
+<a name="ln458">    return valid;</a>
+<a name="ln459">}</a>
+<a name="ln460"> </a>
+<a name="ln461">/*!</a>
+<a name="ln462"> * \internal</a>
+<a name="ln463"> * \brief Clean up global memory associated with XML schemas</a>
+<a name="ln464"> */</a>
+<a name="ln465">void</a>
+<a name="ln466">crm_schema_cleanup(void)</a>
+<a name="ln467">{</a>
+<a name="ln468">    int lpc;</a>
+<a name="ln469">    relaxng_ctx_cache_t *ctx = NULL;</a>
+<a name="ln470"> </a>
+<a name="ln471">    for (lpc = 0; lpc &lt; xml_schema_max; lpc++) {</a>
+<a name="ln472"> </a>
+<a name="ln473">        switch (known_schemas[lpc].type) {</a>
+<a name="ln474">            case 0:</a>
+<a name="ln475">                /* None */</a>
+<a name="ln476">                break;</a>
+<a name="ln477">            case 1:</a>
+<a name="ln478">                /* DTD - Not cached */</a>
+<a name="ln479">                break;</a>
+<a name="ln480">            case 2:</a>
+<a name="ln481">                /* RNG - Cached */</a>
+<a name="ln482">                ctx = (relaxng_ctx_cache_t *) known_schemas[lpc].cache;</a>
+<a name="ln483">                if (ctx == NULL) {</a>
+<a name="ln484">                    break;</a>
+<a name="ln485">                }</a>
+<a name="ln486">                if (ctx-&gt;parser != NULL) {</a>
+<a name="ln487">                    xmlRelaxNGFreeParserCtxt(ctx-&gt;parser);</a>
+<a name="ln488">                }</a>
+<a name="ln489">                if (ctx-&gt;valid != NULL) {</a>
+<a name="ln490">                    xmlRelaxNGFreeValidCtxt(ctx-&gt;valid);</a>
+<a name="ln491">                }</a>
+<a name="ln492">                if (ctx-&gt;rng != NULL) {</a>
+<a name="ln493">                    xmlRelaxNGFree(ctx-&gt;rng);</a>
+<a name="ln494">                }</a>
+<a name="ln495">                free(ctx);</a>
+<a name="ln496">                known_schemas[lpc].cache = NULL;</a>
+<a name="ln497">                break;</a>
+<a name="ln498">            default:</a>
+<a name="ln499">                break;</a>
+<a name="ln500">        }</a>
+<a name="ln501">        free(known_schemas[lpc].name);</a>
+<a name="ln502">        free(known_schemas[lpc].location);</a>
+<a name="ln503">        free(known_schemas[lpc].transform);</a>
+<a name="ln504">    }</a>
+<a name="ln505">    free(known_schemas);</a>
+<a name="ln506">    known_schemas = NULL;</a>
+<a name="ln507">}</a>
+<a name="ln508"> </a>
+<a name="ln509">static gboolean</a>
+<a name="ln510">validate_with(xmlNode *xml, int method, gboolean to_logs)</a>
+<a name="ln511">{</a>
+<a name="ln512">    xmlDocPtr doc = NULL;</a>
+<a name="ln513">    gboolean valid = FALSE;</a>
+<a name="ln514">    int type = 0;</a>
+<a name="ln515">    char *file = NULL;</a>
+<a name="ln516"> </a>
+<a name="ln517">    if (method &lt; 0) {</a>
+<a name="ln518">        return FALSE;</a>
+<a name="ln519">    }</a>
+<a name="ln520"> </a>
+<a name="ln521">    type = known_schemas[method].type;</a>
+<a name="ln522">    if(type == 0) {</a>
+<a name="ln523">        return TRUE;</a>
+<a name="ln524">    }</a>
+<a name="ln525"> </a>
+<a name="ln526">    CRM_CHECK(xml != NULL, return FALSE);</a>
+<a name="ln527">    doc = getDocPtr(xml);</a>
+<a name="ln528">    file = get_schema_path(known_schemas[method].name,</a>
+<a name="ln529">                           known_schemas[method].location);</a>
+<a name="ln530"> </a>
+<a name="ln531">    crm_trace(&quot;Validating with: %s (type=%d)&quot;, crm_str(file), type);</a>
+<a name="ln532">    switch (type) {</a>
+<a name="ln533">        case 1:</a>
+<a name="ln534">            valid = validate_with_dtd(doc, to_logs, file);</a>
+<a name="ln535">            break;</a>
+<a name="ln536">        case 2:</a>
+<a name="ln537">            valid =</a>
+<a name="ln538">                validate_with_relaxng(doc, to_logs, file,</a>
+<a name="ln539">                                      (relaxng_ctx_cache_t **) &amp; (known_schemas[method].cache));</a>
+<a name="ln540">            break;</a>
+<a name="ln541">        default:</a>
+<a name="ln542">            crm_err(&quot;Unknown validator type: %d&quot;, type);</a>
+<a name="ln543">            break;</a>
+<a name="ln544">    }</a>
+<a name="ln545"> </a>
+<a name="ln546">    free(file);</a>
+<a name="ln547">    return valid;</a>
+<a name="ln548">}</a>
+<a name="ln549"> </a>
+<a name="ln550">static void</a>
+<a name="ln551">dump_file(const char *filename)</a>
+<a name="ln552">{</a>
+<a name="ln553"> </a>
+<a name="ln554">    FILE *fp = NULL;</a>
+<a name="ln555">    int ch, line = 0;</a>
+<a name="ln556"> </a>
+<a name="ln557">    CRM_CHECK(filename != NULL, return);</a>
+<a name="ln558"> </a>
+<a name="ln559">    fp = fopen(filename, &quot;r&quot;);</a>
+<a name="ln560">    if (fp == NULL) {</a>
+<a name="ln561">        crm_perror(LOG_ERR, &quot;Could not open %s for reading&quot;, filename);</a>
+<a name="ln562">        return;</a>
+<a name="ln563">    }</a>
+<a name="ln564"> </a>
+<a name="ln565">    fprintf(stderr, &quot;%4d &quot;, ++line);</a>
+<a name="ln566">    do {</a>
+<a name="ln567">        ch = getc(fp);</a>
+<a name="ln568">        if (ch == EOF) {</a>
+<a name="ln569">            putc('\n', stderr);</a>
+<a name="ln570">            break;</a>
+<a name="ln571">        } else if (ch == '\n') {</a>
+<a name="ln572">            fprintf(stderr, &quot;\n%4d &quot;, ++line);</a>
+<a name="ln573">        } else {</a>
+<a name="ln574">            putc(ch, stderr);</a>
+<a name="ln575">        }</a>
+<a name="ln576">    } while (1);</a>
+<a name="ln577"> </a>
+<a name="ln578">    fclose(fp);</a>
+<a name="ln579">}</a>
+<a name="ln580"> </a>
+<a name="ln581">gboolean</a>
+<a name="ln582">validate_xml_verbose(xmlNode *xml_blob)</a>
+<a name="ln583">{</a>
+<a name="ln584">    int fd = 0;</a>
+<a name="ln585">    xmlDoc *doc = NULL;</a>
+<a name="ln586">    xmlNode *xml = NULL;</a>
+<a name="ln587">    gboolean rc = FALSE;</a>
+<a name="ln588">    char *filename = strdup(CRM_STATE_DIR &quot;/cib-invalid.XXXXXX&quot;);</a>
+<a name="ln589"> </a>
+<a name="ln590">    CRM_CHECK(filename != NULL, return FALSE);</a>
+<a name="ln591"> </a>
+<a name="ln592">    umask(S_IWGRP | S_IWOTH | S_IROTH);</a>
+<a name="ln593">    fd = mkstemp(filename);</a>
+<a name="ln594">    write_xml_fd(xml_blob, filename, fd, FALSE);</a>
+<a name="ln595"> </a>
+<a name="ln596">    dump_file(filename);</a>
+<a name="ln597"> </a>
+<a name="ln598">    doc = xmlParseFile(filename);</a>
+<a name="ln599">    xml = xmlDocGetRootElement(doc);</a>
+<a name="ln600">    rc = validate_xml(xml, NULL, FALSE);</a>
+<a name="ln601">    free_xml(xml);</a>
+<a name="ln602"> </a>
+<a name="ln603">    unlink(filename);</a>
+<a name="ln604">    free(filename);</a>
+<a name="ln605"> </a>
+<a name="ln606">    return rc;</a>
+<a name="ln607">}</a>
+<a name="ln608"> </a>
+<a name="ln609">gboolean</a>
+<a name="ln610">validate_xml(xmlNode *xml_blob, const char *validation, gboolean to_logs)</a>
+<a name="ln611">{</a>
+<a name="ln612">    int version = 0;</a>
+<a name="ln613"> </a>
+<a name="ln614">    if (validation == NULL) {</a>
+<a name="ln615">        validation = crm_element_value(xml_blob, XML_ATTR_VALIDATION);</a>
+<a name="ln616">    }</a>
+<a name="ln617"> </a>
+<a name="ln618">    if (validation == NULL) {</a>
+<a name="ln619">        int lpc = 0;</a>
+<a name="ln620">        bool valid = FALSE;</a>
+<a name="ln621"> </a>
+<a name="ln622">        validation = crm_element_value(xml_blob, &quot;ignore-dtd&quot;);</a>
+<a name="ln623">        if (crm_is_true(validation)) {</a>
+<a name="ln624">            /* Legacy compatibilty */</a>
+<a name="ln625">            crm_xml_add(xml_blob, XML_ATTR_VALIDATION, &quot;none&quot;);</a>
+<a name="ln626">            return TRUE;</a>
+<a name="ln627">        }</a>
+<a name="ln628"> </a>
+<a name="ln629">        /* Work it out */</a>
+<a name="ln630">        for (lpc = 0; lpc &lt; xml_schema_max; lpc++) {</a>
+<a name="ln631">            if (validate_with(xml_blob, lpc, FALSE)) {</a>
+<a name="ln632">                valid = TRUE;</a>
+<a name="ln633">                crm_xml_add(xml_blob, XML_ATTR_VALIDATION,</a>
+<a name="ln634">                            known_schemas[lpc].name);</a>
+<a name="ln635">                crm_info(&quot;XML validated against %s&quot;, known_schemas[lpc].name);</a>
+<a name="ln636">                if(known_schemas[lpc].after_transform == 0) {</a>
+<a name="ln637">                    break;</a>
+<a name="ln638">                }</a>
+<a name="ln639">            }</a>
+<a name="ln640">        }</a>
+<a name="ln641"> </a>
+<a name="ln642">        return valid;</a>
+<a name="ln643">    }</a>
+<a name="ln644"> </a>
+<a name="ln645">    version = get_schema_version(validation);</a>
+<a name="ln646">    if (strcmp(validation, &quot;none&quot;) == 0) {</a>
+<a name="ln647">        return TRUE;</a>
+<a name="ln648">    } else if (version &lt; xml_schema_max) {</a>
+<a name="ln649">        return validate_with(xml_blob, version, to_logs);</a>
+<a name="ln650">    }</a>
+<a name="ln651"> </a>
+<a name="ln652">    crm_err(&quot;Unknown validator: %s&quot;, validation);</a>
+<a name="ln653">    return FALSE;</a>
+<a name="ln654">}</a>
+<a name="ln655"> </a>
+<a name="ln656">#if HAVE_LIBXSLT</a>
+<a name="ln657">static xmlNode *</a>
+<a name="ln658">apply_transformation(xmlNode *xml, const char *transform)</a>
+<a name="ln659">{</a>
+<a name="ln660">    char *xform = NULL;</a>
+<a name="ln661">    xmlNode *out = NULL;</a>
+<a name="ln662">    xmlDocPtr res = NULL;</a>
+<a name="ln663">    xmlDocPtr doc = NULL;</a>
+<a name="ln664">    xsltStylesheet *xslt = NULL;</a>
+<a name="ln665"> </a>
+<a name="ln666">    CRM_CHECK(xml != NULL, return FALSE);</a>
+<a name="ln667">    doc = getDocPtr(xml);</a>
+<a name="ln668">    xform = get_schema_path(NULL, transform);</a>
+<a name="ln669"> </a>
+<a name="ln670">    xmlLoadExtDtdDefaultValue = 1;</a>
+<a name="ln671">    xmlSubstituteEntitiesDefault(1);</a>
+<a name="ln672"> </a>
+<a name="ln673">    xslt = xsltParseStylesheetFile((const xmlChar *)xform);</a>
+<a name="ln674">    CRM_CHECK(xslt != NULL, goto cleanup);</a>
+<a name="ln675"> </a>
+<a name="ln676">    res = xsltApplyStylesheet(xslt, doc, NULL);</a>
+<a name="ln677">    CRM_CHECK(res != NULL, goto cleanup);</a>
+<a name="ln678"> </a>
+<a name="ln679">    out = xmlDocGetRootElement(res);</a>
+<a name="ln680"> </a>
+<a name="ln681">  cleanup:</a>
+<a name="ln682">    if (xslt) {</a>
+<a name="ln683">        xsltFreeStylesheet(xslt);</a>
+<a name="ln684">    }</a>
+<a name="ln685"> </a>
+<a name="ln686">    free(xform);</a>
+<a name="ln687"> </a>
+<a name="ln688">    return out;</a>
+<a name="ln689">}</a>
+<a name="ln690">#endif</a>
+<a name="ln691"> </a>
+<a name="ln692">const char *</a>
+<a name="ln693">get_schema_name(int version)</a>
+<a name="ln694">{</a>
+<a name="ln695">    if (version &lt; 0 || version &gt;= xml_schema_max) {</a>
+<a name="ln696">        return &quot;unknown&quot;;</a>
+<a name="ln697">    }</a>
+<a name="ln698">    return known_schemas[version].name;</a>
+<a name="ln699">}</a>
+<a name="ln700"> </a>
+<a name="ln701">int</a>
+<a name="ln702">get_schema_version(const char *name)</a>
+<a name="ln703">{</a>
+<a name="ln704">    int lpc = 0;</a>
+<a name="ln705"> </a>
+<a name="ln706">    if (name == NULL) {</a>
+<a name="ln707">        name = &quot;none&quot;;</a>
+<a name="ln708">    }</a>
+<a name="ln709">    for (; lpc &lt; xml_schema_max; lpc++) {</a>
+<a name="ln710">        if (safe_str_eq(name, known_schemas[lpc].name)) {</a>
+<a name="ln711">            return lpc;</a>
+<a name="ln712">        }</a>
+<a name="ln713">    }</a>
+<a name="ln714">    return -1;</a>
+<a name="ln715">}</a>
+<a name="ln716"> </a>
+<a name="ln717">/* set which validation to use */</a>
+<a name="ln718">int</a>
+<a name="ln719">update_validation(xmlNode **xml_blob, int *best, int max, gboolean transform,</a>
+<a name="ln720">                  gboolean to_logs)</a>
+<a name="ln721">{</a>
+<a name="ln722">    xmlNode *xml = NULL;</a>
+<a name="ln723">    char *value = NULL;</a>
+<a name="ln724">    int max_stable_schemas = xml_latest_schema_index();</a>
+<a name="ln725">    int lpc = 0, match = -1, rc = pcmk_ok;</a>
+<a name="ln726">    int next = -1;  /* -1 denotes &quot;inactive&quot; value */</a>
+<a name="ln727"> </a>
+<a name="ln728">    CRM_CHECK(best != NULL, return -EINVAL);</a>
+<a name="ln729">    *best = 0;</a>
+<a name="ln730"> </a>
+<a name="ln731">    CRM_CHECK(xml_blob != NULL, return -EINVAL);</a>
+<a name="ln732">    CRM_CHECK(*xml_blob != NULL, return -EINVAL);</a>
+<a name="ln733"> </a>
+<a name="ln734">    xml = *xml_blob;</a>
+<a name="ln735">    value = crm_element_value_copy(xml, XML_ATTR_VALIDATION);</a>
+<a name="ln736"> </a>
+<a name="ln737">    if (value != NULL) {</a>
+<a name="ln738">        match = get_schema_version(value);</a>
+<a name="ln739"> </a>
+<a name="ln740">        lpc = match;</a>
+<a name="ln741">        if (lpc &gt;= 0 &amp;&amp; transform == FALSE) {</a>
+<a name="ln742">            *best = lpc++;</a>
+<a name="ln743"> </a>
+<a name="ln744">        } else if (lpc &lt; 0) {</a>
+<a name="ln745">            crm_debug(&quot;Unknown validation type&quot;);</a>
+<a name="ln746">            lpc = 0;</a>
+<a name="ln747">        }</a>
+<a name="ln748">    }</a>
+<a name="ln749"> </a>
+<a name="ln750">    if (match &gt;= max_stable_schemas) {</a>
+<a name="ln751">        /* nothing to do */</a>
+<a name="ln752">        free(value);</a>
+<a name="ln753">        *best = match;</a>
+<a name="ln754">        return pcmk_ok;</a>
+<a name="ln755">    }</a>
+<a name="ln756"> </a>
+<a name="ln757">    while (lpc &lt;= max_stable_schemas) {</a>
+<a name="ln758">        crm_debug(&quot;Testing '%s' validation (%d of %d)&quot;,</a>
+<a name="ln759">                  known_schemas[lpc].name ? known_schemas[lpc].name : &quot;&lt;unset&gt;&quot;,</a>
+<a name="ln760">                  lpc, max_stable_schemas);</a>
+<a name="ln761"> </a>
+<a name="ln762">        if (validate_with(xml, lpc, to_logs) == FALSE) {</a>
+<a name="ln763">            if (next != -1) {</a>
+<a name="ln764">                crm_info(&quot;Configuration not valid for schema: %s&quot;,</a>
+<a name="ln765">                         known_schemas[lpc].name);</a>
+<a name="ln766">                next = -1;</a>
+<a name="ln767">            } else {</a>
+<a name="ln768">                crm_trace(&quot;%s validation failed&quot;,</a>
+<a name="ln769">                          known_schemas[lpc].name ? known_schemas[lpc].name : &quot;&lt;unset&gt;&quot;);</a>
+<a name="ln770">            }</a>
+<a name="ln771">            if (*best) {</a>
+<a name="ln772">                /* we've satisfied the validation, no need to check further */</a>
+<a name="ln773">                break;</a>
+<a name="ln774">            }</a>
+<a name="ln775">            rc = -pcmk_err_schema_validation;</a>
+<a name="ln776"> </a>
+<a name="ln777">        } else {</a>
+<a name="ln778">            if (next != -1) {</a>
+<a name="ln779">                crm_debug(&quot;Configuration valid for schema: %s&quot;,</a>
+<a name="ln780">                          known_schemas[next].name);</a>
+<a name="ln781">                next = -1;</a>
+<a name="ln782">            }</a>
+<a name="ln783">            rc = pcmk_ok;</a>
+<a name="ln784">        }</a>
+<a name="ln785"> </a>
+<a name="ln786">        if (rc == pcmk_ok) {</a>
+<a name="ln787">            *best = lpc;</a>
+<a name="ln788">        }</a>
+<a name="ln789"> </a>
+<a name="ln790">        if (rc == pcmk_ok &amp;&amp; transform) {</a>
+<a name="ln791">            xmlNode *upgrade = NULL;</a>
+<a name="ln792">            next = known_schemas[lpc].after_transform;</a>
+<a name="ln793"> </a>
+<a name="ln794">            if (next &lt;= lpc) {</a>
+<a name="ln795">                /* There is no next version, or next would regress */</a>
+<a name="ln796">                crm_trace(&quot;Stopping at %s&quot;, known_schemas[lpc].name);</a>
+<a name="ln797">                break;</a>
+<a name="ln798"> </a>
+<a name="ln799">            } else if (max &gt; 0 &amp;&amp; (lpc == max || next &gt; max)) {</a>
+<a name="ln800">                crm_trace(&quot;Upgrade limit reached at %s (lpc=%d, next=%d, max=%d)&quot;,</a>
+<a name="ln801">                          known_schemas[lpc].name, lpc, next, max);</a>
+<a name="ln802">                break;</a>
+<a name="ln803"> </a>
+<a name="ln804">            } else if (known_schemas[lpc].transform == NULL) {</a>
+<a name="ln805">                crm_debug(&quot;%s-style configuration is also valid for %s&quot;,</a>
+<a name="ln806">                           known_schemas[lpc].name, known_schemas[next].name);</a>
+<a name="ln807"> </a>
+<a name="ln808">                lpc = next;</a>
+<a name="ln809"> </a>
+<a name="ln810">            } else {</a>
+<a name="ln811">                crm_debug(&quot;Upgrading %s-style configuration to %s with %s&quot;,</a>
+<a name="ln812">                           known_schemas[lpc].name, known_schemas[next].name,</a>
+<a name="ln813">                           known_schemas[lpc].transform ? known_schemas[lpc].transform : &quot;no-op&quot;);</a>
+<a name="ln814"> </a>
+<a name="ln815">#if HAVE_LIBXSLT</a>
+<a name="ln816">                upgrade = apply_transformation(xml, known_schemas[lpc].transform);</a>
+<a name="ln817">#endif</a>
+<a name="ln818">                if (upgrade == NULL) {</a>
+<a name="ln819">                    crm_err(&quot;Transformation %s failed&quot;,</a>
+<a name="ln820">                            known_schemas[lpc].transform);</a>
+<a name="ln821">                    rc = -pcmk_err_transform_failed;</a>
+<a name="ln822"> </a>
+<a name="ln823">                } else if (validate_with(upgrade, next, to_logs)) {</a>
+<a name="ln824">                    crm_info(&quot;Transformation %s successful&quot;,</a>
+<a name="ln825">                             known_schemas[lpc].transform);</a>
+<a name="ln826">                    lpc = next;</a>
+<a name="ln827">                    *best = next;</a>
+<a name="ln828">                    free_xml(xml);</a>
+<a name="ln829">                    xml = upgrade;</a>
+<a name="ln830">                    rc = pcmk_ok;</a>
+<a name="ln831"> </a>
+<a name="ln832">                } else {</a>
+<a name="ln833">                    crm_err(&quot;Transformation %s did not produce a valid configuration&quot;,</a>
+<a name="ln834">                            known_schemas[lpc].transform);</a>
+<a name="ln835">                    crm_log_xml_info(upgrade, &quot;transform:bad&quot;);</a>
+<a name="ln836">                    free_xml(upgrade);</a>
+<a name="ln837">                    rc = -pcmk_err_schema_validation;</a>
+<a name="ln838">                }</a>
+<a name="ln839">                next = -1;</a>
+<a name="ln840">            }</a>
+<a name="ln841">        }</a>
+<a name="ln842"> </a>
+<a name="ln843">        if (transform == FALSE || rc != pcmk_ok) {</a>
+<a name="ln844">            /* we need some progress! */</a>
+<a name="ln845">            lpc++;</a>
+<a name="ln846">        }</a>
+<a name="ln847">    }</a>
+<a name="ln848"> </a>
+<a name="ln849">    if (*best &gt; match &amp;&amp; *best) {</a>
+<a name="ln850">        crm_info(&quot;%s the configuration from %s to %s&quot;,</a>
+<a name="ln851">                   transform?&quot;Transformed&quot;:&quot;Upgraded&quot;,</a>
+<a name="ln852">                   value ? value : &quot;&lt;none&gt;&quot;, known_schemas[*best].name);</a>
+<a name="ln853">        crm_xml_add(xml, XML_ATTR_VALIDATION, known_schemas[*best].name);</a>
+<a name="ln854">    }</a>
+<a name="ln855"> </a>
+<a name="ln856">    *xml_blob = xml;</a>
+<a name="ln857">    free(value);</a>
+<a name="ln858">    return rc;</a>
+<a name="ln859">}</a>
+<a name="ln860"> </a>
+<a name="ln861">gboolean</a>
+<a name="ln862">cli_config_update(xmlNode **xml, int *best_version, gboolean to_logs)</a>
+<a name="ln863">{</a>
+<a name="ln864">    gboolean rc = TRUE;</a>
+<a name="ln865">    const char *value = crm_element_value(*xml, XML_ATTR_VALIDATION);</a>
+<a name="ln866">    char *const orig_value = strdup(value == NULL ? &quot;(none)&quot; : value);</a>
+<a name="ln867"> </a>
+<a name="ln868">    int version = get_schema_version(value);</a>
+<a name="ln869">    int orig_version = version;</a>
+<a name="ln870">    int min_version = xml_minimum_schema_index();</a>
+<a name="ln871"> </a>
+<a name="ln872">    if (version &lt; min_version) {</a>
+<a name="ln873">        xmlNode *converted = NULL;</a>
+<a name="ln874"> </a>
+<a name="ln875">        converted = copy_xml(*xml);</a>
+<a name="ln876">        update_validation(&amp;converted, &amp;version, 0, TRUE, to_logs);</a>
+<a name="ln877"> </a>
+<a name="ln878">        value = crm_element_value(converted, XML_ATTR_VALIDATION);</a>
+<a name="ln879">        if (version &lt; min_version) {</a>
+<a name="ln880">            if (version &lt; orig_version || orig_version == -1) {</a>
+<a name="ln881">                if (to_logs) {</a>
+<a name="ln882">                    crm_config_err(&quot;Your current configuration %s could not&quot;</a>
+<a name="ln883">                                   &quot; validate with any schema in range [%s, %s],&quot;</a>
+<a name="ln884">                                   &quot; cannot upgrade to %s.&quot;,</a>
+<a name="ln885">                                   orig_value,</a>
+<a name="ln886">                                   get_schema_name(orig_version),</a>
+<a name="ln887">                                   xml_latest_schema(),</a>
+<a name="ln888">                                   get_schema_name(min_version));</a>
+<a name="ln889">                } else {</a>
+<a name="ln890">                    fprintf(stderr, &quot;Your current configuration %s could not&quot;</a>
+<a name="ln891">                                    &quot; validate with any schema in range [%s, %s],&quot;</a>
+<a name="ln892">                                    &quot; cannot upgrade to %s.\n&quot;,</a>
+<a name="ln893">                                    orig_value,</a>
+<a name="ln894">                                    get_schema_name(orig_version),</a>
+<a name="ln895">                                    xml_latest_schema(),</a>
+<a name="ln896">                                    get_schema_name(min_version));</a>
+<a name="ln897">                }</a>
+<a name="ln898">            } else if (to_logs) {</a>
+<a name="ln899">                crm_config_err(&quot;Your current configuration could only be upgraded to %s... &quot;</a>
+<a name="ln900">                               &quot;the minimum requirement is %s.&quot;, crm_str(value),</a>
+<a name="ln901">                               get_schema_name(min_version));</a>
+<a name="ln902">            } else {</a>
+<a name="ln903">                fprintf(stderr, &quot;Your current configuration could only be upgraded to %s... &quot;</a>
+<a name="ln904">                        &quot;the minimum requirement is %s.\n&quot;,</a>
+<a name="ln905">                        crm_str(value), get_schema_name(min_version));</a>
+<a name="ln906">            }</a>
+<a name="ln907"> </a>
+<a name="ln908">            free_xml(converted);</a>
+<a name="ln909">            converted = NULL;</a>
+<a name="ln910">            rc = FALSE;</a>
+<a name="ln911"> </a>
+<a name="ln912">        } else {</a>
+<a name="ln913">            free_xml(*xml);</a>
+<a name="ln914">            *xml = converted;</a>
+<a name="ln915"> </a>
+<a name="ln916">            if (version &lt; xml_latest_schema_index()) {</a>
+<a name="ln917">                crm_config_warn(&quot;Your configuration was internally updated to %s... &quot;</a>
+<a name="ln918">                                &quot;which is acceptable but not the most recent&quot;,</a>
+<a name="ln919">                                get_schema_name(version));</a>
+<a name="ln920"> </a>
+<a name="ln921">            } else if (to_logs) {</a>
+<a name="ln922">                crm_info(&quot;Your configuration was internally updated to the latest version (%s)&quot;,</a>
+<a name="ln923">                         get_schema_name(version));</a>
+<a name="ln924">            }</a>
+<a name="ln925">        }</a>
+<a name="ln926"> </a>
+<a name="ln927">    } else if (version &gt;= get_schema_version(&quot;none&quot;)) {</a>
+<a name="ln928">        if (to_logs) {</a>
+<a name="ln929">            crm_config_warn(&quot;Configuration validation is currently disabled.&quot;</a>
+<a name="ln930">                            &quot; It is highly encouraged and prevents many common cluster issues.&quot;);</a>
+<a name="ln931"> </a>
+<a name="ln932">        } else {</a>
+<a name="ln933">            fprintf(stderr, &quot;Configuration validation is currently disabled.&quot;</a>
+<a name="ln934">                    &quot; It is highly encouraged and prevents many common cluster issues.\n&quot;);</a>
+<a name="ln935">        }</a>
+<a name="ln936">    }</a>
+<a name="ln937"> </a>
+<a name="ln938">    if (best_version) {</a>
+<a name="ln939">        *best_version = version;</a>
+<a name="ln940">    }</a>
+<a name="ln941"> </a>
+<a name="ln942">    free(orig_value);</a>
+<a name="ln943">    return rc;</a>
+<a name="ln944">}</a>
+
+</code></pre>
+<div class="balloon" rel="209"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="392"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'ctx'. Check lines: 392, 389.</p></div>
+<div class="balloon" rel="590"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'filename' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="593"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'mkstemp' function. Inspect the first argument. Check lines: 593, 588.</p></div>
+<div class="balloon" rel="890"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'fprintf' function. Under certain conditions the pointer can be null.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,1382 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &lt;stdio.h&gt;</a>
+<a name="ln28">#include &lt;sys/types.h&gt;</a>
+<a name="ln29">#include &lt;sys/stat.h&gt;</a>
+<a name="ln30">#include &lt;unistd.h&gt;</a>
+<a name="ln31">#include &lt;grp.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;errno.h&gt;</a>
+<a name="ln34">#include &lt;fcntl.h&gt;</a>
+<a name="ln35">#include &lt;bzlib.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">#include &lt;crm/crm.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">#define PCMK_IPC_VERSION 1</a>
+<a name="ln43"> </a>
+<a name="ln44">/* Evict clients whose event queue grows this large */</a>
+<a name="ln45">#define PCMK_IPC_MAX_QUEUE 500</a>
+<a name="ln46"> </a>
+<a name="ln47">struct crm_ipc_response_header {</a>
+<a name="ln48">    struct qb_ipc_response_header qb;</a>
+<a name="ln49">    uint32_t size_uncompressed;</a>
+<a name="ln50">    uint32_t size_compressed;</a>
+<a name="ln51">    uint32_t flags;</a>
+<a name="ln52">    uint8_t  version; /* Protect against version changes for anyone that might bother to statically link us */</a>
+<a name="ln53">};</a>
+<a name="ln54"> </a>
+<a name="ln55">static int hdr_offset = 0;</a>
+<a name="ln56">static unsigned int ipc_buffer_max = 0;</a>
+<a name="ln57">static unsigned int pick_ipc_buffer(unsigned int max);</a>
+<a name="ln58"> </a>
+<a name="ln59">static inline void</a>
+<a name="ln60">crm_ipc_init(void)</a>
+<a name="ln61">{</a>
+<a name="ln62">    if (hdr_offset == 0) {</a>
+<a name="ln63">        hdr_offset = sizeof(struct crm_ipc_response_header);</a>
+<a name="ln64">    }</a>
+<a name="ln65">    if (ipc_buffer_max == 0) {</a>
+<a name="ln66">        ipc_buffer_max = pick_ipc_buffer(0);</a>
+<a name="ln67">    }</a>
+<a name="ln68">}</a>
+<a name="ln69"> </a>
+<a name="ln70">unsigned int</a>
+<a name="ln71">crm_ipc_default_buffer_size(void)</a>
+<a name="ln72">{</a>
+<a name="ln73">    return pick_ipc_buffer(0);</a>
+<a name="ln74">}</a>
+<a name="ln75"> </a>
+<a name="ln76">static char *</a>
+<a name="ln77">generateReference(const char *custom1, const char *custom2)</a>
+<a name="ln78">{</a>
+<a name="ln79">    static uint ref_counter = 0;</a>
+<a name="ln80">    const char *local_cust1 = custom1;</a>
+<a name="ln81">    const char *local_cust2 = custom2;</a>
+<a name="ln82">    int reference_len = 4;</a>
+<a name="ln83">    char *since_epoch = NULL;</a>
+<a name="ln84"> </a>
+<a name="ln85">    reference_len += 20;        /* too big */</a>
+<a name="ln86">    reference_len += 40;        /* too big */</a>
+<a name="ln87"> </a>
+<a name="ln88">    if (local_cust1 == NULL) {</a>
+<a name="ln89">        local_cust1 = &quot;_empty_&quot;;</a>
+<a name="ln90">    }</a>
+<a name="ln91">    reference_len += strlen(local_cust1);</a>
+<a name="ln92"> </a>
+<a name="ln93">    if (local_cust2 == NULL) {</a>
+<a name="ln94">        local_cust2 = &quot;_empty_&quot;;</a>
+<a name="ln95">    }</a>
+<a name="ln96">    reference_len += strlen(local_cust2);</a>
+<a name="ln97"> </a>
+<a name="ln98">    since_epoch = calloc(1, reference_len);</a>
+<a name="ln99"> </a>
+<a name="ln100">    if (since_epoch != NULL) {</a>
+<a name="ln101">        sprintf(since_epoch, &quot;%s-%s-%lu-%u&quot;,</a>
+<a name="ln102">                local_cust1, local_cust2, (unsigned long)time(NULL), ref_counter++);</a>
+<a name="ln103">    }</a>
+<a name="ln104"> </a>
+<a name="ln105">    return since_epoch;</a>
+<a name="ln106">}</a>
+<a name="ln107"> </a>
+<a name="ln108">xmlNode *</a>
+<a name="ln109">create_request_adv(const char *task, xmlNode * msg_data,</a>
+<a name="ln110">                   const char *host_to, const char *sys_to,</a>
+<a name="ln111">                   const char *sys_from, const char *uuid_from, const char *origin)</a>
+<a name="ln112">{</a>
+<a name="ln113">    char *true_from = NULL;</a>
+<a name="ln114">    xmlNode *request = NULL;</a>
+<a name="ln115">    char *reference = generateReference(task, sys_from);</a>
+<a name="ln116"> </a>
+<a name="ln117">    if (uuid_from != NULL) {</a>
+<a name="ln118">        true_from = generate_hash_key(sys_from, uuid_from);</a>
+<a name="ln119">    } else if (sys_from != NULL) {</a>
+<a name="ln120">        true_from = strdup(sys_from);</a>
+<a name="ln121">    } else {</a>
+<a name="ln122">        crm_err(&quot;No sys from specified&quot;);</a>
+<a name="ln123">    }</a>
+<a name="ln124"> </a>
+<a name="ln125">    /* host_from will get set for us if necessary by CRMd when routed */</a>
+<a name="ln126">    request = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln127">    crm_xml_add(request, F_CRM_ORIGIN, origin);</a>
+<a name="ln128">    crm_xml_add(request, F_TYPE, T_CRM);</a>
+<a name="ln129">    crm_xml_add(request, F_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln130">    crm_xml_add(request, F_CRM_MSG_TYPE, XML_ATTR_REQUEST);</a>
+<a name="ln131">    crm_xml_add(request, F_CRM_REFERENCE, reference);</a>
+<a name="ln132">    crm_xml_add(request, F_CRM_TASK, task);</a>
+<a name="ln133">    crm_xml_add(request, F_CRM_SYS_TO, sys_to);</a>
+<a name="ln134">    crm_xml_add(request, F_CRM_SYS_FROM, true_from);</a>
+<a name="ln135"> </a>
+<a name="ln136">    /* HOSTTO will be ignored if it is to the DC anyway. */</a>
+<a name="ln137">    if (host_to != NULL &amp;&amp; strlen(host_to) &gt; 0) {</a>
+<a name="ln138">        crm_xml_add(request, F_CRM_HOST_TO, host_to);</a>
+<a name="ln139">    }</a>
+<a name="ln140"> </a>
+<a name="ln141">    if (msg_data != NULL) {</a>
+<a name="ln142">        add_message_xml(request, F_CRM_DATA, msg_data);</a>
+<a name="ln143">    }</a>
+<a name="ln144">    free(reference);</a>
+<a name="ln145">    free(true_from);</a>
+<a name="ln146"> </a>
+<a name="ln147">    return request;</a>
+<a name="ln148">}</a>
+<a name="ln149"> </a>
+<a name="ln150">/*</a>
+<a name="ln151"> * This method adds a copy of xml_response_data</a>
+<a name="ln152"> */</a>
+<a name="ln153">xmlNode *</a>
+<a name="ln154">create_reply_adv(xmlNode * original_request, xmlNode * xml_response_data, const char *origin)</a>
+<a name="ln155">{</a>
+<a name="ln156">    xmlNode *reply = NULL;</a>
+<a name="ln157"> </a>
+<a name="ln158">    const char *host_from = crm_element_value(original_request, F_CRM_HOST_FROM);</a>
+<a name="ln159">    const char *sys_from = crm_element_value(original_request, F_CRM_SYS_FROM);</a>
+<a name="ln160">    const char *sys_to = crm_element_value(original_request, F_CRM_SYS_TO);</a>
+<a name="ln161">    const char *type = crm_element_value(original_request, F_CRM_MSG_TYPE);</a>
+<a name="ln162">    const char *operation = crm_element_value(original_request, F_CRM_TASK);</a>
+<a name="ln163">    const char *crm_msg_reference = crm_element_value(original_request, F_CRM_REFERENCE);</a>
+<a name="ln164"> </a>
+<a name="ln165">    if (type == NULL) {</a>
+<a name="ln166">        crm_err(&quot;Cannot create new_message, no message type in original message&quot;);</a>
+<a name="ln167">        CRM_ASSERT(type != NULL);</a>
+<a name="ln168">        return NULL;</a>
+<a name="ln169">#if 0</a>
+<a name="ln170">    } else if (strcasecmp(XML_ATTR_REQUEST, type) != 0) {</a>
+<a name="ln171">        crm_err(&quot;Cannot create new_message, original message was not a request&quot;);</a>
+<a name="ln172">        return NULL;</a>
+<a name="ln173">#endif</a>
+<a name="ln174">    }</a>
+<a name="ln175">    reply = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln176">    if (reply == NULL) {</a>
+<a name="ln177">        crm_err(&quot;Cannot create new_message, malloc failed&quot;);</a>
+<a name="ln178">        return NULL;</a>
+<a name="ln179">    }</a>
+<a name="ln180"> </a>
+<a name="ln181">    crm_xml_add(reply, F_CRM_ORIGIN, origin);</a>
+<a name="ln182">    crm_xml_add(reply, F_TYPE, T_CRM);</a>
+<a name="ln183">    crm_xml_add(reply, F_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln184">    crm_xml_add(reply, F_CRM_MSG_TYPE, XML_ATTR_RESPONSE);</a>
+<a name="ln185">    crm_xml_add(reply, F_CRM_REFERENCE, crm_msg_reference);</a>
+<a name="ln186">    crm_xml_add(reply, F_CRM_TASK, operation);</a>
+<a name="ln187"> </a>
+<a name="ln188">    /* since this is a reply, we reverse the from and to */</a>
+<a name="ln189">    crm_xml_add(reply, F_CRM_SYS_TO, sys_from);</a>
+<a name="ln190">    crm_xml_add(reply, F_CRM_SYS_FROM, sys_to);</a>
+<a name="ln191"> </a>
+<a name="ln192">    /* HOSTTO will be ignored if it is to the DC anyway. */</a>
+<a name="ln193">    if (host_from != NULL &amp;&amp; strlen(host_from) &gt; 0) {</a>
+<a name="ln194">        crm_xml_add(reply, F_CRM_HOST_TO, host_from);</a>
+<a name="ln195">    }</a>
+<a name="ln196"> </a>
+<a name="ln197">    if (xml_response_data != NULL) {</a>
+<a name="ln198">        add_message_xml(reply, F_CRM_DATA, xml_response_data);</a>
+<a name="ln199">    }</a>
+<a name="ln200"> </a>
+<a name="ln201">    return reply;</a>
+<a name="ln202">}</a>
+<a name="ln203"> </a>
+<a name="ln204">/* Libqb based IPC */</a>
+<a name="ln205"> </a>
+<a name="ln206">/* Server... */</a>
+<a name="ln207"> </a>
+<a name="ln208">GHashTable *client_connections = NULL;</a>
+<a name="ln209"> </a>
+<a name="ln210">crm_client_t *</a>
+<a name="ln211">crm_client_get(qb_ipcs_connection_t * c)</a>
+<a name="ln212">{</a>
+<a name="ln213">    if (client_connections) {</a>
+<a name="ln214">        return g_hash_table_lookup(client_connections, c);</a>
+<a name="ln215">    }</a>
+<a name="ln216"> </a>
+<a name="ln217">    crm_trace(&quot;No client found for %p&quot;, c);</a>
+<a name="ln218">    return NULL;</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">crm_client_t *</a>
+<a name="ln222">crm_client_get_by_id(const char *id)</a>
+<a name="ln223">{</a>
+<a name="ln224">    gpointer key;</a>
+<a name="ln225">    crm_client_t *client;</a>
+<a name="ln226">    GHashTableIter iter;</a>
+<a name="ln227"> </a>
+<a name="ln228">    if (client_connections &amp;&amp; id) {</a>
+<a name="ln229">        g_hash_table_iter_init(&amp;iter, client_connections);</a>
+<a name="ln230">        while (g_hash_table_iter_next(&amp;iter, &amp;key, (gpointer *) &amp; client)) {</a>
+<a name="ln231">            if (strcmp(client-&gt;id, id) == 0) {</a>
+<a name="ln232">                return client;</a>
+<a name="ln233">            }</a>
+<a name="ln234">        }</a>
+<a name="ln235">    }</a>
+<a name="ln236"> </a>
+<a name="ln237">    crm_trace(&quot;No client found with id=%s&quot;, id);</a>
+<a name="ln238">    return NULL;</a>
+<a name="ln239">}</a>
+<a name="ln240"> </a>
+<a name="ln241">const char *</a>
+<a name="ln242">crm_client_name(crm_client_t * c)</a>
+<a name="ln243">{</a>
+<a name="ln244">    if (c == NULL) {</a>
+<a name="ln245">        return &quot;null&quot;;</a>
+<a name="ln246">    } else if (c-&gt;name == NULL &amp;&amp; c-&gt;id == NULL) {</a>
+<a name="ln247">        return &quot;unknown&quot;;</a>
+<a name="ln248">    } else if (c-&gt;name == NULL) {</a>
+<a name="ln249">        return c-&gt;id;</a>
+<a name="ln250">    } else {</a>
+<a name="ln251">        return c-&gt;name;</a>
+<a name="ln252">    }</a>
+<a name="ln253">}</a>
+<a name="ln254"> </a>
+<a name="ln255">void</a>
+<a name="ln256">crm_client_init(void)</a>
+<a name="ln257">{</a>
+<a name="ln258">    if (client_connections == NULL) {</a>
+<a name="ln259">        crm_trace(&quot;Creating client hash table&quot;);</a>
+<a name="ln260">        client_connections = g_hash_table_new(g_direct_hash, g_direct_equal);</a>
+<a name="ln261">    }</a>
+<a name="ln262">}</a>
+<a name="ln263"> </a>
+<a name="ln264">void</a>
+<a name="ln265">crm_client_cleanup(void)</a>
+<a name="ln266">{</a>
+<a name="ln267">    if (client_connections != NULL) {</a>
+<a name="ln268">        int active = g_hash_table_size(client_connections);</a>
+<a name="ln269"> </a>
+<a name="ln270">        if (active) {</a>
+<a name="ln271">            crm_err(&quot;Exiting with %d active connections&quot;, active);</a>
+<a name="ln272">        }</a>
+<a name="ln273">        g_hash_table_destroy(client_connections); client_connections = NULL;</a>
+<a name="ln274">    }</a>
+<a name="ln275">}</a>
+<a name="ln276"> </a>
+<a name="ln277">void</a>
+<a name="ln278">crm_client_disconnect_all(qb_ipcs_service_t *service)</a>
+<a name="ln279">{</a>
+<a name="ln280">    qb_ipcs_connection_t *c = NULL;</a>
+<a name="ln281"> </a>
+<a name="ln282">    if (service == NULL) {</a>
+<a name="ln283">        return;</a>
+<a name="ln284">    }</a>
+<a name="ln285"> </a>
+<a name="ln286">    c = qb_ipcs_connection_first_get(service);</a>
+<a name="ln287"> </a>
+<a name="ln288">    while (c != NULL) {</a>
+<a name="ln289">        qb_ipcs_connection_t *last = c;</a>
+<a name="ln290"> </a>
+<a name="ln291">        c = qb_ipcs_connection_next_get(service, last);</a>
+<a name="ln292"> </a>
+<a name="ln293">        /* There really shouldn't be anyone connected at this point */</a>
+<a name="ln294">        crm_notice(&quot;Disconnecting client %p, pid=%d...&quot;, last, crm_ipcs_client_pid(last));</a>
+<a name="ln295">        qb_ipcs_disconnect(last);</a>
+<a name="ln296">        qb_ipcs_connection_unref(last);</a>
+<a name="ln297">    }</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">crm_client_t *</a>
+<a name="ln301">crm_client_new(qb_ipcs_connection_t * c, uid_t uid_client, gid_t gid_client)</a>
+<a name="ln302">{</a>
+<a name="ln303">    static gid_t gid_cluster = 0;</a>
+<a name="ln304"> </a>
+<a name="ln305">    crm_client_t *client = NULL;</a>
+<a name="ln306"> </a>
+<a name="ln307">    CRM_LOG_ASSERT(c);</a>
+<a name="ln308">    if (c == NULL) {</a>
+<a name="ln309">        return NULL;</a>
+<a name="ln310">    }</a>
+<a name="ln311"> </a>
+<a name="ln312">    if (gid_cluster == 0) {</a>
+<a name="ln313">        if(crm_user_lookup(CRM_DAEMON_USER, NULL, &amp;gid_cluster) &lt; 0) {</a>
+<a name="ln314">            static bool have_error = FALSE;</a>
+<a name="ln315">            if(have_error == FALSE) {</a>
+<a name="ln316">                crm_warn(&quot;Could not find group for user %s&quot;, CRM_DAEMON_USER);</a>
+<a name="ln317">                have_error = TRUE;</a>
+<a name="ln318">            }</a>
+<a name="ln319">        }</a>
+<a name="ln320">    }</a>
+<a name="ln321"> </a>
+<a name="ln322">    if (uid_client != 0) {</a>
+<a name="ln323">        crm_trace(&quot;Giving access to group %u&quot;, gid_cluster);</a>
+<a name="ln324">        /* Passing -1 to chown(2) means don't change */</a>
+<a name="ln325">        qb_ipcs_connection_auth_set(c, -1, gid_cluster, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);</a>
+<a name="ln326">    }</a>
+<a name="ln327"> </a>
+<a name="ln328">    crm_client_init();</a>
+<a name="ln329"> </a>
+<a name="ln330">    /* TODO: Do our own auth checking, return NULL if unauthorized */</a>
+<a name="ln331">    client = calloc(1, sizeof(crm_client_t));</a>
+<a name="ln332"> </a>
+<a name="ln333">    client-&gt;ipcs = c;</a>
+<a name="ln334">    client-&gt;kind = CRM_CLIENT_IPC;</a>
+<a name="ln335">    client-&gt;pid = crm_ipcs_client_pid(c);</a>
+<a name="ln336"> </a>
+<a name="ln337">    client-&gt;id = crm_generate_uuid();</a>
+<a name="ln338"> </a>
+<a name="ln339">    crm_debug(&quot;Connecting %p for uid=%d gid=%d pid=%u id=%s&quot;, c, uid_client, gid_client, client-&gt;pid, client-&gt;id);</a>
+<a name="ln340"> </a>
+<a name="ln341">#if ENABLE_ACL</a>
+<a name="ln342">    client-&gt;user = uid2username(uid_client);</a>
+<a name="ln343">#endif</a>
+<a name="ln344"> </a>
+<a name="ln345">    g_hash_table_insert(client_connections, c, client);</a>
+<a name="ln346">    return client;</a>
+<a name="ln347">}</a>
+<a name="ln348"> </a>
+<a name="ln349">void</a>
+<a name="ln350">crm_client_destroy(crm_client_t * c)</a>
+<a name="ln351">{</a>
+<a name="ln352">    if (c == NULL) {</a>
+<a name="ln353">        return;</a>
+<a name="ln354">    }</a>
+<a name="ln355"> </a>
+<a name="ln356">    if (client_connections) {</a>
+<a name="ln357">        if (c-&gt;ipcs) {</a>
+<a name="ln358">            crm_trace(&quot;Destroying %p/%p (%d remaining)&quot;,</a>
+<a name="ln359">                      c, c-&gt;ipcs, crm_hash_table_size(client_connections) - 1);</a>
+<a name="ln360">            g_hash_table_remove(client_connections, c-&gt;ipcs);</a>
+<a name="ln361"> </a>
+<a name="ln362">        } else {</a>
+<a name="ln363">            crm_trace(&quot;Destroying remote connection %p (%d remaining)&quot;,</a>
+<a name="ln364">                      c, crm_hash_table_size(client_connections) - 1);</a>
+<a name="ln365">            g_hash_table_remove(client_connections, c-&gt;id);</a>
+<a name="ln366">        }</a>
+<a name="ln367">    }</a>
+<a name="ln368"> </a>
+<a name="ln369">    if (c-&gt;event_timer) {</a>
+<a name="ln370">        g_source_remove(c-&gt;event_timer);</a>
+<a name="ln371">    }</a>
+<a name="ln372"> </a>
+<a name="ln373">    crm_debug(&quot;Destroying %d events&quot;, g_list_length(c-&gt;event_queue));</a>
+<a name="ln374">    while (c-&gt;event_queue) {</a>
+<a name="ln375">        struct iovec *event = c-&gt;event_queue-&gt;data;</a>
+<a name="ln376"> </a>
+<a name="ln377">        c-&gt;event_queue = g_list_remove(c-&gt;event_queue, event);</a>
+<a name="ln378">        free(event[0].iov_base);</a>
+<a name="ln379">        free(event[1].iov_base);</a>
+<a name="ln380">        free(event);</a>
+<a name="ln381">    }</a>
+<a name="ln382"> </a>
+<a name="ln383">    free(c-&gt;id);</a>
+<a name="ln384">    free(c-&gt;name);</a>
+<a name="ln385">    free(c-&gt;user);</a>
+<a name="ln386">    if (c-&gt;remote) {</a>
+<a name="ln387">        if (c-&gt;remote-&gt;auth_timeout) {</a>
+<a name="ln388">            g_source_remove(c-&gt;remote-&gt;auth_timeout);</a>
+<a name="ln389">        }</a>
+<a name="ln390">        free(c-&gt;remote-&gt;buffer);</a>
+<a name="ln391">        free(c-&gt;remote);</a>
+<a name="ln392">    }</a>
+<a name="ln393">    free(c);</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396">int</a>
+<a name="ln397">crm_ipcs_client_pid(qb_ipcs_connection_t * c)</a>
+<a name="ln398">{</a>
+<a name="ln399">    struct qb_ipcs_connection_stats stats;</a>
+<a name="ln400"> </a>
+<a name="ln401">    stats.client_pid = 0;</a>
+<a name="ln402">    qb_ipcs_connection_stats_get(c, &amp;stats, 0);</a>
+<a name="ln403">    return stats.client_pid;</a>
+<a name="ln404">}</a>
+<a name="ln405"> </a>
+<a name="ln406">xmlNode *</a>
+<a name="ln407">crm_ipcs_recv(crm_client_t * c, void *data, size_t size, uint32_t * id, uint32_t * flags)</a>
+<a name="ln408">{</a>
+<a name="ln409">    xmlNode *xml = NULL;</a>
+<a name="ln410">    char *uncompressed = NULL;</a>
+<a name="ln411">    char *text = ((char *)data) + sizeof(struct crm_ipc_response_header);</a>
+<a name="ln412">    struct crm_ipc_response_header *header = data;</a>
+<a name="ln413"> </a>
+<a name="ln414">    if (id) {</a>
+<a name="ln415">        *id = ((struct qb_ipc_response_header *)data)-&gt;id;</a>
+<a name="ln416">    }</a>
+<a name="ln417">    if (flags) {</a>
+<a name="ln418">        *flags = header-&gt;flags;</a>
+<a name="ln419">    }</a>
+<a name="ln420"> </a>
+<a name="ln421">    if (is_set(header-&gt;flags, crm_ipc_proxied)) {</a>
+<a name="ln422">        /* mark this client as being the endpoint of a proxy connection.</a>
+<a name="ln423">         * Proxy connections responses are sent on the event channel to avoid</a>
+<a name="ln424">         * blocking the proxy daemon (crmd) */</a>
+<a name="ln425">        c-&gt;flags |= crm_client_flag_ipc_proxied;</a>
+<a name="ln426">    }</a>
+<a name="ln427"> </a>
+<a name="ln428">    if(header-&gt;version &gt; PCMK_IPC_VERSION) {</a>
+<a name="ln429">        crm_err(&quot;Filtering incompatible v%d IPC message, we only support versions &lt;= %d&quot;,</a>
+<a name="ln430">                header-&gt;version, PCMK_IPC_VERSION);</a>
+<a name="ln431">        return NULL;</a>
+<a name="ln432">    }</a>
+<a name="ln433"> </a>
+<a name="ln434">    if (header-&gt;size_compressed) {</a>
+<a name="ln435">        int rc = 0;</a>
+<a name="ln436">        unsigned int size_u = 1 + header-&gt;size_uncompressed;</a>
+<a name="ln437">        uncompressed = calloc(1, size_u);</a>
+<a name="ln438"> </a>
+<a name="ln439">        crm_trace(&quot;Decompressing message data %u bytes into %u bytes&quot;,</a>
+<a name="ln440">                  header-&gt;size_compressed, size_u);</a>
+<a name="ln441"> </a>
+<a name="ln442">        rc = BZ2_bzBuffToBuffDecompress(uncompressed, &amp;size_u, text, header-&gt;size_compressed, 1, 0);</a>
+<a name="ln443">        text = uncompressed;</a>
+<a name="ln444"> </a>
+<a name="ln445">        if (rc != BZ_OK) {</a>
+<a name="ln446">            crm_err(&quot;Decompression failed: %s (%d)&quot;, bz2_strerror(rc), rc);</a>
+<a name="ln447">            free(uncompressed);</a>
+<a name="ln448">            return NULL;</a>
+<a name="ln449">        }</a>
+<a name="ln450">    }</a>
+<a name="ln451"> </a>
+<a name="ln452">    CRM_ASSERT(text[header-&gt;size_uncompressed - 1] == 0);</a>
+<a name="ln453"> </a>
+<a name="ln454">    crm_trace(&quot;Received %.200s&quot;, text);</a>
+<a name="ln455">    xml = string2xml(text);</a>
+<a name="ln456"> </a>
+<a name="ln457">    free(uncompressed);</a>
+<a name="ln458">    return xml;</a>
+<a name="ln459">}</a>
+<a name="ln460"> </a>
+<a name="ln461">ssize_t crm_ipcs_flush_events(crm_client_t * c);</a>
+<a name="ln462"> </a>
+<a name="ln463">static gboolean</a>
+<a name="ln464">crm_ipcs_flush_events_cb(gpointer data)</a>
+<a name="ln465">{</a>
+<a name="ln466">    crm_client_t *c = data;</a>
+<a name="ln467"> </a>
+<a name="ln468">    c-&gt;event_timer = 0;</a>
+<a name="ln469">    crm_ipcs_flush_events(c);</a>
+<a name="ln470">    return FALSE;</a>
+<a name="ln471">}</a>
+<a name="ln472"> </a>
+<a name="ln473">/*!</a>
+<a name="ln474"> * \internal</a>
+<a name="ln475"> * \brief Add progressive delay before next event queue flush</a>
+<a name="ln476"> *</a>
+<a name="ln477"> * \param[in,out] c          Client connection to add delay to</a>
+<a name="ln478"> * \param[in]     queue_len  Current event queue length</a>
+<a name="ln479"> */</a>
+<a name="ln480">static inline void</a>
+<a name="ln481">delay_next_flush(crm_client_t *c, unsigned int queue_len)</a>
+<a name="ln482">{</a>
+<a name="ln483">    /* Delay a maximum of 5 seconds */</a>
+<a name="ln484">    guint delay = (queue_len &lt; 40)? (1000 + 100 * queue_len) : 5000;</a>
+<a name="ln485"> </a>
+<a name="ln486">    c-&gt;event_timer = g_timeout_add(delay, crm_ipcs_flush_events_cb, c);</a>
+<a name="ln487">}</a>
+<a name="ln488"> </a>
+<a name="ln489">ssize_t</a>
+<a name="ln490">crm_ipcs_flush_events(crm_client_t * c)</a>
+<a name="ln491">{</a>
+<a name="ln492">    ssize_t rc = 0;</a>
+<a name="ln493">    unsigned int sent = 0;</a>
+<a name="ln494">    unsigned int queue_len = 0;</a>
+<a name="ln495"> </a>
+<a name="ln496">    if (c == NULL) {</a>
+<a name="ln497">        return pcmk_ok;</a>
+<a name="ln498"> </a>
+<a name="ln499">    } else if (c-&gt;event_timer) {</a>
+<a name="ln500">        /* There is already a timer, wait until it goes off */</a>
+<a name="ln501">        crm_trace(&quot;Timer active for %p - %d&quot;, c-&gt;ipcs, c-&gt;event_timer);</a>
+<a name="ln502">        return pcmk_ok;</a>
+<a name="ln503">    }</a>
+<a name="ln504"> </a>
+<a name="ln505">    queue_len = g_list_length(c-&gt;event_queue);</a>
+<a name="ln506">    while (c-&gt;event_queue &amp;&amp; sent &lt; 100) {</a>
+<a name="ln507">        struct crm_ipc_response_header *header = NULL;</a>
+<a name="ln508">        struct iovec *event = c-&gt;event_queue-&gt;data;</a>
+<a name="ln509"> </a>
+<a name="ln510">        rc = qb_ipcs_event_sendv(c-&gt;ipcs, event, 2);</a>
+<a name="ln511">        if (rc &lt; 0) {</a>
+<a name="ln512">            break;</a>
+<a name="ln513">        }</a>
+<a name="ln514"> </a>
+<a name="ln515">        sent++;</a>
+<a name="ln516">        header = event[0].iov_base;</a>
+<a name="ln517">        if (header-&gt;size_compressed) {</a>
+<a name="ln518">            crm_trace(&quot;Event %d to %p[%d] (%lld compressed bytes) sent&quot;,</a>
+<a name="ln519">                      header-&gt;qb.id, c-&gt;ipcs, c-&gt;pid, (long long) rc);</a>
+<a name="ln520">        } else {</a>
+<a name="ln521">            crm_trace(&quot;Event %d to %p[%d] (%lld bytes) sent: %.120s&quot;,</a>
+<a name="ln522">                      header-&gt;qb.id, c-&gt;ipcs, c-&gt;pid, (long long) rc,</a>
+<a name="ln523">                      (char *) (event[1].iov_base));</a>
+<a name="ln524">        }</a>
+<a name="ln525"> </a>
+<a name="ln526">        c-&gt;event_queue = g_list_remove(c-&gt;event_queue, event);</a>
+<a name="ln527">        free(event[0].iov_base);</a>
+<a name="ln528">        free(event[1].iov_base);</a>
+<a name="ln529">        free(event);</a>
+<a name="ln530">    }</a>
+<a name="ln531"> </a>
+<a name="ln532">    queue_len -= sent;</a>
+<a name="ln533">    if (sent &gt; 0 || queue_len) {</a>
+<a name="ln534">        crm_trace(&quot;Sent %d events (%d remaining) for %p[%d]: %s (%lld)&quot;,</a>
+<a name="ln535">                  sent, queue_len, c-&gt;ipcs, c-&gt;pid,</a>
+<a name="ln536">                  pcmk_strerror(rc &lt; 0 ? rc : 0), (long long) rc);</a>
+<a name="ln537">    }</a>
+<a name="ln538"> </a>
+<a name="ln539">    if (queue_len) {</a>
+<a name="ln540">        /* We want to allow clients to briefly fall behind on processing</a>
+<a name="ln541">         * incoming messages, but drop completely unresponsive clients so the</a>
+<a name="ln542">         * connection doesn't consume resources indefinitely.</a>
+<a name="ln543">         *</a>
+<a name="ln544">         * @TODO It is possible that the queue could reasonably grow large in a</a>
+<a name="ln545">         * short time. An example is a reprobe of hundreds of resources on many</a>
+<a name="ln546">         * nodes resulting in a surge of CIB replies to the crmd. We could</a>
+<a name="ln547">         * possibly give cluster daemons a higher threshold here, and/or prevent</a>
+<a name="ln548">         * such a surge by throttling LRM history writes in the crmd.</a>
+<a name="ln549">         */</a>
+<a name="ln550"> </a>
+<a name="ln551">        if (queue_len &gt; PCMK_IPC_MAX_QUEUE) {</a>
+<a name="ln552">            if ((c-&gt;backlog_len &lt;= 1) || (queue_len &lt; c-&gt;backlog_len)) {</a>
+<a name="ln553">                /* Don't evict for a new or shrinking backlog */</a>
+<a name="ln554">                crm_warn(&quot;Client with process ID %u has a backlog of %u messages &quot;</a>
+<a name="ln555">                         CRM_XS &quot; %p&quot;, c-&gt;pid, queue_len, c-&gt;ipcs);</a>
+<a name="ln556">            } else {</a>
+<a name="ln557">                crm_err(&quot;Evicting client with process ID %u due to backlog of %u messages &quot;</a>
+<a name="ln558">                         CRM_XS &quot; %p&quot;, c-&gt;pid, queue_len, c-&gt;ipcs);</a>
+<a name="ln559">                c-&gt;backlog_len = 0;</a>
+<a name="ln560">                qb_ipcs_disconnect(c-&gt;ipcs);</a>
+<a name="ln561">                return rc;</a>
+<a name="ln562">            }</a>
+<a name="ln563">        }</a>
+<a name="ln564"> </a>
+<a name="ln565">        c-&gt;backlog_len = queue_len;</a>
+<a name="ln566">        delay_next_flush(c, queue_len);</a>
+<a name="ln567"> </a>
+<a name="ln568">    } else {</a>
+<a name="ln569">        /* Event queue is empty, there is no backlog */</a>
+<a name="ln570">        c-&gt;backlog_len = 0;</a>
+<a name="ln571">    }</a>
+<a name="ln572"> </a>
+<a name="ln573">    return rc;</a>
+<a name="ln574">}</a>
+<a name="ln575"> </a>
+<a name="ln576">ssize_t</a>
+<a name="ln577">crm_ipc_prepare(uint32_t request, xmlNode * message, struct iovec ** result, uint32_t max_send_size)</a>
+<a name="ln578">{</a>
+<a name="ln579">    static unsigned int biggest = 0;</a>
+<a name="ln580">    struct iovec *iov;</a>
+<a name="ln581">    unsigned int total = 0;</a>
+<a name="ln582">    char *compressed = NULL;</a>
+<a name="ln583">    char *buffer = dump_xml_unformatted(message);</a>
+<a name="ln584">    struct crm_ipc_response_header *header = calloc(1, sizeof(struct crm_ipc_response_header));</a>
+<a name="ln585"> </a>
+<a name="ln586">    CRM_ASSERT(result != NULL);</a>
+<a name="ln587"> </a>
+<a name="ln588">    crm_ipc_init();</a>
+<a name="ln589"> </a>
+<a name="ln590">    if (max_send_size == 0) {</a>
+<a name="ln591">        max_send_size = ipc_buffer_max;</a>
+<a name="ln592">    }</a>
+<a name="ln593"> </a>
+<a name="ln594">    CRM_LOG_ASSERT(max_send_size != 0);</a>
+<a name="ln595"> </a>
+<a name="ln596">    *result = NULL;</a>
+<a name="ln597">    iov = calloc(2, sizeof(struct iovec));</a>
+<a name="ln598"> </a>
+<a name="ln599"> </a>
+<a name="ln600">    iov[0].iov_len = hdr_offset;</a>
+<a name="ln601">    iov[0].iov_base = header;</a>
+<a name="ln602"> </a>
+<a name="ln603">    header-&gt;version = PCMK_IPC_VERSION;</a>
+<a name="ln604">    header-&gt;size_uncompressed = 1 + strlen(buffer);</a>
+<a name="ln605">    total = iov[0].iov_len + header-&gt;size_uncompressed;</a>
+<a name="ln606"> </a>
+<a name="ln607">    if (total &lt; max_send_size) {</a>
+<a name="ln608">        iov[1].iov_base = buffer;</a>
+<a name="ln609">        iov[1].iov_len = header-&gt;size_uncompressed;</a>
+<a name="ln610"> </a>
+<a name="ln611">    } else {</a>
+<a name="ln612">        unsigned int new_size = 0;</a>
+<a name="ln613"> </a>
+<a name="ln614">        if (crm_compress_string</a>
+<a name="ln615">            (buffer, header-&gt;size_uncompressed, max_send_size, &amp;compressed, &amp;new_size)) {</a>
+<a name="ln616"> </a>
+<a name="ln617">            header-&gt;flags |= crm_ipc_compressed;</a>
+<a name="ln618">            header-&gt;size_compressed = new_size;</a>
+<a name="ln619"> </a>
+<a name="ln620">            iov[1].iov_len = header-&gt;size_compressed;</a>
+<a name="ln621">            iov[1].iov_base = compressed;</a>
+<a name="ln622"> </a>
+<a name="ln623">            free(buffer);</a>
+<a name="ln624"> </a>
+<a name="ln625">            biggest = QB_MAX(header-&gt;size_compressed, biggest);</a>
+<a name="ln626"> </a>
+<a name="ln627">        } else {</a>
+<a name="ln628">            ssize_t rc = -EMSGSIZE;</a>
+<a name="ln629"> </a>
+<a name="ln630">            crm_log_xml_trace(message, &quot;EMSGSIZE&quot;);</a>
+<a name="ln631">            biggest = QB_MAX(header-&gt;size_uncompressed, biggest);</a>
+<a name="ln632"> </a>
+<a name="ln633">            crm_err</a>
+<a name="ln634">                (&quot;Could not compress the message (%u bytes) into less than the configured ipc limit (%u bytes). &quot;</a>
+<a name="ln635">                 &quot;Set PCMK_ipc_buffer to a higher value (%u bytes suggested)&quot;,</a>
+<a name="ln636">                 header-&gt;size_uncompressed, max_send_size, 4 * biggest);</a>
+<a name="ln637"> </a>
+<a name="ln638">            free(compressed);</a>
+<a name="ln639">            free(buffer);</a>
+<a name="ln640">            free(header);</a>
+<a name="ln641">            free(iov);</a>
+<a name="ln642"> </a>
+<a name="ln643">            return rc;</a>
+<a name="ln644">        }</a>
+<a name="ln645">    }</a>
+<a name="ln646"> </a>
+<a name="ln647">    header-&gt;qb.size = iov[0].iov_len + iov[1].iov_len;</a>
+<a name="ln648">    header-&gt;qb.id = (int32_t)request;    /* Replying to a specific request */</a>
+<a name="ln649"> </a>
+<a name="ln650">    *result = iov;</a>
+<a name="ln651">    CRM_ASSERT(header-&gt;qb.size &gt; 0);</a>
+<a name="ln652">    return header-&gt;qb.size;</a>
+<a name="ln653">}</a>
+<a name="ln654"> </a>
+<a name="ln655">ssize_t</a>
+<a name="ln656">crm_ipcs_sendv(crm_client_t * c, struct iovec * iov, enum crm_ipc_flags flags)</a>
+<a name="ln657">{</a>
+<a name="ln658">    ssize_t rc;</a>
+<a name="ln659">    static uint32_t id = 1;</a>
+<a name="ln660">    struct crm_ipc_response_header *header = iov[0].iov_base;</a>
+<a name="ln661"> </a>
+<a name="ln662">    if (c-&gt;flags &amp; crm_client_flag_ipc_proxied) {</a>
+<a name="ln663">        /* _ALL_ replies to proxied connections need to be sent as events */</a>
+<a name="ln664">        if (is_not_set(flags, crm_ipc_server_event)) {</a>
+<a name="ln665">            flags |= crm_ipc_server_event;</a>
+<a name="ln666">            /* this flag lets us know this was originally meant to be a response.</a>
+<a name="ln667">             * even though we're sending it over the event channel. */</a>
+<a name="ln668">            flags |= crm_ipc_proxied_relay_response;</a>
+<a name="ln669">        }</a>
+<a name="ln670">    }</a>
+<a name="ln671"> </a>
+<a name="ln672">    header-&gt;flags |= flags;</a>
+<a name="ln673">    if (flags &amp; crm_ipc_server_event) {</a>
+<a name="ln674">        header-&gt;qb.id = id++;   /* We don't really use it, but doesn't hurt to set one */</a>
+<a name="ln675"> </a>
+<a name="ln676">        if (flags &amp; crm_ipc_server_free) {</a>
+<a name="ln677">            crm_trace(&quot;Sending the original to %p[%d]&quot;, c-&gt;ipcs, c-&gt;pid);</a>
+<a name="ln678">            c-&gt;event_queue = g_list_append(c-&gt;event_queue, iov);</a>
+<a name="ln679"> </a>
+<a name="ln680">        } else {</a>
+<a name="ln681">            struct iovec *iov_copy = calloc(2, sizeof(struct iovec));</a>
+<a name="ln682"> </a>
+<a name="ln683">            crm_trace(&quot;Sending a copy to %p[%d]&quot;, c-&gt;ipcs, c-&gt;pid);</a>
+<a name="ln684">            iov_copy[0].iov_len = iov[0].iov_len;</a>
+<a name="ln685">            iov_copy[0].iov_base = malloc(iov[0].iov_len);</a>
+<a name="ln686">            memcpy(iov_copy[0].iov_base, iov[0].iov_base, iov[0].iov_len);</a>
+<a name="ln687"> </a>
+<a name="ln688">            iov_copy[1].iov_len = iov[1].iov_len;</a>
+<a name="ln689">            iov_copy[1].iov_base = malloc(iov[1].iov_len);</a>
+<a name="ln690">            memcpy(iov_copy[1].iov_base, iov[1].iov_base, iov[1].iov_len);</a>
+<a name="ln691"> </a>
+<a name="ln692">            c-&gt;event_queue = g_list_append(c-&gt;event_queue, iov_copy);</a>
+<a name="ln693">        }</a>
+<a name="ln694"> </a>
+<a name="ln695">    } else {</a>
+<a name="ln696">        CRM_LOG_ASSERT(header-&gt;qb.id != 0);     /* Replying to a specific request */</a>
+<a name="ln697"> </a>
+<a name="ln698">        rc = qb_ipcs_response_sendv(c-&gt;ipcs, iov, 2);</a>
+<a name="ln699">        if (rc &lt; header-&gt;qb.size) {</a>
+<a name="ln700">            crm_notice(&quot;Response %d to %p[%d] (%u bytes) failed: %s (%d)&quot;,</a>
+<a name="ln701">                       header-&gt;qb.id, c-&gt;ipcs, c-&gt;pid, header-&gt;qb.size, pcmk_strerror(rc), rc);</a>
+<a name="ln702"> </a>
+<a name="ln703">        } else {</a>
+<a name="ln704">            crm_trace(&quot;Response %d sent, %lld bytes to %p[%d]&quot;,</a>
+<a name="ln705">                      header-&gt;qb.id, (long long) rc, c-&gt;ipcs, c-&gt;pid);</a>
+<a name="ln706">        }</a>
+<a name="ln707"> </a>
+<a name="ln708">        if (flags &amp; crm_ipc_server_free) {</a>
+<a name="ln709">            free(iov[0].iov_base);</a>
+<a name="ln710">            free(iov[1].iov_base);</a>
+<a name="ln711">            free(iov);</a>
+<a name="ln712">        }</a>
+<a name="ln713">    }</a>
+<a name="ln714"> </a>
+<a name="ln715">    if (flags &amp; crm_ipc_server_event) {</a>
+<a name="ln716">        rc = crm_ipcs_flush_events(c);</a>
+<a name="ln717">    } else {</a>
+<a name="ln718">        crm_ipcs_flush_events(c);</a>
+<a name="ln719">    }</a>
+<a name="ln720"> </a>
+<a name="ln721">    if (rc == -EPIPE || rc == -ENOTCONN) {</a>
+<a name="ln722">        crm_trace(&quot;Client %p disconnected&quot;, c-&gt;ipcs);</a>
+<a name="ln723">    }</a>
+<a name="ln724"> </a>
+<a name="ln725">    return rc;</a>
+<a name="ln726">}</a>
+<a name="ln727"> </a>
+<a name="ln728">ssize_t</a>
+<a name="ln729">crm_ipcs_send(crm_client_t * c, uint32_t request, xmlNode * message,</a>
+<a name="ln730">              enum crm_ipc_flags flags)</a>
+<a name="ln731">{</a>
+<a name="ln732">    struct iovec *iov = NULL;</a>
+<a name="ln733">    ssize_t rc = 0;</a>
+<a name="ln734"> </a>
+<a name="ln735">    if(c == NULL) {</a>
+<a name="ln736">        return -EDESTADDRREQ;</a>
+<a name="ln737">    }</a>
+<a name="ln738">    crm_ipc_init();</a>
+<a name="ln739"> </a>
+<a name="ln740">    rc = crm_ipc_prepare(request, message, &amp;iov, ipc_buffer_max);</a>
+<a name="ln741">    if (rc &gt; 0) {</a>
+<a name="ln742">        rc = crm_ipcs_sendv(c, iov, flags | crm_ipc_server_free);</a>
+<a name="ln743"> </a>
+<a name="ln744">    } else {</a>
+<a name="ln745">        free(iov);</a>
+<a name="ln746">        crm_notice(&quot;Message to %p[%d] failed: %s (%d)&quot;,</a>
+<a name="ln747">                   c-&gt;ipcs, c-&gt;pid, pcmk_strerror(rc), rc);</a>
+<a name="ln748">    }</a>
+<a name="ln749"> </a>
+<a name="ln750">    return rc;</a>
+<a name="ln751">}</a>
+<a name="ln752"> </a>
+<a name="ln753">void</a>
+<a name="ln754">crm_ipcs_send_ack(crm_client_t * c, uint32_t request, uint32_t flags, const char *tag, const char *function,</a>
+<a name="ln755">                  int line)</a>
+<a name="ln756">{</a>
+<a name="ln757">    if (flags &amp; crm_ipc_client_response) {</a>
+<a name="ln758">        xmlNode *ack = create_xml_node(NULL, tag);</a>
+<a name="ln759"> </a>
+<a name="ln760">        crm_trace(&quot;Ack'ing msg from %s (%p)&quot;, crm_client_name(c), c);</a>
+<a name="ln761">        c-&gt;request_id = 0;</a>
+<a name="ln762">        crm_xml_add(ack, &quot;function&quot;, function);</a>
+<a name="ln763">        crm_xml_add_int(ack, &quot;line&quot;, line);</a>
+<a name="ln764">        crm_ipcs_send(c, request, ack, flags);</a>
+<a name="ln765">        free_xml(ack);</a>
+<a name="ln766">    }</a>
+<a name="ln767">}</a>
+<a name="ln768"> </a>
+<a name="ln769">/* Client... */</a>
+<a name="ln770"> </a>
+<a name="ln771">#define MIN_MSG_SIZE    12336   /* sizeof(struct qb_ipc_connection_response) */</a>
+<a name="ln772">#define MAX_MSG_SIZE    128*1024 /* 128k default */</a>
+<a name="ln773"> </a>
+<a name="ln774">struct crm_ipc_s {</a>
+<a name="ln775">    struct pollfd pfd;</a>
+<a name="ln776"> </a>
+<a name="ln777">    /* the max size we can send/receive over ipc */</a>
+<a name="ln778">    unsigned int max_buf_size;</a>
+<a name="ln779">    /* Size of the allocated 'buffer' */</a>
+<a name="ln780">    unsigned int buf_size;</a>
+<a name="ln781">    int msg_size;</a>
+<a name="ln782">    int need_reply;</a>
+<a name="ln783">    char *buffer;</a>
+<a name="ln784">    char *name;</a>
+<a name="ln785">    uint32_t buffer_flags;</a>
+<a name="ln786"> </a>
+<a name="ln787">    qb_ipcc_connection_t *ipc;</a>
+<a name="ln788"> </a>
+<a name="ln789">};</a>
+<a name="ln790"> </a>
+<a name="ln791">static unsigned int</a>
+<a name="ln792">pick_ipc_buffer(unsigned int max)</a>
+<a name="ln793">{</a>
+<a name="ln794">    static unsigned int global_max = 0;</a>
+<a name="ln795"> </a>
+<a name="ln796">    if (global_max == 0) {</a>
+<a name="ln797">        const char *env = getenv(&quot;PCMK_ipc_buffer&quot;);</a>
+<a name="ln798"> </a>
+<a name="ln799">        if (env) {</a>
+<a name="ln800">            int env_max = crm_parse_int(env, &quot;0&quot;);</a>
+<a name="ln801"> </a>
+<a name="ln802">            global_max = (env_max &gt; 0)? QB_MAX(MIN_MSG_SIZE, env_max) : MAX_MSG_SIZE;</a>
+<a name="ln803"> </a>
+<a name="ln804">        } else {</a>
+<a name="ln805">            global_max = MAX_MSG_SIZE;</a>
+<a name="ln806">        }</a>
+<a name="ln807">    }</a>
+<a name="ln808"> </a>
+<a name="ln809">    return QB_MAX(max, global_max);</a>
+<a name="ln810">}</a>
+<a name="ln811"> </a>
+<a name="ln812">crm_ipc_t *</a>
+<a name="ln813">crm_ipc_new(const char *name, size_t max_size)</a>
+<a name="ln814">{</a>
+<a name="ln815">    crm_ipc_t *client = NULL;</a>
+<a name="ln816"> </a>
+<a name="ln817">    client = calloc(1, sizeof(crm_ipc_t));</a>
+<a name="ln818"> </a>
+<a name="ln819">    client-&gt;name = strdup(name);</a>
+<a name="ln820">    client-&gt;buf_size = pick_ipc_buffer(max_size);</a>
+<a name="ln821">    client-&gt;buffer = malloc(client-&gt;buf_size);</a>
+<a name="ln822"> </a>
+<a name="ln823">    /* Clients initiating connection pick the max buf size */</a>
+<a name="ln824">    client-&gt;max_buf_size = client-&gt;buf_size;</a>
+<a name="ln825"> </a>
+<a name="ln826">    client-&gt;pfd.fd = -1;</a>
+<a name="ln827">    client-&gt;pfd.events = POLLIN;</a>
+<a name="ln828">    client-&gt;pfd.revents = 0;</a>
+<a name="ln829"> </a>
+<a name="ln830">    return client;</a>
+<a name="ln831">}</a>
+<a name="ln832"> </a>
+<a name="ln833">/*!</a>
+<a name="ln834"> * \brief Establish an IPC connection to a Pacemaker component</a>
+<a name="ln835"> *</a>
+<a name="ln836"> * \param[in] client  Connection instance obtained from crm_ipc_new()</a>
+<a name="ln837"> *</a>
+<a name="ln838"> * \return TRUE on success, FALSE otherwise (in which case errno will be set)</a>
+<a name="ln839"> */</a>
+<a name="ln840">bool</a>
+<a name="ln841">crm_ipc_connect(crm_ipc_t * client)</a>
+<a name="ln842">{</a>
+<a name="ln843">    client-&gt;need_reply = FALSE;</a>
+<a name="ln844">    client-&gt;ipc = qb_ipcc_connect(client-&gt;name, client-&gt;buf_size);</a>
+<a name="ln845"> </a>
+<a name="ln846">    if (client-&gt;ipc == NULL) {</a>
+<a name="ln847">        crm_debug(&quot;Could not establish %s connection: %s (%d)&quot;, client-&gt;name, pcmk_strerror(errno), errno);</a>
+<a name="ln848">        return FALSE;</a>
+<a name="ln849">    }</a>
+<a name="ln850"> </a>
+<a name="ln851">    client-&gt;pfd.fd = crm_ipc_get_fd(client);</a>
+<a name="ln852">    if (client-&gt;pfd.fd &lt; 0) {</a>
+<a name="ln853">        crm_debug(&quot;Could not obtain file descriptor for %s connection: %s (%d)&quot;, client-&gt;name, pcmk_strerror(errno), errno);</a>
+<a name="ln854">        return FALSE;</a>
+<a name="ln855">    }</a>
+<a name="ln856"> </a>
+<a name="ln857">    qb_ipcc_context_set(client-&gt;ipc, client);</a>
+<a name="ln858"> </a>
+<a name="ln859">#ifdef HAVE_IPCS_GET_BUFFER_SIZE</a>
+<a name="ln860">    client-&gt;max_buf_size = qb_ipcc_get_buffer_size(client-&gt;ipc);</a>
+<a name="ln861">    if (client-&gt;max_buf_size &gt; client-&gt;buf_size) {</a>
+<a name="ln862">        free(client-&gt;buffer);</a>
+<a name="ln863">        client-&gt;buffer = calloc(1, client-&gt;max_buf_size);</a>
+<a name="ln864">        client-&gt;buf_size = client-&gt;max_buf_size;</a>
+<a name="ln865">    }</a>
+<a name="ln866">#endif</a>
+<a name="ln867"> </a>
+<a name="ln868">    return TRUE;</a>
+<a name="ln869">}</a>
+<a name="ln870"> </a>
+<a name="ln871">void</a>
+<a name="ln872">crm_ipc_close(crm_ipc_t * client)</a>
+<a name="ln873">{</a>
+<a name="ln874">    if (client) {</a>
+<a name="ln875">        crm_trace(&quot;Disconnecting %s IPC connection %p (%p)&quot;, client-&gt;name, client, client-&gt;ipc);</a>
+<a name="ln876"> </a>
+<a name="ln877">        if (client-&gt;ipc) {</a>
+<a name="ln878">            qb_ipcc_connection_t *ipc = client-&gt;ipc;</a>
+<a name="ln879"> </a>
+<a name="ln880">            client-&gt;ipc = NULL;</a>
+<a name="ln881">            qb_ipcc_disconnect(ipc);</a>
+<a name="ln882">        }</a>
+<a name="ln883">    }</a>
+<a name="ln884">}</a>
+<a name="ln885"> </a>
+<a name="ln886">void</a>
+<a name="ln887">crm_ipc_destroy(crm_ipc_t * client)</a>
+<a name="ln888">{</a>
+<a name="ln889">    if (client) {</a>
+<a name="ln890">        if (client-&gt;ipc &amp;&amp; qb_ipcc_is_connected(client-&gt;ipc)) {</a>
+<a name="ln891">            crm_notice(&quot;Destroying an active IPC connection to %s&quot;, client-&gt;name);</a>
+<a name="ln892">            /* The next line is basically unsafe</a>
+<a name="ln893">             *</a>
+<a name="ln894">             * If this connection was attached to mainloop and mainloop is active,</a>
+<a name="ln895">             *   the 'disconnected' callback will end up back here and we'll end</a>
+<a name="ln896">             *   up free'ing the memory twice - something that can still happen</a>
+<a name="ln897">             *   even without this if we destroy a connection and it closes before</a>
+<a name="ln898">             *   we call exit</a>
+<a name="ln899">             */</a>
+<a name="ln900">            /* crm_ipc_close(client); */</a>
+<a name="ln901">        }</a>
+<a name="ln902">        crm_trace(&quot;Destroying IPC connection to %s: %p&quot;, client-&gt;name, client);</a>
+<a name="ln903">        free(client-&gt;buffer);</a>
+<a name="ln904">        free(client-&gt;name);</a>
+<a name="ln905">        free(client);</a>
+<a name="ln906">    }</a>
+<a name="ln907">}</a>
+<a name="ln908"> </a>
+<a name="ln909">int</a>
+<a name="ln910">crm_ipc_get_fd(crm_ipc_t * client)</a>
+<a name="ln911">{</a>
+<a name="ln912">    int fd = 0;</a>
+<a name="ln913"> </a>
+<a name="ln914">    if (client &amp;&amp; client-&gt;ipc &amp;&amp; (qb_ipcc_fd_get(client-&gt;ipc, &amp;fd) == 0)) {</a>
+<a name="ln915">        return fd;</a>
+<a name="ln916">    }</a>
+<a name="ln917">    errno = EINVAL;</a>
+<a name="ln918">    crm_perror(LOG_ERR, &quot;Could not obtain file IPC descriptor for %s&quot;,</a>
+<a name="ln919">               (client? client-&gt;name : &quot;unspecified client&quot;));</a>
+<a name="ln920">    return -errno;</a>
+<a name="ln921">}</a>
+<a name="ln922"> </a>
+<a name="ln923">bool</a>
+<a name="ln924">crm_ipc_connected(crm_ipc_t * client)</a>
+<a name="ln925">{</a>
+<a name="ln926">    bool rc = FALSE;</a>
+<a name="ln927"> </a>
+<a name="ln928">    if (client == NULL) {</a>
+<a name="ln929">        crm_trace(&quot;No client&quot;);</a>
+<a name="ln930">        return FALSE;</a>
+<a name="ln931"> </a>
+<a name="ln932">    } else if (client-&gt;ipc == NULL) {</a>
+<a name="ln933">        crm_trace(&quot;No connection&quot;);</a>
+<a name="ln934">        return FALSE;</a>
+<a name="ln935"> </a>
+<a name="ln936">    } else if (client-&gt;pfd.fd &lt; 0) {</a>
+<a name="ln937">        crm_trace(&quot;Bad descriptor&quot;);</a>
+<a name="ln938">        return FALSE;</a>
+<a name="ln939">    }</a>
+<a name="ln940"> </a>
+<a name="ln941">    rc = qb_ipcc_is_connected(client-&gt;ipc);</a>
+<a name="ln942">    if (rc == FALSE) {</a>
+<a name="ln943">        client-&gt;pfd.fd = -EINVAL;</a>
+<a name="ln944">    }</a>
+<a name="ln945">    return rc;</a>
+<a name="ln946">}</a>
+<a name="ln947"> </a>
+<a name="ln948">/*!</a>
+<a name="ln949"> * \brief Check whether an IPC connection is ready to be read</a>
+<a name="ln950"> *</a>
+<a name="ln951"> * \param[in] client  Connection to check</a>
+<a name="ln952"> *</a>
+<a name="ln953"> * \return Positive value if ready to be read, 0 if not ready, -errno on error</a>
+<a name="ln954"> */</a>
+<a name="ln955">int</a>
+<a name="ln956">crm_ipc_ready(crm_ipc_t *client)</a>
+<a name="ln957">{</a>
+<a name="ln958">    int rc;</a>
+<a name="ln959"> </a>
+<a name="ln960">    CRM_ASSERT(client != NULL);</a>
+<a name="ln961"> </a>
+<a name="ln962">    if (crm_ipc_connected(client) == FALSE) {</a>
+<a name="ln963">        return -ENOTCONN;</a>
+<a name="ln964">    }</a>
+<a name="ln965"> </a>
+<a name="ln966">    client-&gt;pfd.revents = 0;</a>
+<a name="ln967">    rc = poll(&amp;(client-&gt;pfd), 1, 0);</a>
+<a name="ln968">    return (rc &lt; 0)? -errno : rc;</a>
+<a name="ln969">}</a>
+<a name="ln970"> </a>
+<a name="ln971">static int</a>
+<a name="ln972">crm_ipc_decompress(crm_ipc_t * client)</a>
+<a name="ln973">{</a>
+<a name="ln974">    struct crm_ipc_response_header *header = (struct crm_ipc_response_header *)(void*)client-&gt;buffer;</a>
+<a name="ln975"> </a>
+<a name="ln976">    if (header-&gt;size_compressed) {</a>
+<a name="ln977">        int rc = 0;</a>
+<a name="ln978">        unsigned int size_u = 1 + header-&gt;size_uncompressed;</a>
+<a name="ln979">        /* never let buf size fall below our max size required for ipc reads. */</a>
+<a name="ln980">        unsigned int new_buf_size = QB_MAX((hdr_offset + size_u), client-&gt;max_buf_size);</a>
+<a name="ln981">        char *uncompressed = calloc(1, new_buf_size);</a>
+<a name="ln982"> </a>
+<a name="ln983">        crm_trace(&quot;Decompressing message data %u bytes into %u bytes&quot;,</a>
+<a name="ln984">                 header-&gt;size_compressed, size_u);</a>
+<a name="ln985"> </a>
+<a name="ln986">        rc = BZ2_bzBuffToBuffDecompress(uncompressed + hdr_offset, &amp;size_u,</a>
+<a name="ln987">                                        client-&gt;buffer + hdr_offset, header-&gt;size_compressed, 1, 0);</a>
+<a name="ln988"> </a>
+<a name="ln989">        if (rc != BZ_OK) {</a>
+<a name="ln990">            crm_err(&quot;Decompression failed: %s (%d)&quot;, bz2_strerror(rc), rc);</a>
+<a name="ln991">            free(uncompressed);</a>
+<a name="ln992">            return -EILSEQ;</a>
+<a name="ln993">        }</a>
+<a name="ln994"> </a>
+<a name="ln995">        /*</a>
+<a name="ln996">         * This assert no longer holds true.  For an identical msg, some clients may</a>
+<a name="ln997">         * require compression, and others may not. If that same msg (event) is sent</a>
+<a name="ln998">         * to multiple clients, it could result in some clients receiving a compressed</a>
+<a name="ln999">         * msg even though compression was not explicitly required for them.</a>
+<a name="ln1000">         *</a>
+<a name="ln1001">         * CRM_ASSERT((header-&gt;size_uncompressed + hdr_offset) &gt;= ipc_buffer_max);</a>
+<a name="ln1002">         */</a>
+<a name="ln1003">        CRM_ASSERT(size_u == header-&gt;size_uncompressed);</a>
+<a name="ln1004"> </a>
+<a name="ln1005">        memcpy(uncompressed, client-&gt;buffer, hdr_offset);       /* Preserve the header */</a>
+<a name="ln1006">        header = (struct crm_ipc_response_header *)(void*)uncompressed;</a>
+<a name="ln1007"> </a>
+<a name="ln1008">        free(client-&gt;buffer);</a>
+<a name="ln1009">        client-&gt;buf_size = new_buf_size;</a>
+<a name="ln1010">        client-&gt;buffer = uncompressed;</a>
+<a name="ln1011">    }</a>
+<a name="ln1012"> </a>
+<a name="ln1013">    CRM_ASSERT(client-&gt;buffer[hdr_offset + header-&gt;size_uncompressed - 1] == 0);</a>
+<a name="ln1014">    return pcmk_ok;</a>
+<a name="ln1015">}</a>
+<a name="ln1016"> </a>
+<a name="ln1017">long</a>
+<a name="ln1018">crm_ipc_read(crm_ipc_t * client)</a>
+<a name="ln1019">{</a>
+<a name="ln1020">    struct crm_ipc_response_header *header = NULL;</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    CRM_ASSERT(client != NULL);</a>
+<a name="ln1023">    CRM_ASSERT(client-&gt;ipc != NULL);</a>
+<a name="ln1024">    CRM_ASSERT(client-&gt;buffer != NULL);</a>
+<a name="ln1025"> </a>
+<a name="ln1026">    crm_ipc_init();</a>
+<a name="ln1027"> </a>
+<a name="ln1028">    client-&gt;buffer[0] = 0;</a>
+<a name="ln1029">    client-&gt;msg_size = qb_ipcc_event_recv(client-&gt;ipc, client-&gt;buffer, client-&gt;buf_size - 1, 0);</a>
+<a name="ln1030">    if (client-&gt;msg_size &gt;= 0) {</a>
+<a name="ln1031">        int rc = crm_ipc_decompress(client);</a>
+<a name="ln1032"> </a>
+<a name="ln1033">        if (rc != pcmk_ok) {</a>
+<a name="ln1034">            return rc;</a>
+<a name="ln1035">        }</a>
+<a name="ln1036"> </a>
+<a name="ln1037">        header = (struct crm_ipc_response_header *)(void*)client-&gt;buffer;</a>
+<a name="ln1038">        if(header-&gt;version &gt; PCMK_IPC_VERSION) {</a>
+<a name="ln1039">            crm_err(&quot;Filtering incompatible v%d IPC message, we only support versions &lt;= %d&quot;,</a>
+<a name="ln1040">                    header-&gt;version, PCMK_IPC_VERSION);</a>
+<a name="ln1041">            return -EBADMSG;</a>
+<a name="ln1042">        }</a>
+<a name="ln1043"> </a>
+<a name="ln1044">        crm_trace(&quot;Received %s event %d, size=%u, rc=%d, text: %.100s&quot;,</a>
+<a name="ln1045">                  client-&gt;name, header-&gt;qb.id, header-&gt;qb.size, client-&gt;msg_size,</a>
+<a name="ln1046">                  client-&gt;buffer + hdr_offset);</a>
+<a name="ln1047"> </a>
+<a name="ln1048">    } else {</a>
+<a name="ln1049">        crm_trace(&quot;No message from %s received: %s&quot;, client-&gt;name, pcmk_strerror(client-&gt;msg_size));</a>
+<a name="ln1050">    }</a>
+<a name="ln1051"> </a>
+<a name="ln1052">    if (crm_ipc_connected(client) == FALSE || client-&gt;msg_size == -ENOTCONN) {</a>
+<a name="ln1053">        crm_err(&quot;Connection to %s failed&quot;, client-&gt;name);</a>
+<a name="ln1054">    }</a>
+<a name="ln1055"> </a>
+<a name="ln1056">    if (header) {</a>
+<a name="ln1057">        /* Data excluding the header */</a>
+<a name="ln1058">        return header-&gt;size_uncompressed;</a>
+<a name="ln1059">    }</a>
+<a name="ln1060">    return -ENOMSG;</a>
+<a name="ln1061">}</a>
+<a name="ln1062"> </a>
+<a name="ln1063">const char *</a>
+<a name="ln1064">crm_ipc_buffer(crm_ipc_t * client)</a>
+<a name="ln1065">{</a>
+<a name="ln1066">    CRM_ASSERT(client != NULL);</a>
+<a name="ln1067">    return client-&gt;buffer + sizeof(struct crm_ipc_response_header);</a>
+<a name="ln1068">}</a>
+<a name="ln1069"> </a>
+<a name="ln1070">uint32_t</a>
+<a name="ln1071">crm_ipc_buffer_flags(crm_ipc_t * client)</a>
+<a name="ln1072">{</a>
+<a name="ln1073">    struct crm_ipc_response_header *header = NULL;</a>
+<a name="ln1074"> </a>
+<a name="ln1075">    CRM_ASSERT(client != NULL);</a>
+<a name="ln1076">    if (client-&gt;buffer == NULL) {</a>
+<a name="ln1077">        return 0;</a>
+<a name="ln1078">    }</a>
+<a name="ln1079"> </a>
+<a name="ln1080">    header = (struct crm_ipc_response_header *)(void*)client-&gt;buffer;</a>
+<a name="ln1081">    return header-&gt;flags;</a>
+<a name="ln1082">}</a>
+<a name="ln1083"> </a>
+<a name="ln1084">const char *</a>
+<a name="ln1085">crm_ipc_name(crm_ipc_t * client)</a>
+<a name="ln1086">{</a>
+<a name="ln1087">    CRM_ASSERT(client != NULL);</a>
+<a name="ln1088">    return client-&gt;name;</a>
+<a name="ln1089">}</a>
+<a name="ln1090"> </a>
+<a name="ln1091">static int</a>
+<a name="ln1092">internal_ipc_send_recv(crm_ipc_t * client, const void *iov)</a>
+<a name="ln1093">{</a>
+<a name="ln1094">    int rc = 0;</a>
+<a name="ln1095"> </a>
+<a name="ln1096">    do {</a>
+<a name="ln1097">        rc = qb_ipcc_sendv_recv(client-&gt;ipc, iov, 2, client-&gt;buffer, client-&gt;buf_size, -1);</a>
+<a name="ln1098">    } while (rc == -EAGAIN &amp;&amp; crm_ipc_connected(client));</a>
+<a name="ln1099"> </a>
+<a name="ln1100">    return rc;</a>
+<a name="ln1101">}</a>
+<a name="ln1102"> </a>
+<a name="ln1103">static int</a>
+<a name="ln1104">internal_ipc_send_request(crm_ipc_t * client, const void *iov, int ms_timeout)</a>
+<a name="ln1105">{</a>
+<a name="ln1106">    int rc = 0;</a>
+<a name="ln1107">    time_t timeout = time(NULL) + 1 + (ms_timeout / 1000);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">    do {</a>
+<a name="ln1110">        rc = qb_ipcc_sendv(client-&gt;ipc, iov, 2);</a>
+<a name="ln1111">    } while (rc == -EAGAIN &amp;&amp; time(NULL) &lt; timeout &amp;&amp; crm_ipc_connected(client));</a>
+<a name="ln1112"> </a>
+<a name="ln1113">    return rc;</a>
+<a name="ln1114">}</a>
+<a name="ln1115"> </a>
+<a name="ln1116">static int</a>
+<a name="ln1117">internal_ipc_get_reply(crm_ipc_t * client, int request_id, int ms_timeout)</a>
+<a name="ln1118">{</a>
+<a name="ln1119">    time_t timeout = time(NULL) + 1 + (ms_timeout / 1000);</a>
+<a name="ln1120">    int rc = 0;</a>
+<a name="ln1121"> </a>
+<a name="ln1122">    crm_ipc_init();</a>
+<a name="ln1123"> </a>
+<a name="ln1124">    /* get the reply */</a>
+<a name="ln1125">    crm_trace(&quot;client %s waiting on reply to msg id %d&quot;, client-&gt;name, request_id);</a>
+<a name="ln1126">    do {</a>
+<a name="ln1127"> </a>
+<a name="ln1128">        rc = qb_ipcc_recv(client-&gt;ipc, client-&gt;buffer, client-&gt;buf_size, 1000);</a>
+<a name="ln1129">        if (rc &gt; 0) {</a>
+<a name="ln1130">            struct crm_ipc_response_header *hdr = NULL;</a>
+<a name="ln1131"> </a>
+<a name="ln1132">            int rc = crm_ipc_decompress(client);</a>
+<a name="ln1133"> </a>
+<a name="ln1134">            if (rc != pcmk_ok) {</a>
+<a name="ln1135">                return rc;</a>
+<a name="ln1136">            }</a>
+<a name="ln1137"> </a>
+<a name="ln1138">            hdr = (struct crm_ipc_response_header *)(void*)client-&gt;buffer;</a>
+<a name="ln1139">            if (hdr-&gt;qb.id == request_id) {</a>
+<a name="ln1140">                /* Got it */</a>
+<a name="ln1141">                break;</a>
+<a name="ln1142">            } else if (hdr-&gt;qb.id &lt; request_id) {</a>
+<a name="ln1143">                xmlNode *bad = string2xml(crm_ipc_buffer(client));</a>
+<a name="ln1144"> </a>
+<a name="ln1145">                crm_err(&quot;Discarding old reply %d (need %d)&quot;, hdr-&gt;qb.id, request_id);</a>
+<a name="ln1146">                crm_log_xml_notice(bad, &quot;OldIpcReply&quot;);</a>
+<a name="ln1147"> </a>
+<a name="ln1148">            } else {</a>
+<a name="ln1149">                xmlNode *bad = string2xml(crm_ipc_buffer(client));</a>
+<a name="ln1150"> </a>
+<a name="ln1151">                crm_err(&quot;Discarding newer reply %d (need %d)&quot;, hdr-&gt;qb.id, request_id);</a>
+<a name="ln1152">                crm_log_xml_notice(bad, &quot;ImpossibleReply&quot;);</a>
+<a name="ln1153">                CRM_ASSERT(hdr-&gt;qb.id &lt;= request_id);</a>
+<a name="ln1154">            }</a>
+<a name="ln1155">        } else if (crm_ipc_connected(client) == FALSE) {</a>
+<a name="ln1156">            crm_err(&quot;Server disconnected client %s while waiting for msg id %d&quot;, client-&gt;name,</a>
+<a name="ln1157">                    request_id);</a>
+<a name="ln1158">            break;</a>
+<a name="ln1159">        }</a>
+<a name="ln1160"> </a>
+<a name="ln1161">    } while (time(NULL) &lt; timeout);</a>
+<a name="ln1162"> </a>
+<a name="ln1163">    return rc;</a>
+<a name="ln1164">}</a>
+<a name="ln1165"> </a>
+<a name="ln1166">int</a>
+<a name="ln1167">crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, int32_t ms_timeout,</a>
+<a name="ln1168">             xmlNode ** reply)</a>
+<a name="ln1169">{</a>
+<a name="ln1170">    long rc = 0;</a>
+<a name="ln1171">    struct iovec *iov;</a>
+<a name="ln1172">    static uint32_t id = 0;</a>
+<a name="ln1173">    static int factor = 8;</a>
+<a name="ln1174">    struct crm_ipc_response_header *header;</a>
+<a name="ln1175"> </a>
+<a name="ln1176">    crm_ipc_init();</a>
+<a name="ln1177"> </a>
+<a name="ln1178">    if (client == NULL) {</a>
+<a name="ln1179">        crm_notice(&quot;Invalid connection&quot;);</a>
+<a name="ln1180">        return -ENOTCONN;</a>
+<a name="ln1181"> </a>
+<a name="ln1182">    } else if (crm_ipc_connected(client) == FALSE) {</a>
+<a name="ln1183">        /* Don't even bother */</a>
+<a name="ln1184">        crm_notice(&quot;Connection to %s closed&quot;, client-&gt;name);</a>
+<a name="ln1185">        return -ENOTCONN;</a>
+<a name="ln1186">    }</a>
+<a name="ln1187"> </a>
+<a name="ln1188">    if (ms_timeout == 0) {</a>
+<a name="ln1189">        ms_timeout = 5000;</a>
+<a name="ln1190">    }</a>
+<a name="ln1191"> </a>
+<a name="ln1192">    if (client-&gt;need_reply) {</a>
+<a name="ln1193">        crm_trace(&quot;Trying again to obtain pending reply from %s&quot;, client-&gt;name);</a>
+<a name="ln1194">        rc = qb_ipcc_recv(client-&gt;ipc, client-&gt;buffer, client-&gt;buf_size, ms_timeout);</a>
+<a name="ln1195">        if (rc &lt; 0) {</a>
+<a name="ln1196">            crm_warn(&quot;Sending to %s (%p) is disabled until pending reply is received&quot;, client-&gt;name,</a>
+<a name="ln1197">                     client-&gt;ipc);</a>
+<a name="ln1198">            return -EALREADY;</a>
+<a name="ln1199"> </a>
+<a name="ln1200">        } else {</a>
+<a name="ln1201">            crm_notice(&quot;Lost reply from %s (%p) finally arrived, sending re-enabled&quot;, client-&gt;name,</a>
+<a name="ln1202">                       client-&gt;ipc);</a>
+<a name="ln1203">            client-&gt;need_reply = FALSE;</a>
+<a name="ln1204">        }</a>
+<a name="ln1205">    }</a>
+<a name="ln1206"> </a>
+<a name="ln1207">    id++;</a>
+<a name="ln1208">    CRM_LOG_ASSERT(id != 0); /* Crude wrap-around detection */</a>
+<a name="ln1209">    rc = crm_ipc_prepare(id, message, &amp;iov, client-&gt;max_buf_size);</a>
+<a name="ln1210">    if(rc &lt; 0) {</a>
+<a name="ln1211">        return rc;</a>
+<a name="ln1212">    }</a>
+<a name="ln1213"> </a>
+<a name="ln1214">    header = iov[0].iov_base;</a>
+<a name="ln1215">    header-&gt;flags |= flags;</a>
+<a name="ln1216"> </a>
+<a name="ln1217">    if(is_set(flags, crm_ipc_proxied)) {</a>
+<a name="ln1218">        /* Don't look for a synchronous response */</a>
+<a name="ln1219">        clear_bit(flags, crm_ipc_client_response);</a>
+<a name="ln1220">    }</a>
+<a name="ln1221"> </a>
+<a name="ln1222">    if(header-&gt;size_compressed) {</a>
+<a name="ln1223">        if(factor &lt; 10 &amp;&amp; (client-&gt;max_buf_size / 10) &lt; (rc / factor)) {</a>
+<a name="ln1224">            crm_notice(&quot;Compressed message exceeds %d0%% of the configured ipc limit (%u bytes), &quot;</a>
+<a name="ln1225">                       &quot;consider setting PCMK_ipc_buffer to %u or higher&quot;,</a>
+<a name="ln1226">                       factor, client-&gt;max_buf_size, 2 * client-&gt;max_buf_size);</a>
+<a name="ln1227">            factor++;</a>
+<a name="ln1228">        }</a>
+<a name="ln1229">    }</a>
+<a name="ln1230"> </a>
+<a name="ln1231">    crm_trace(&quot;Sending from client: %s request id: %d bytes: %u timeout:%d msg...&quot;,</a>
+<a name="ln1232">              client-&gt;name, header-&gt;qb.id, header-&gt;qb.size, ms_timeout);</a>
+<a name="ln1233"> </a>
+<a name="ln1234">    if (ms_timeout &gt; 0 || is_not_set(flags, crm_ipc_client_response)) {</a>
+<a name="ln1235"> </a>
+<a name="ln1236">        rc = internal_ipc_send_request(client, iov, ms_timeout);</a>
+<a name="ln1237"> </a>
+<a name="ln1238">        if (rc &lt;= 0) {</a>
+<a name="ln1239">            crm_trace(&quot;Failed to send from client %s request %d with %u bytes...&quot;,</a>
+<a name="ln1240">                      client-&gt;name, header-&gt;qb.id, header-&gt;qb.size);</a>
+<a name="ln1241">            goto send_cleanup;</a>
+<a name="ln1242"> </a>
+<a name="ln1243">        } else if (is_not_set(flags, crm_ipc_client_response)) {</a>
+<a name="ln1244">            crm_trace(&quot;Message sent, not waiting for reply to %d from %s to %u bytes...&quot;,</a>
+<a name="ln1245">                      header-&gt;qb.id, client-&gt;name, header-&gt;qb.size);</a>
+<a name="ln1246"> </a>
+<a name="ln1247">            goto send_cleanup;</a>
+<a name="ln1248">        }</a>
+<a name="ln1249"> </a>
+<a name="ln1250">        rc = internal_ipc_get_reply(client, header-&gt;qb.id, ms_timeout);</a>
+<a name="ln1251">        if (rc &lt; 0) {</a>
+<a name="ln1252">            /* No reply, for now, disable sending</a>
+<a name="ln1253">             *</a>
+<a name="ln1254">             * The alternative is to close the connection since we don't know</a>
+<a name="ln1255">             * how to detect and discard out-of-sequence replies</a>
+<a name="ln1256">             *</a>
+<a name="ln1257">             * TODO - implement the above</a>
+<a name="ln1258">             */</a>
+<a name="ln1259">            client-&gt;need_reply = TRUE;</a>
+<a name="ln1260">        }</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    } else {</a>
+<a name="ln1263">        rc = internal_ipc_send_recv(client, iov);</a>
+<a name="ln1264">    }</a>
+<a name="ln1265"> </a>
+<a name="ln1266">    if (rc &gt; 0) {</a>
+<a name="ln1267">        struct crm_ipc_response_header *hdr = (struct crm_ipc_response_header *)(void*)client-&gt;buffer;</a>
+<a name="ln1268"> </a>
+<a name="ln1269">        crm_trace(&quot;Received response %d, size=%u, rc=%ld, text: %.200s&quot;, hdr-&gt;qb.id, hdr-&gt;qb.size,</a>
+<a name="ln1270">                  rc, crm_ipc_buffer(client));</a>
+<a name="ln1271"> </a>
+<a name="ln1272">        if (reply) {</a>
+<a name="ln1273">            *reply = string2xml(crm_ipc_buffer(client));</a>
+<a name="ln1274">        }</a>
+<a name="ln1275"> </a>
+<a name="ln1276">    } else {</a>
+<a name="ln1277">        crm_trace(&quot;Response not received: rc=%ld, errno=%d&quot;, rc, errno);</a>
+<a name="ln1278">    }</a>
+<a name="ln1279"> </a>
+<a name="ln1280">  send_cleanup:</a>
+<a name="ln1281">    if (crm_ipc_connected(client) == FALSE) {</a>
+<a name="ln1282">        crm_notice(&quot;Connection to %s closed: %s (%ld)&quot;, client-&gt;name, pcmk_strerror(rc), rc);</a>
+<a name="ln1283"> </a>
+<a name="ln1284">    } else if (rc == -ETIMEDOUT) {</a>
+<a name="ln1285">        crm_warn(&quot;Request %d to %s (%p) failed: %s (%ld) after %dms&quot;,</a>
+<a name="ln1286">                 header-&gt;qb.id, client-&gt;name, client-&gt;ipc, pcmk_strerror(rc), rc, ms_timeout);</a>
+<a name="ln1287">        crm_write_blackbox(0, NULL);</a>
+<a name="ln1288"> </a>
+<a name="ln1289">    } else if (rc &lt;= 0) {</a>
+<a name="ln1290">        crm_warn(&quot;Request %d to %s (%p) failed: %s (%ld)&quot;,</a>
+<a name="ln1291">                 header-&gt;qb.id, client-&gt;name, client-&gt;ipc, pcmk_strerror(rc), rc);</a>
+<a name="ln1292">    }</a>
+<a name="ln1293"> </a>
+<a name="ln1294">    free(header);</a>
+<a name="ln1295">    free(iov[1].iov_base);</a>
+<a name="ln1296">    free(iov);</a>
+<a name="ln1297">    return rc;</a>
+<a name="ln1298">}</a>
+<a name="ln1299"> </a>
+<a name="ln1300">/* Utils */</a>
+<a name="ln1301"> </a>
+<a name="ln1302">xmlNode *</a>
+<a name="ln1303">create_hello_message(const char *uuid,</a>
+<a name="ln1304">                     const char *client_name, const char *major_version, const char *minor_version)</a>
+<a name="ln1305">{</a>
+<a name="ln1306">    xmlNode *hello_node = NULL;</a>
+<a name="ln1307">    xmlNode *hello = NULL;</a>
+<a name="ln1308"> </a>
+<a name="ln1309">    if (uuid == NULL || strlen(uuid) == 0</a>
+<a name="ln1310">        || client_name == NULL || strlen(client_name) == 0</a>
+<a name="ln1311">        || major_version == NULL || strlen(major_version) == 0</a>
+<a name="ln1312">        || minor_version == NULL || strlen(minor_version) == 0) {</a>
+<a name="ln1313">        crm_err(&quot;Missing fields, Hello message will not be valid.&quot;);</a>
+<a name="ln1314">        return NULL;</a>
+<a name="ln1315">    }</a>
+<a name="ln1316"> </a>
+<a name="ln1317">    hello_node = create_xml_node(NULL, XML_TAG_OPTIONS);</a>
+<a name="ln1318">    crm_xml_add(hello_node, &quot;major_version&quot;, major_version);</a>
+<a name="ln1319">    crm_xml_add(hello_node, &quot;minor_version&quot;, minor_version);</a>
+<a name="ln1320">    crm_xml_add(hello_node, &quot;client_name&quot;, client_name);</a>
+<a name="ln1321">    crm_xml_add(hello_node, &quot;client_uuid&quot;, uuid);</a>
+<a name="ln1322"> </a>
+<a name="ln1323">    crm_trace(&quot;creating hello message&quot;);</a>
+<a name="ln1324">    hello = create_request(CRM_OP_HELLO, hello_node, NULL, NULL, client_name, uuid);</a>
+<a name="ln1325">    free_xml(hello_node);</a>
+<a name="ln1326"> </a>
+<a name="ln1327">    return hello;</a>
+<a name="ln1328">}</a>
+
+</code></pre>
+<div class="balloon" rel="333"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'client'. Check lines: 333, 331.</p></div>
+<div class="balloon" rel="452"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+<div class="balloon" rel="594"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (max_send_size != 0) == (0).</p></div>
+<div class="balloon" rel="600"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'iov'. Check lines: 600, 597.</p></div>
+<div class="balloon" rel="603"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'header'. Check lines: 603, 584.</p></div>
+<div class="balloon" rel="651"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (header->qb.size > 0) == (0).</p></div>
+<div class="balloon" rel="684"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'iov_copy'. Check lines: 684, 681.</p></div>
+<div class="balloon" rel="686"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 686, 685.</p></div>
+<div class="balloon" rel="690"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 690, 689.</p></div>
+<div class="balloon" rel="696"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (header->qb.id != 0) == (0).</p></div>
+<div class="balloon" rel="819"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'client'. Check lines: 819, 817.</p></div>
+<div class="balloon" rel="986"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'uncompressed' pointer in the 'uncompressed + hdr_offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 986, 981.</p></div>
+<div class="balloon" rel="1013"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+<div class="balloon" rel="1208"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (id != 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

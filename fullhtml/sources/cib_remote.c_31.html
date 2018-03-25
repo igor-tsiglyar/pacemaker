@@ -1,0 +1,679 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2008 Andrew Beekhof</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;unistd.h&gt;</a>
+<a name="ln26">#include &lt;stdlib.h&gt;</a>
+<a name="ln27">#include &lt;stdio.h&gt;</a>
+<a name="ln28">#include &lt;stdarg.h&gt;</a>
+<a name="ln29">#include &lt;string.h&gt;</a>
+<a name="ln30">#include &lt;netdb.h&gt;</a>
+<a name="ln31">#include &lt;termios.h&gt;</a>
+<a name="ln32">#include &lt;sys/socket.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;glib.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/ipcs.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln43">#  undef KEYFILE</a>
+<a name="ln44">#  include &lt;gnutls/gnutls.h&gt;</a>
+<a name="ln45">gnutls_anon_client_credentials_t anon_cred_c;</a>
+<a name="ln46"> </a>
+<a name="ln47">#  define DEFAULT_CLIENT_HANDSHAKE_TIMEOUT 5000 /* 5 seconds */</a>
+<a name="ln48"> </a>
+<a name="ln49">const int kx_prio[] = {</a>
+<a name="ln50">    GNUTLS_KX_ANON_DH,</a>
+<a name="ln51">    0</a>
+<a name="ln52">};</a>
+<a name="ln53"> </a>
+<a name="ln54">static gboolean remote_gnutls_credentials_init = FALSE;</a>
+<a name="ln55">#else</a>
+<a name="ln56">typedef void gnutls_session_t;</a>
+<a name="ln57">#endif</a>
+<a name="ln58"> </a>
+<a name="ln59">#include &lt;arpa/inet.h&gt;</a>
+<a name="ln60">#ifndef ON_BSD</a>
+<a name="ln61">#  include &lt;sgtty.h&gt;</a>
+<a name="ln62">#endif</a>
+<a name="ln63"> </a>
+<a name="ln64">#define DH_BITS 1024</a>
+<a name="ln65"> </a>
+<a name="ln66">typedef struct cib_remote_opaque_s {</a>
+<a name="ln67">    int flags;</a>
+<a name="ln68">    int socket;</a>
+<a name="ln69">    int port;</a>
+<a name="ln70">    char *server;</a>
+<a name="ln71">    char *user;</a>
+<a name="ln72">    char *passwd;</a>
+<a name="ln73">    gboolean encrypted;</a>
+<a name="ln74">    crm_remote_t command;</a>
+<a name="ln75">    crm_remote_t callback;</a>
+<a name="ln76"> </a>
+<a name="ln77">} cib_remote_opaque_t;</a>
+<a name="ln78"> </a>
+<a name="ln79">void cib_remote_connection_destroy(gpointer user_data);</a>
+<a name="ln80">int cib_remote_callback_dispatch(gpointer user_data);</a>
+<a name="ln81">int cib_remote_command_dispatch(gpointer user_data);</a>
+<a name="ln82">int cib_remote_signon(cib_t * cib, const char *name, enum cib_conn_type type);</a>
+<a name="ln83">int cib_remote_signoff(cib_t * cib);</a>
+<a name="ln84">int cib_remote_free(cib_t * cib);</a>
+<a name="ln85"> </a>
+<a name="ln86">int cib_remote_perform_op(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln87">                          xmlNode * data, xmlNode ** output_data, int call_options,</a>
+<a name="ln88">                          const char *name);</a>
+<a name="ln89"> </a>
+<a name="ln90">static int</a>
+<a name="ln91">cib_remote_inputfd(cib_t * cib)</a>
+<a name="ln92">{</a>
+<a name="ln93">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln94"> </a>
+<a name="ln95">    return private-&gt;callback.tcp_socket;</a>
+<a name="ln96">}</a>
+<a name="ln97"> </a>
+<a name="ln98">static int</a>
+<a name="ln99">cib_remote_set_connection_dnotify(cib_t * cib, void (*dnotify) (gpointer user_data))</a>
+<a name="ln100">{</a>
+<a name="ln101">    return -EPROTONOSUPPORT;</a>
+<a name="ln102">}</a>
+<a name="ln103"> </a>
+<a name="ln104">static int</a>
+<a name="ln105">cib_remote_register_notification(cib_t * cib, const char *callback, int enabled)</a>
+<a name="ln106">{</a>
+<a name="ln107">    xmlNode *notify_msg = create_xml_node(NULL, &quot;cib_command&quot;);</a>
+<a name="ln108">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln109"> </a>
+<a name="ln110">    crm_xml_add(notify_msg, F_CIB_OPERATION, T_CIB_NOTIFY);</a>
+<a name="ln111">    crm_xml_add(notify_msg, F_CIB_NOTIFY_TYPE, callback);</a>
+<a name="ln112">    crm_xml_add_int(notify_msg, F_CIB_NOTIFY_ACTIVATE, enabled);</a>
+<a name="ln113">    crm_remote_send(&amp;private-&gt;callback, notify_msg);</a>
+<a name="ln114">    free_xml(notify_msg);</a>
+<a name="ln115">    return pcmk_ok;</a>
+<a name="ln116">}</a>
+<a name="ln117"> </a>
+<a name="ln118">cib_t *</a>
+<a name="ln119">cib_remote_new(const char *server, const char *user, const char *passwd, int port,</a>
+<a name="ln120">               gboolean encrypted)</a>
+<a name="ln121">{</a>
+<a name="ln122">    cib_remote_opaque_t *private = NULL;</a>
+<a name="ln123">    cib_t *cib = cib_new_variant();</a>
+<a name="ln124"> </a>
+<a name="ln125">    private = calloc(1, sizeof(cib_remote_opaque_t));</a>
+<a name="ln126"> </a>
+<a name="ln127">    cib-&gt;variant = cib_remote;</a>
+<a name="ln128">    cib-&gt;variant_opaque = private;</a>
+<a name="ln129"> </a>
+<a name="ln130">    if (server) {</a>
+<a name="ln131">        private-&gt;server = strdup(server);</a>
+<a name="ln132">    }</a>
+<a name="ln133"> </a>
+<a name="ln134">    if (user) {</a>
+<a name="ln135">        private-&gt;user = strdup(user);</a>
+<a name="ln136">    }</a>
+<a name="ln137"> </a>
+<a name="ln138">    if (passwd) {</a>
+<a name="ln139">        private-&gt;passwd = strdup(passwd);</a>
+<a name="ln140">    }</a>
+<a name="ln141"> </a>
+<a name="ln142">    private-&gt;port = port;</a>
+<a name="ln143">    private-&gt;encrypted = encrypted;</a>
+<a name="ln144"> </a>
+<a name="ln145">    /* assign variant specific ops */</a>
+<a name="ln146">    cib-&gt;delegate_fn = cib_remote_perform_op;</a>
+<a name="ln147">    cib-&gt;cmds-&gt;signon = cib_remote_signon;</a>
+<a name="ln148">    cib-&gt;cmds-&gt;signoff = cib_remote_signoff;</a>
+<a name="ln149">    cib-&gt;cmds-&gt;free = cib_remote_free;</a>
+<a name="ln150">    cib-&gt;cmds-&gt;inputfd = cib_remote_inputfd;</a>
+<a name="ln151"> </a>
+<a name="ln152">    cib-&gt;cmds-&gt;register_notification = cib_remote_register_notification;</a>
+<a name="ln153">    cib-&gt;cmds-&gt;set_connection_dnotify = cib_remote_set_connection_dnotify;</a>
+<a name="ln154"> </a>
+<a name="ln155">    return cib;</a>
+<a name="ln156">}</a>
+<a name="ln157"> </a>
+<a name="ln158">static int</a>
+<a name="ln159">cib_tls_close(cib_t * cib)</a>
+<a name="ln160">{</a>
+<a name="ln161">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln162"> </a>
+<a name="ln163">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln164">    if (private-&gt;encrypted) {</a>
+<a name="ln165">        if (private-&gt;command.tls_session) {</a>
+<a name="ln166">            gnutls_bye(*(private-&gt;command.tls_session), GNUTLS_SHUT_RDWR);</a>
+<a name="ln167">            gnutls_deinit(*(private-&gt;command.tls_session));</a>
+<a name="ln168">            gnutls_free(private-&gt;command.tls_session);</a>
+<a name="ln169">        }</a>
+<a name="ln170"> </a>
+<a name="ln171">        if (private-&gt;callback.tls_session) {</a>
+<a name="ln172">            gnutls_bye(*(private-&gt;callback.tls_session), GNUTLS_SHUT_RDWR);</a>
+<a name="ln173">            gnutls_deinit(*(private-&gt;callback.tls_session));</a>
+<a name="ln174">            gnutls_free(private-&gt;callback.tls_session);</a>
+<a name="ln175">        }</a>
+<a name="ln176">        private-&gt;command.tls_session = NULL;</a>
+<a name="ln177">        private-&gt;callback.tls_session = NULL;</a>
+<a name="ln178">        if (remote_gnutls_credentials_init) {</a>
+<a name="ln179">            gnutls_anon_free_client_credentials(anon_cred_c);</a>
+<a name="ln180">            gnutls_global_deinit();</a>
+<a name="ln181">            remote_gnutls_credentials_init = FALSE;</a>
+<a name="ln182">        }</a>
+<a name="ln183">    }</a>
+<a name="ln184">#endif</a>
+<a name="ln185"> </a>
+<a name="ln186">    if (private-&gt;command.tcp_socket) {</a>
+<a name="ln187">        shutdown(private-&gt;command.tcp_socket, SHUT_RDWR);       /* no more receptions */</a>
+<a name="ln188">        close(private-&gt;command.tcp_socket);</a>
+<a name="ln189">    }</a>
+<a name="ln190">    if (private-&gt;callback.tcp_socket) {</a>
+<a name="ln191">        shutdown(private-&gt;callback.tcp_socket, SHUT_RDWR);      /* no more receptions */</a>
+<a name="ln192">        close(private-&gt;callback.tcp_socket);</a>
+<a name="ln193">    }</a>
+<a name="ln194">    private-&gt;command.tcp_socket = 0;</a>
+<a name="ln195">    private-&gt;callback.tcp_socket = 0;</a>
+<a name="ln196"> </a>
+<a name="ln197">    free(private-&gt;command.buffer);</a>
+<a name="ln198">    free(private-&gt;callback.buffer);</a>
+<a name="ln199">    private-&gt;command.buffer = NULL;</a>
+<a name="ln200">    private-&gt;callback.buffer = NULL;</a>
+<a name="ln201"> </a>
+<a name="ln202">    return 0;</a>
+<a name="ln203">}</a>
+<a name="ln204"> </a>
+<a name="ln205">static int</a>
+<a name="ln206">cib_tls_signon(cib_t * cib, crm_remote_t * connection, gboolean event_channel)</a>
+<a name="ln207">{</a>
+<a name="ln208">    int sock;</a>
+<a name="ln209">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln210">    int rc = 0;</a>
+<a name="ln211">    int disconnected = 0;</a>
+<a name="ln212"> </a>
+<a name="ln213">    xmlNode *answer = NULL;</a>
+<a name="ln214">    xmlNode *login = NULL;</a>
+<a name="ln215"> </a>
+<a name="ln216">    static struct mainloop_fd_callbacks cib_fd_callbacks = { 0, };</a>
+<a name="ln217"> </a>
+<a name="ln218">    cib_fd_callbacks.dispatch =</a>
+<a name="ln219">        event_channel ? cib_remote_callback_dispatch : cib_remote_command_dispatch;</a>
+<a name="ln220">    cib_fd_callbacks.destroy = cib_remote_connection_destroy;</a>
+<a name="ln221"> </a>
+<a name="ln222">    connection-&gt;tcp_socket = 0;</a>
+<a name="ln223">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln224">    connection-&gt;tls_session = NULL;</a>
+<a name="ln225">#endif</a>
+<a name="ln226">    sock = crm_remote_tcp_connect(private-&gt;server, private-&gt;port);</a>
+<a name="ln227">    if (sock &lt; 0) {</a>
+<a name="ln228">        crm_perror(LOG_ERR, &quot;remote tcp connection to %s:%d failed&quot;, private-&gt;server,</a>
+<a name="ln229">                   private-&gt;port);</a>
+<a name="ln230">        return -ENOTCONN;</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    connection-&gt;tcp_socket = sock;</a>
+<a name="ln234"> </a>
+<a name="ln235">    if (private-&gt;encrypted) {</a>
+<a name="ln236">        /* initialize GnuTls lib */</a>
+<a name="ln237">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln238">        if (remote_gnutls_credentials_init == FALSE) {</a>
+<a name="ln239">            crm_gnutls_global_init();</a>
+<a name="ln240">            gnutls_anon_allocate_client_credentials(&amp;anon_cred_c);</a>
+<a name="ln241">            remote_gnutls_credentials_init = TRUE;</a>
+<a name="ln242">        }</a>
+<a name="ln243"> </a>
+<a name="ln244">        /* bind the socket to GnuTls lib */</a>
+<a name="ln245">        connection-&gt;tls_session = crm_create_anon_tls_session(sock, GNUTLS_CLIENT, anon_cred_c);</a>
+<a name="ln246"> </a>
+<a name="ln247">        if (crm_initiate_client_tls_handshake(connection, DEFAULT_CLIENT_HANDSHAKE_TIMEOUT) != 0) {</a>
+<a name="ln248">            crm_err(&quot;Session creation for %s:%d failed&quot;, private-&gt;server, private-&gt;port);</a>
+<a name="ln249"> </a>
+<a name="ln250">            gnutls_deinit(*connection-&gt;tls_session);</a>
+<a name="ln251">            gnutls_free(connection-&gt;tls_session);</a>
+<a name="ln252">            connection-&gt;tls_session = NULL;</a>
+<a name="ln253">            cib_tls_close(cib);</a>
+<a name="ln254">            return -1;</a>
+<a name="ln255">        }</a>
+<a name="ln256">#else</a>
+<a name="ln257">        return -EPROTONOSUPPORT;</a>
+<a name="ln258">#endif</a>
+<a name="ln259">    }</a>
+<a name="ln260"> </a>
+<a name="ln261">    /* login to server */</a>
+<a name="ln262">    login = create_xml_node(NULL, &quot;cib_command&quot;);</a>
+<a name="ln263">    crm_xml_add(login, &quot;op&quot;, &quot;authenticate&quot;);</a>
+<a name="ln264">    crm_xml_add(login, &quot;user&quot;, private-&gt;user);</a>
+<a name="ln265">    crm_xml_add(login, &quot;password&quot;, private-&gt;passwd);</a>
+<a name="ln266">    crm_xml_add(login, &quot;hidden&quot;, &quot;password&quot;);</a>
+<a name="ln267"> </a>
+<a name="ln268">    crm_remote_send(connection, login);</a>
+<a name="ln269">    free_xml(login);</a>
+<a name="ln270"> </a>
+<a name="ln271">    crm_remote_recv(connection, -1, &amp;disconnected);</a>
+<a name="ln272"> </a>
+<a name="ln273">    if (disconnected) {</a>
+<a name="ln274">        rc = -ENOTCONN;</a>
+<a name="ln275">    }</a>
+<a name="ln276"> </a>
+<a name="ln277">    answer = crm_remote_parse_buffer(connection);</a>
+<a name="ln278"> </a>
+<a name="ln279">    crm_log_xml_trace(answer, &quot;Reply&quot;);</a>
+<a name="ln280">    if (answer == NULL) {</a>
+<a name="ln281">        rc = -EPROTO;</a>
+<a name="ln282"> </a>
+<a name="ln283">    } else {</a>
+<a name="ln284">        /* grab the token */</a>
+<a name="ln285">        const char *msg_type = crm_element_value(answer, F_CIB_OPERATION);</a>
+<a name="ln286">        const char *tmp_ticket = crm_element_value(answer, F_CIB_CLIENTID);</a>
+<a name="ln287"> </a>
+<a name="ln288">        if (safe_str_neq(msg_type, CRM_OP_REGISTER)) {</a>
+<a name="ln289">            crm_err(&quot;Invalid registration message: %s&quot;, msg_type);</a>
+<a name="ln290">            rc = -EPROTO;</a>
+<a name="ln291"> </a>
+<a name="ln292">        } else if (tmp_ticket == NULL) {</a>
+<a name="ln293">            rc = -EPROTO;</a>
+<a name="ln294"> </a>
+<a name="ln295">        } else {</a>
+<a name="ln296">            connection-&gt;token = strdup(tmp_ticket);</a>
+<a name="ln297">        }</a>
+<a name="ln298">    }</a>
+<a name="ln299">    free_xml(answer);</a>
+<a name="ln300">    answer = NULL;</a>
+<a name="ln301"> </a>
+<a name="ln302">    if (rc != 0) {</a>
+<a name="ln303">        cib_tls_close(cib);</a>
+<a name="ln304">        return rc;</a>
+<a name="ln305">    }</a>
+<a name="ln306"> </a>
+<a name="ln307">    crm_trace(&quot;remote client connection established&quot;);</a>
+<a name="ln308">    connection-&gt;source =</a>
+<a name="ln309">        mainloop_add_fd(&quot;cib-remote&quot;, G_PRIORITY_HIGH, sock, cib,</a>
+<a name="ln310">                        &amp;cib_fd_callbacks);</a>
+<a name="ln311">    return rc;</a>
+<a name="ln312">}</a>
+<a name="ln313"> </a>
+<a name="ln314">void</a>
+<a name="ln315">cib_remote_connection_destroy(gpointer user_data)</a>
+<a name="ln316">{</a>
+<a name="ln317">    crm_err(&quot;Connection destroyed&quot;);</a>
+<a name="ln318">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln319">    cib_tls_close(user_data);</a>
+<a name="ln320">#endif</a>
+<a name="ln321">    return;</a>
+<a name="ln322">}</a>
+<a name="ln323"> </a>
+<a name="ln324">int</a>
+<a name="ln325">cib_remote_command_dispatch(gpointer user_data)</a>
+<a name="ln326">{</a>
+<a name="ln327">    int disconnected = 0;</a>
+<a name="ln328">    cib_t *cib = user_data;</a>
+<a name="ln329">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln330"> </a>
+<a name="ln331">    crm_remote_recv(&amp;private-&gt;command, -1, &amp;disconnected);</a>
+<a name="ln332"> </a>
+<a name="ln333">    free(private-&gt;command.buffer);</a>
+<a name="ln334">    private-&gt;command.buffer = NULL;</a>
+<a name="ln335">    crm_err(&quot;received late reply for remote cib connection, discarding&quot;);</a>
+<a name="ln336"> </a>
+<a name="ln337">    if (disconnected) {</a>
+<a name="ln338">        return -1;</a>
+<a name="ln339">    }</a>
+<a name="ln340">    return 0;</a>
+<a name="ln341">}</a>
+<a name="ln342"> </a>
+<a name="ln343">int</a>
+<a name="ln344">cib_remote_callback_dispatch(gpointer user_data)</a>
+<a name="ln345">{</a>
+<a name="ln346">    cib_t *cib = user_data;</a>
+<a name="ln347">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln348"> </a>
+<a name="ln349">    xmlNode *msg = NULL;</a>
+<a name="ln350">    int disconnected = 0;</a>
+<a name="ln351"> </a>
+<a name="ln352">    crm_info(&quot;Message on callback channel&quot;);</a>
+<a name="ln353"> </a>
+<a name="ln354">    crm_remote_recv(&amp;private-&gt;callback, -1, &amp;disconnected);</a>
+<a name="ln355"> </a>
+<a name="ln356">    msg = crm_remote_parse_buffer(&amp;private-&gt;callback);</a>
+<a name="ln357">    while (msg) {</a>
+<a name="ln358">        const char *type = crm_element_value(msg, F_TYPE);</a>
+<a name="ln359"> </a>
+<a name="ln360">        crm_trace(&quot;Activating %s callbacks...&quot;, type);</a>
+<a name="ln361"> </a>
+<a name="ln362">        if (safe_str_eq(type, T_CIB)) {</a>
+<a name="ln363">            cib_native_callback(cib, msg, 0, 0);</a>
+<a name="ln364"> </a>
+<a name="ln365">        } else if (safe_str_eq(type, T_CIB_NOTIFY)) {</a>
+<a name="ln366">            g_list_foreach(cib-&gt;notify_list, cib_native_notify, msg);</a>
+<a name="ln367"> </a>
+<a name="ln368">        } else {</a>
+<a name="ln369">            crm_err(&quot;Unknown message type: %s&quot;, type);</a>
+<a name="ln370">        }</a>
+<a name="ln371"> </a>
+<a name="ln372">        free_xml(msg);</a>
+<a name="ln373">        msg = crm_remote_parse_buffer(&amp;private-&gt;callback);</a>
+<a name="ln374">    }</a>
+<a name="ln375"> </a>
+<a name="ln376">    if (disconnected) {</a>
+<a name="ln377">        return -1;</a>
+<a name="ln378">    }</a>
+<a name="ln379"> </a>
+<a name="ln380">    return 0;</a>
+<a name="ln381">}</a>
+<a name="ln382"> </a>
+<a name="ln383">int</a>
+<a name="ln384">cib_remote_signon(cib_t * cib, const char *name, enum cib_conn_type type)</a>
+<a name="ln385">{</a>
+<a name="ln386">    int rc = pcmk_ok;</a>
+<a name="ln387">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln388"> </a>
+<a name="ln389">    if (private-&gt;passwd == NULL) {</a>
+<a name="ln390">        struct termios settings;</a>
+<a name="ln391"> </a>
+<a name="ln392">        rc = tcgetattr(0, &amp;settings);</a>
+<a name="ln393">        if(rc == 0) {</a>
+<a name="ln394">            settings.c_lflag &amp;= ~ECHO;</a>
+<a name="ln395">            rc = tcsetattr(0, TCSANOW, &amp;settings);</a>
+<a name="ln396">        }</a>
+<a name="ln397"> </a>
+<a name="ln398">        if(rc == 0) {</a>
+<a name="ln399">            fprintf(stderr, &quot;Password: &quot;);</a>
+<a name="ln400">            private-&gt;passwd = calloc(1, 1024);</a>
+<a name="ln401">            rc = scanf(&quot;%1023s&quot;, private-&gt;passwd);</a>
+<a name="ln402">            fprintf(stderr, &quot;\n&quot;);</a>
+<a name="ln403">        }</a>
+<a name="ln404"> </a>
+<a name="ln405">        /* fprintf(stderr, &quot;entered: '%s'\n&quot;, buffer); */</a>
+<a name="ln406">        if (rc &lt; 1) {</a>
+<a name="ln407">            private-&gt;passwd = NULL;</a>
+<a name="ln408">        }</a>
+<a name="ln409"> </a>
+<a name="ln410">        settings.c_lflag |= ECHO;</a>
+<a name="ln411">        rc = tcsetattr(0, TCSANOW, &amp;settings);</a>
+<a name="ln412">    }</a>
+<a name="ln413"> </a>
+<a name="ln414">    if (private-&gt;server == NULL || private-&gt;user == NULL) {</a>
+<a name="ln415">        rc = -EINVAL;</a>
+<a name="ln416">    }</a>
+<a name="ln417"> </a>
+<a name="ln418">    if (rc == pcmk_ok) {</a>
+<a name="ln419">        rc = cib_tls_signon(cib, &amp;(private-&gt;command), FALSE);</a>
+<a name="ln420">    }</a>
+<a name="ln421"> </a>
+<a name="ln422">    if (rc == pcmk_ok) {</a>
+<a name="ln423">        rc = cib_tls_signon(cib, &amp;(private-&gt;callback), TRUE);</a>
+<a name="ln424">    }</a>
+<a name="ln425"> </a>
+<a name="ln426">    if (rc == pcmk_ok) {</a>
+<a name="ln427">        xmlNode *hello =</a>
+<a name="ln428">            cib_create_op(0, private-&gt;callback.token, CRM_OP_REGISTER, NULL, NULL, NULL, 0, NULL);</a>
+<a name="ln429">        crm_xml_add(hello, F_CIB_CLIENTNAME, name);</a>
+<a name="ln430">        crm_remote_send(&amp;private-&gt;command, hello);</a>
+<a name="ln431">        free_xml(hello);</a>
+<a name="ln432">    }</a>
+<a name="ln433"> </a>
+<a name="ln434">    if (rc == pcmk_ok) {</a>
+<a name="ln435">        crm_notice(&quot;%s: Opened connection to %s:%d&quot;, name, private-&gt;server, private-&gt;port);</a>
+<a name="ln436">        cib-&gt;state = cib_connected_command;</a>
+<a name="ln437">        cib-&gt;type = cib_command;</a>
+<a name="ln438"> </a>
+<a name="ln439">    } else {</a>
+<a name="ln440">        fprintf(stderr, &quot;%s: Connection to %s:%d failed: %s\n&quot;,</a>
+<a name="ln441">                name, private-&gt;server, private-&gt;port, pcmk_strerror(rc));</a>
+<a name="ln442">    }</a>
+<a name="ln443"> </a>
+<a name="ln444">    return rc;</a>
+<a name="ln445">}</a>
+<a name="ln446"> </a>
+<a name="ln447">int</a>
+<a name="ln448">cib_remote_signoff(cib_t * cib)</a>
+<a name="ln449">{</a>
+<a name="ln450">    int rc = pcmk_ok;</a>
+<a name="ln451"> </a>
+<a name="ln452">    /* cib_remote_opaque_t *private = cib-&gt;variant_opaque; */</a>
+<a name="ln453"> </a>
+<a name="ln454">    crm_debug(&quot;Signing out of the CIB Service&quot;);</a>
+<a name="ln455">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln456">    cib_tls_close(cib);</a>
+<a name="ln457">#endif</a>
+<a name="ln458"> </a>
+<a name="ln459">    cib-&gt;state = cib_disconnected;</a>
+<a name="ln460">    cib-&gt;type = cib_no_connection;</a>
+<a name="ln461"> </a>
+<a name="ln462">    return rc;</a>
+<a name="ln463">}</a>
+<a name="ln464"> </a>
+<a name="ln465">int</a>
+<a name="ln466">cib_remote_free(cib_t * cib)</a>
+<a name="ln467">{</a>
+<a name="ln468">    int rc = pcmk_ok;</a>
+<a name="ln469"> </a>
+<a name="ln470">    crm_warn(&quot;Freeing CIB&quot;);</a>
+<a name="ln471">    if (cib-&gt;state != cib_disconnected) {</a>
+<a name="ln472">        rc = cib_remote_signoff(cib);</a>
+<a name="ln473">        if (rc == pcmk_ok) {</a>
+<a name="ln474">            cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln475"> </a>
+<a name="ln476">            free(private-&gt;server);</a>
+<a name="ln477">            free(private-&gt;user);</a>
+<a name="ln478">            free(private-&gt;passwd);</a>
+<a name="ln479">            free(cib-&gt;cmds);</a>
+<a name="ln480">            free(private);</a>
+<a name="ln481">            free(cib);</a>
+<a name="ln482">        }</a>
+<a name="ln483">    }</a>
+<a name="ln484"> </a>
+<a name="ln485">    return rc;</a>
+<a name="ln486">}</a>
+<a name="ln487"> </a>
+<a name="ln488">int</a>
+<a name="ln489">cib_remote_perform_op(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln490">                      xmlNode * data, xmlNode ** output_data, int call_options, const char *name)</a>
+<a name="ln491">{</a>
+<a name="ln492">    int rc = pcmk_ok;</a>
+<a name="ln493">    int disconnected = 0;</a>
+<a name="ln494">    int remaining_time = 0;</a>
+<a name="ln495">    time_t start_time;</a>
+<a name="ln496"> </a>
+<a name="ln497">    xmlNode *op_msg = NULL;</a>
+<a name="ln498">    xmlNode *op_reply = NULL;</a>
+<a name="ln499"> </a>
+<a name="ln500">    cib_remote_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln501"> </a>
+<a name="ln502">    if (cib-&gt;state == cib_disconnected) {</a>
+<a name="ln503">        return -ENOTCONN;</a>
+<a name="ln504">    }</a>
+<a name="ln505"> </a>
+<a name="ln506">    if (output_data != NULL) {</a>
+<a name="ln507">        *output_data = NULL;</a>
+<a name="ln508">    }</a>
+<a name="ln509"> </a>
+<a name="ln510">    if (op == NULL) {</a>
+<a name="ln511">        crm_err(&quot;No operation specified&quot;);</a>
+<a name="ln512">        return -EINVAL;</a>
+<a name="ln513">    }</a>
+<a name="ln514"> </a>
+<a name="ln515">    cib-&gt;call_id++;</a>
+<a name="ln516">    /* prevent call_id from being negative (or zero) and conflicting</a>
+<a name="ln517">     *    with the cib_errors enum</a>
+<a name="ln518">     * use 2 because we use it as (cib-&gt;call_id - 1) below</a>
+<a name="ln519">     */</a>
+<a name="ln520">    if (cib-&gt;call_id &lt; 1) {</a>
+<a name="ln521">        cib-&gt;call_id = 1;</a>
+<a name="ln522">    }</a>
+<a name="ln523"> </a>
+<a name="ln524">    op_msg =</a>
+<a name="ln525">        cib_create_op(cib-&gt;call_id, private-&gt;callback.token, op, host, section, data, call_options,</a>
+<a name="ln526">                      NULL);</a>
+<a name="ln527">    if (op_msg == NULL) {</a>
+<a name="ln528">        return -EPROTO;</a>
+<a name="ln529">    }</a>
+<a name="ln530"> </a>
+<a name="ln531">    crm_trace(&quot;Sending %s message to CIB service&quot;, op);</a>
+<a name="ln532">    if (!(call_options &amp; cib_sync_call)) {</a>
+<a name="ln533">        crm_remote_send(&amp;private-&gt;callback, op_msg);</a>
+<a name="ln534">    } else {</a>
+<a name="ln535">        crm_remote_send(&amp;private-&gt;command, op_msg);</a>
+<a name="ln536">    }</a>
+<a name="ln537">    free_xml(op_msg);</a>
+<a name="ln538"> </a>
+<a name="ln539">    if ((call_options &amp; cib_discard_reply)) {</a>
+<a name="ln540">        crm_trace(&quot;Discarding reply&quot;);</a>
+<a name="ln541">        return pcmk_ok;</a>
+<a name="ln542"> </a>
+<a name="ln543">    } else if (!(call_options &amp; cib_sync_call)) {</a>
+<a name="ln544">        return cib-&gt;call_id;</a>
+<a name="ln545">    }</a>
+<a name="ln546"> </a>
+<a name="ln547">    crm_trace(&quot;Waiting for a synchronous reply&quot;);</a>
+<a name="ln548"> </a>
+<a name="ln549">    start_time = time(NULL);</a>
+<a name="ln550">    remaining_time = cib-&gt;call_timeout ? cib-&gt;call_timeout : 60;</a>
+<a name="ln551"> </a>
+<a name="ln552">    while (remaining_time &gt; 0 &amp;&amp; !disconnected) {</a>
+<a name="ln553">        int reply_id = -1;</a>
+<a name="ln554">        int msg_id = cib-&gt;call_id;</a>
+<a name="ln555"> </a>
+<a name="ln556">        crm_remote_recv(&amp;private-&gt;command, remaining_time * 1000, &amp;disconnected);</a>
+<a name="ln557">        op_reply = crm_remote_parse_buffer(&amp;private-&gt;command);</a>
+<a name="ln558"> </a>
+<a name="ln559">        if (!op_reply) {</a>
+<a name="ln560">            break;</a>
+<a name="ln561">        }</a>
+<a name="ln562"> </a>
+<a name="ln563">        crm_element_value_int(op_reply, F_CIB_CALLID, &amp;reply_id);</a>
+<a name="ln564"> </a>
+<a name="ln565">        if (reply_id == msg_id) {</a>
+<a name="ln566">            break;</a>
+<a name="ln567"> </a>
+<a name="ln568">        } else if (reply_id &lt; msg_id) {</a>
+<a name="ln569">            crm_debug(&quot;Received old reply: %d (wanted %d)&quot;, reply_id, msg_id);</a>
+<a name="ln570">            crm_log_xml_trace(op_reply, &quot;Old reply&quot;);</a>
+<a name="ln571"> </a>
+<a name="ln572">        } else if ((reply_id - 10000) &gt; msg_id) {</a>
+<a name="ln573">            /* wrap-around case */</a>
+<a name="ln574">            crm_debug(&quot;Received old reply: %d (wanted %d)&quot;, reply_id, msg_id);</a>
+<a name="ln575">            crm_log_xml_trace(op_reply, &quot;Old reply&quot;);</a>
+<a name="ln576">        } else {</a>
+<a name="ln577">            crm_err(&quot;Received a __future__ reply:&quot; &quot; %d (wanted %d)&quot;, reply_id, msg_id);</a>
+<a name="ln578">        }</a>
+<a name="ln579"> </a>
+<a name="ln580">        free_xml(op_reply);</a>
+<a name="ln581">        op_reply = NULL;</a>
+<a name="ln582"> </a>
+<a name="ln583">        /* wasn't the right reply, try and read some more */</a>
+<a name="ln584">        remaining_time = time(NULL) - start_time;</a>
+<a name="ln585">    }</a>
+<a name="ln586"> </a>
+<a name="ln587">    /* if(IPC_ISRCONN(native-&gt;command_channel) == FALSE) { */</a>
+<a name="ln588">    /*      crm_err(&quot;CIB disconnected: %d&quot;,  */</a>
+<a name="ln589">    /*              native-&gt;command_channel-&gt;ch_status); */</a>
+<a name="ln590">    /*      cib-&gt;state = cib_disconnected; */</a>
+<a name="ln591">    /* } */</a>
+<a name="ln592"> </a>
+<a name="ln593">    if (disconnected) {</a>
+<a name="ln594">        crm_err(&quot;Disconnected while waiting for reply.&quot;);</a>
+<a name="ln595">        return -ENOTCONN;</a>
+<a name="ln596">    } else if (op_reply == NULL) {</a>
+<a name="ln597">        crm_err(&quot;No reply message - empty&quot;);</a>
+<a name="ln598">        return -ENOMSG;</a>
+<a name="ln599">    }</a>
+<a name="ln600"> </a>
+<a name="ln601">    crm_trace(&quot;Synchronous reply received&quot;);</a>
+<a name="ln602"> </a>
+<a name="ln603">    /* Start processing the reply... */</a>
+<a name="ln604">    if (crm_element_value_int(op_reply, F_CIB_RC, &amp;rc) != 0) {</a>
+<a name="ln605">        rc = -EPROTO;</a>
+<a name="ln606">    }</a>
+<a name="ln607"> </a>
+<a name="ln608">    if (rc == -pcmk_err_diff_resync) {</a>
+<a name="ln609">        /* This is an internal value that clients do not and should not care about */</a>
+<a name="ln610">        rc = pcmk_ok;</a>
+<a name="ln611">    }</a>
+<a name="ln612"> </a>
+<a name="ln613">    if (rc == pcmk_ok || rc == -EPERM) {</a>
+<a name="ln614">        crm_log_xml_debug(op_reply, &quot;passed&quot;);</a>
+<a name="ln615"> </a>
+<a name="ln616">    } else {</a>
+<a name="ln617">/* 	} else if(rc == -ETIME) { */</a>
+<a name="ln618">        crm_err(&quot;Call failed: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln619">        crm_log_xml_warn(op_reply, &quot;failed&quot;);</a>
+<a name="ln620">    }</a>
+<a name="ln621"> </a>
+<a name="ln622">    if (output_data == NULL) {</a>
+<a name="ln623">        /* do nothing more */</a>
+<a name="ln624"> </a>
+<a name="ln625">    } else if (!(call_options &amp; cib_discard_reply)) {</a>
+<a name="ln626">        xmlNode *tmp = get_message_xml(op_reply, F_CIB_CALLDATA);</a>
+<a name="ln627"> </a>
+<a name="ln628">        if (tmp == NULL) {</a>
+<a name="ln629">            crm_trace(&quot;No output in reply to \&quot;%s\&quot; command %d&quot;, op, cib-&gt;call_id - 1);</a>
+<a name="ln630">        } else {</a>
+<a name="ln631">            *output_data = copy_xml(tmp);</a>
+<a name="ln632">        }</a>
+<a name="ln633">    }</a>
+<a name="ln634"> </a>
+<a name="ln635">    free_xml(op_reply);</a>
+<a name="ln636"> </a>
+<a name="ln637">    return rc;</a>
+<a name="ln638">}</a>
+
+</code></pre>
+<div class="balloon" rel="131"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'private'. Check lines: 131, 125.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

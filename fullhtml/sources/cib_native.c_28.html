@@ -1,0 +1,560 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2004 International Business Machines</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;unistd.h&gt;</a>
+<a name="ln25">#include &lt;stdlib.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;stdarg.h&gt;</a>
+<a name="ln28">#include &lt;string.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;glib.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;crm/crm.h&gt;</a>
+<a name="ln33">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln36">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">typedef struct cib_native_opaque_s {</a>
+<a name="ln39">    char *token;</a>
+<a name="ln40">    crm_ipc_t *ipc;</a>
+<a name="ln41">    void (*dnotify_fn) (gpointer user_data);</a>
+<a name="ln42">    mainloop_io_t *source;</a>
+<a name="ln43"> </a>
+<a name="ln44">} cib_native_opaque_t;</a>
+<a name="ln45"> </a>
+<a name="ln46">int cib_native_perform_op(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln47">                          xmlNode * data, xmlNode ** output_data, int call_options);</a>
+<a name="ln48"> </a>
+<a name="ln49">int cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host,</a>
+<a name="ln50">                                   const char *section, xmlNode * data, xmlNode ** output_data,</a>
+<a name="ln51">                                   int call_options, const char *user_name);</a>
+<a name="ln52"> </a>
+<a name="ln53">int cib_native_free(cib_t * cib);</a>
+<a name="ln54">int cib_native_signoff(cib_t * cib);</a>
+<a name="ln55">int cib_native_signon(cib_t * cib, const char *name, enum cib_conn_type type);</a>
+<a name="ln56">int cib_native_signon_raw(cib_t * cib, const char *name, enum cib_conn_type type, int *event_fd);</a>
+<a name="ln57"> </a>
+<a name="ln58">bool cib_native_dispatch(cib_t * cib);</a>
+<a name="ln59"> </a>
+<a name="ln60">int cib_native_set_connection_dnotify(cib_t * cib, void (*dnotify) (gpointer user_data));</a>
+<a name="ln61"> </a>
+<a name="ln62">cib_t *</a>
+<a name="ln63">cib_native_new(void)</a>
+<a name="ln64">{</a>
+<a name="ln65">    cib_native_opaque_t *native = NULL;</a>
+<a name="ln66">    cib_t *cib = cib_new_variant();</a>
+<a name="ln67"> </a>
+<a name="ln68">    native = calloc(1, sizeof(cib_native_opaque_t));</a>
+<a name="ln69"> </a>
+<a name="ln70">    cib-&gt;variant = cib_native;</a>
+<a name="ln71">    cib-&gt;variant_opaque = native;</a>
+<a name="ln72"> </a>
+<a name="ln73">    native-&gt;ipc = NULL;</a>
+<a name="ln74">    native-&gt;source = NULL;</a>
+<a name="ln75">    native-&gt;dnotify_fn = NULL;</a>
+<a name="ln76"> </a>
+<a name="ln77">    /* assign variant specific ops */</a>
+<a name="ln78">    cib-&gt;delegate_fn = cib_native_perform_op_delegate;</a>
+<a name="ln79">    cib-&gt;cmds-&gt;signon = cib_native_signon;</a>
+<a name="ln80">    cib-&gt;cmds-&gt;signon_raw = cib_native_signon_raw;</a>
+<a name="ln81">    cib-&gt;cmds-&gt;signoff = cib_native_signoff;</a>
+<a name="ln82">    cib-&gt;cmds-&gt;free = cib_native_free;</a>
+<a name="ln83"> </a>
+<a name="ln84">    cib-&gt;cmds-&gt;register_notification = cib_native_register_notification;</a>
+<a name="ln85">    cib-&gt;cmds-&gt;set_connection_dnotify = cib_native_set_connection_dnotify;</a>
+<a name="ln86"> </a>
+<a name="ln87">    return cib;</a>
+<a name="ln88">}</a>
+<a name="ln89"> </a>
+<a name="ln90">int</a>
+<a name="ln91">cib_native_signon(cib_t * cib, const char *name, enum cib_conn_type type)</a>
+<a name="ln92">{</a>
+<a name="ln93">    return cib_native_signon_raw(cib, name, type, NULL);</a>
+<a name="ln94">}</a>
+<a name="ln95"> </a>
+<a name="ln96">static int</a>
+<a name="ln97">cib_native_dispatch_internal(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln98">{</a>
+<a name="ln99">    const char *type = NULL;</a>
+<a name="ln100">    xmlNode *msg = NULL;</a>
+<a name="ln101"> </a>
+<a name="ln102">    cib_t *cib = userdata;</a>
+<a name="ln103"> </a>
+<a name="ln104">    crm_trace(&quot;dispatching %p&quot;, userdata);</a>
+<a name="ln105"> </a>
+<a name="ln106">    if (cib == NULL) {</a>
+<a name="ln107">        crm_err(&quot;No CIB!&quot;);</a>
+<a name="ln108">        return 0;</a>
+<a name="ln109">    }</a>
+<a name="ln110"> </a>
+<a name="ln111">    msg = string2xml(buffer);</a>
+<a name="ln112"> </a>
+<a name="ln113">    if (msg == NULL) {</a>
+<a name="ln114">        crm_warn(&quot;Received a NULL msg from CIB service.&quot;);</a>
+<a name="ln115">        return 0;</a>
+<a name="ln116">    }</a>
+<a name="ln117"> </a>
+<a name="ln118">    /* do callbacks */</a>
+<a name="ln119">    type = crm_element_value(msg, F_TYPE);</a>
+<a name="ln120">    crm_trace(&quot;Activating %s callbacks...&quot;, type);</a>
+<a name="ln121">    crm_log_xml_explicit(msg, &quot;cib-reply&quot;);</a>
+<a name="ln122"> </a>
+<a name="ln123">    if (safe_str_eq(type, T_CIB)) {</a>
+<a name="ln124">        cib_native_callback(cib, msg, 0, 0);</a>
+<a name="ln125"> </a>
+<a name="ln126">    } else if (safe_str_eq(type, T_CIB_NOTIFY)) {</a>
+<a name="ln127">        g_list_foreach(cib-&gt;notify_list, cib_native_notify, msg);</a>
+<a name="ln128"> </a>
+<a name="ln129">    } else {</a>
+<a name="ln130">        crm_err(&quot;Unknown message type: %s&quot;, type);</a>
+<a name="ln131">    }</a>
+<a name="ln132"> </a>
+<a name="ln133">    free_xml(msg);</a>
+<a name="ln134">    return 0;</a>
+<a name="ln135">}</a>
+<a name="ln136"> </a>
+<a name="ln137">bool</a>
+<a name="ln138">cib_native_dispatch(cib_t * cib)</a>
+<a name="ln139">{</a>
+<a name="ln140">    gboolean stay_connected = TRUE;</a>
+<a name="ln141">    cib_native_opaque_t *native;</a>
+<a name="ln142"> </a>
+<a name="ln143">    if (cib == NULL) {</a>
+<a name="ln144">        crm_err(&quot;No CIB!&quot;);</a>
+<a name="ln145">        return FALSE;</a>
+<a name="ln146">    }</a>
+<a name="ln147"> </a>
+<a name="ln148">    crm_trace(&quot;dispatching %p&quot;, cib);</a>
+<a name="ln149">    native = cib-&gt;variant_opaque;</a>
+<a name="ln150">    while (crm_ipc_ready(native-&gt;ipc)) {</a>
+<a name="ln151"> </a>
+<a name="ln152">        if (crm_ipc_read(native-&gt;ipc) &gt; 0) {</a>
+<a name="ln153">            const char *msg = crm_ipc_buffer(native-&gt;ipc);</a>
+<a name="ln154"> </a>
+<a name="ln155">            cib_native_dispatch_internal(msg, strlen(msg), cib);</a>
+<a name="ln156">        }</a>
+<a name="ln157"> </a>
+<a name="ln158">        if (crm_ipc_connected(native-&gt;ipc) == FALSE) {</a>
+<a name="ln159">            crm_err(&quot;Connection closed&quot;);</a>
+<a name="ln160">            stay_connected = FALSE;</a>
+<a name="ln161">        }</a>
+<a name="ln162">    }</a>
+<a name="ln163"> </a>
+<a name="ln164">    return stay_connected;</a>
+<a name="ln165">}</a>
+<a name="ln166"> </a>
+<a name="ln167">static void</a>
+<a name="ln168">cib_native_destroy(void *userdata)</a>
+<a name="ln169">{</a>
+<a name="ln170">    cib_t *cib = userdata;</a>
+<a name="ln171">    cib_native_opaque_t *native = cib-&gt;variant_opaque;</a>
+<a name="ln172"> </a>
+<a name="ln173">    crm_trace(&quot;destroying %p&quot;, userdata);</a>
+<a name="ln174">    cib-&gt;state = cib_disconnected;</a>
+<a name="ln175">    native-&gt;source = NULL;</a>
+<a name="ln176">    native-&gt;ipc = NULL;</a>
+<a name="ln177"> </a>
+<a name="ln178">    if (native-&gt;dnotify_fn) {</a>
+<a name="ln179">        native-&gt;dnotify_fn(userdata);</a>
+<a name="ln180">    }</a>
+<a name="ln181">}</a>
+<a name="ln182"> </a>
+<a name="ln183">int</a>
+<a name="ln184">cib_native_signon_raw(cib_t * cib, const char *name, enum cib_conn_type type, int *async_fd)</a>
+<a name="ln185">{</a>
+<a name="ln186">    int rc = pcmk_ok;</a>
+<a name="ln187">    const char *channel = NULL;</a>
+<a name="ln188">    cib_native_opaque_t *native = cib-&gt;variant_opaque;</a>
+<a name="ln189"> </a>
+<a name="ln190">    static struct ipc_client_callbacks cib_callbacks = {</a>
+<a name="ln191">        .dispatch = cib_native_dispatch_internal,</a>
+<a name="ln192">        .destroy = cib_native_destroy</a>
+<a name="ln193">    };</a>
+<a name="ln194"> </a>
+<a name="ln195">    cib-&gt;call_timeout = MAX_IPC_DELAY;</a>
+<a name="ln196"> </a>
+<a name="ln197">    if (type == cib_command) {</a>
+<a name="ln198">        cib-&gt;state = cib_connected_command;</a>
+<a name="ln199">        channel = cib_channel_rw;</a>
+<a name="ln200"> </a>
+<a name="ln201">    } else if (type == cib_command_nonblocking) {</a>
+<a name="ln202">        cib-&gt;state = cib_connected_command;</a>
+<a name="ln203">        channel = cib_channel_shm;</a>
+<a name="ln204"> </a>
+<a name="ln205">    } else if (type == cib_query) {</a>
+<a name="ln206">        cib-&gt;state = cib_connected_query;</a>
+<a name="ln207">        channel = cib_channel_ro;</a>
+<a name="ln208"> </a>
+<a name="ln209">    } else {</a>
+<a name="ln210">        return -ENOTCONN;</a>
+<a name="ln211">    }</a>
+<a name="ln212"> </a>
+<a name="ln213">    crm_trace(&quot;Connecting %s channel&quot;, channel);</a>
+<a name="ln214"> </a>
+<a name="ln215">    if (async_fd != NULL) {</a>
+<a name="ln216">        native-&gt;ipc = crm_ipc_new(channel, 0);</a>
+<a name="ln217"> </a>
+<a name="ln218">        if (native-&gt;ipc &amp;&amp; crm_ipc_connect(native-&gt;ipc)) {</a>
+<a name="ln219">            *async_fd = crm_ipc_get_fd(native-&gt;ipc);</a>
+<a name="ln220"> </a>
+<a name="ln221">        } else if (native-&gt;ipc) {</a>
+<a name="ln222">            crm_perror(LOG_ERR, &quot;Connection to cluster information base failed&quot;);</a>
+<a name="ln223">            rc = -ENOTCONN;</a>
+<a name="ln224">        }</a>
+<a name="ln225"> </a>
+<a name="ln226">    } else {</a>
+<a name="ln227">        native-&gt;source =</a>
+<a name="ln228">            mainloop_add_ipc_client(channel, G_PRIORITY_HIGH, 512 * 1024 /* 512k */ , cib,</a>
+<a name="ln229">                                    &amp;cib_callbacks);</a>
+<a name="ln230">        native-&gt;ipc = mainloop_get_ipc_client(native-&gt;source);</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    if (rc != pcmk_ok || native-&gt;ipc == NULL || crm_ipc_connected(native-&gt;ipc) == FALSE) {</a>
+<a name="ln234">        crm_debug(&quot;Connection unsuccessful (%d %p)&quot;, rc, native-&gt;ipc);</a>
+<a name="ln235">        rc = -ENOTCONN;</a>
+<a name="ln236">    }</a>
+<a name="ln237"> </a>
+<a name="ln238">    if (rc == pcmk_ok) {</a>
+<a name="ln239">        xmlNode *reply = NULL;</a>
+<a name="ln240">        xmlNode *hello = create_xml_node(NULL, &quot;cib_command&quot;);</a>
+<a name="ln241"> </a>
+<a name="ln242">        crm_xml_add(hello, F_TYPE, T_CIB);</a>
+<a name="ln243">        crm_xml_add(hello, F_CIB_OPERATION, CRM_OP_REGISTER);</a>
+<a name="ln244">        crm_xml_add(hello, F_CIB_CLIENTNAME, name);</a>
+<a name="ln245">        crm_xml_add_int(hello, F_CIB_CALLOPTS, cib_sync_call);</a>
+<a name="ln246"> </a>
+<a name="ln247">        if (crm_ipc_send(native-&gt;ipc, hello, crm_ipc_client_response, -1, &amp;reply) &gt; 0) {</a>
+<a name="ln248">            const char *msg_type = crm_element_value(reply, F_CIB_OPERATION);</a>
+<a name="ln249"> </a>
+<a name="ln250">            rc = pcmk_ok;</a>
+<a name="ln251">            crm_log_xml_trace(reply, &quot;reg-reply&quot;);</a>
+<a name="ln252"> </a>
+<a name="ln253">            if (safe_str_neq(msg_type, CRM_OP_REGISTER)) {</a>
+<a name="ln254">                crm_err(&quot;Invalid registration message: %s&quot;, msg_type);</a>
+<a name="ln255">                rc = -EPROTO;</a>
+<a name="ln256"> </a>
+<a name="ln257">            } else {</a>
+<a name="ln258">                native-&gt;token = crm_element_value_copy(reply, F_CIB_CLIENTID);</a>
+<a name="ln259">                if (native-&gt;token == NULL) {</a>
+<a name="ln260">                    rc = -EPROTO;</a>
+<a name="ln261">                }</a>
+<a name="ln262">            }</a>
+<a name="ln263">            free_xml(reply);</a>
+<a name="ln264"> </a>
+<a name="ln265">        } else {</a>
+<a name="ln266">            rc = -ECOMM;</a>
+<a name="ln267">        }</a>
+<a name="ln268"> </a>
+<a name="ln269">        free_xml(hello);</a>
+<a name="ln270">    }</a>
+<a name="ln271"> </a>
+<a name="ln272">    if (rc == pcmk_ok) {</a>
+<a name="ln273">        crm_debug(&quot;Connection to CIB successful&quot;);</a>
+<a name="ln274">        return pcmk_ok;</a>
+<a name="ln275">    }</a>
+<a name="ln276"> </a>
+<a name="ln277">    crm_debug(&quot;Connection to CIB failed: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln278">    cib_native_signoff(cib);</a>
+<a name="ln279">    return rc;</a>
+<a name="ln280">}</a>
+<a name="ln281"> </a>
+<a name="ln282">int</a>
+<a name="ln283">cib_native_signoff(cib_t * cib)</a>
+<a name="ln284">{</a>
+<a name="ln285">    cib_native_opaque_t *native = cib-&gt;variant_opaque;</a>
+<a name="ln286"> </a>
+<a name="ln287">    crm_debug(&quot;Signing out of the CIB Service&quot;);</a>
+<a name="ln288"> </a>
+<a name="ln289">    if (native-&gt;source != NULL) {</a>
+<a name="ln290">        /* Attached to mainloop */</a>
+<a name="ln291">        mainloop_del_ipc_client(native-&gt;source);</a>
+<a name="ln292">        native-&gt;source = NULL;</a>
+<a name="ln293">        native-&gt;ipc = NULL;</a>
+<a name="ln294"> </a>
+<a name="ln295">    } else if (native-&gt;ipc) {</a>
+<a name="ln296">        /* Not attached to mainloop */</a>
+<a name="ln297">        crm_ipc_t *ipc = native-&gt;ipc;</a>
+<a name="ln298"> </a>
+<a name="ln299">        native-&gt;ipc = NULL;</a>
+<a name="ln300">        crm_ipc_close(ipc);</a>
+<a name="ln301">        crm_ipc_destroy(ipc);</a>
+<a name="ln302">    }</a>
+<a name="ln303"> </a>
+<a name="ln304">    cib-&gt;state = cib_disconnected;</a>
+<a name="ln305">    cib-&gt;type = cib_no_connection;</a>
+<a name="ln306"> </a>
+<a name="ln307">    return pcmk_ok;</a>
+<a name="ln308">}</a>
+<a name="ln309"> </a>
+<a name="ln310">int</a>
+<a name="ln311">cib_native_free(cib_t * cib)</a>
+<a name="ln312">{</a>
+<a name="ln313">    int rc = pcmk_ok;</a>
+<a name="ln314"> </a>
+<a name="ln315">    if (cib-&gt;state != cib_disconnected) {</a>
+<a name="ln316">        rc = cib_native_signoff(cib);</a>
+<a name="ln317">    }</a>
+<a name="ln318"> </a>
+<a name="ln319">    if (cib-&gt;state == cib_disconnected) {</a>
+<a name="ln320">        cib_native_opaque_t *native = cib-&gt;variant_opaque;</a>
+<a name="ln321"> </a>
+<a name="ln322">        free(native-&gt;token);</a>
+<a name="ln323">        free(cib-&gt;variant_opaque);</a>
+<a name="ln324">        free(cib-&gt;cmds);</a>
+<a name="ln325">        free(cib);</a>
+<a name="ln326">    }</a>
+<a name="ln327"> </a>
+<a name="ln328">    return rc;</a>
+<a name="ln329">}</a>
+<a name="ln330"> </a>
+<a name="ln331">int</a>
+<a name="ln332">cib_native_perform_op(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln333">                      xmlNode * data, xmlNode ** output_data, int call_options)</a>
+<a name="ln334">{</a>
+<a name="ln335">    return cib_native_perform_op_delegate(cib, op, host, section,</a>
+<a name="ln336">                                          data, output_data, call_options, NULL);</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">int</a>
+<a name="ln340">cib_native_perform_op_delegate(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln341">                               xmlNode * data, xmlNode ** output_data, int call_options,</a>
+<a name="ln342">                               const char *user_name)</a>
+<a name="ln343">{</a>
+<a name="ln344">    int rc = pcmk_ok;</a>
+<a name="ln345">    int reply_id = 0;</a>
+<a name="ln346">    enum crm_ipc_flags ipc_flags = crm_ipc_flags_none;</a>
+<a name="ln347"> </a>
+<a name="ln348">    xmlNode *op_msg = NULL;</a>
+<a name="ln349">    xmlNode *op_reply = NULL;</a>
+<a name="ln350"> </a>
+<a name="ln351">    cib_native_opaque_t *native = cib-&gt;variant_opaque;</a>
+<a name="ln352"> </a>
+<a name="ln353">    if (cib-&gt;state == cib_disconnected) {</a>
+<a name="ln354">        return -ENOTCONN;</a>
+<a name="ln355">    }</a>
+<a name="ln356"> </a>
+<a name="ln357">    if (output_data != NULL) {</a>
+<a name="ln358">        *output_data = NULL;</a>
+<a name="ln359">    }</a>
+<a name="ln360"> </a>
+<a name="ln361">    if (op == NULL) {</a>
+<a name="ln362">        crm_err(&quot;No operation specified&quot;);</a>
+<a name="ln363">        return -EINVAL;</a>
+<a name="ln364">    }</a>
+<a name="ln365"> </a>
+<a name="ln366">    if (call_options &amp; cib_sync_call) {</a>
+<a name="ln367">        ipc_flags |= crm_ipc_client_response;</a>
+<a name="ln368">    }</a>
+<a name="ln369"> </a>
+<a name="ln370">    cib-&gt;call_id++;</a>
+<a name="ln371">    /* prevent call_id from being negative (or zero) and conflicting</a>
+<a name="ln372">     *    with the cib_errors enum</a>
+<a name="ln373">     * use 2 because we use it as (cib-&gt;call_id - 1) below</a>
+<a name="ln374">     */</a>
+<a name="ln375">    if (cib-&gt;call_id &lt; 1) {</a>
+<a name="ln376">        cib-&gt;call_id = 1;</a>
+<a name="ln377">    }</a>
+<a name="ln378"> </a>
+<a name="ln379">    CRM_CHECK(native-&gt;token != NULL,;</a>
+<a name="ln380">        );</a>
+<a name="ln381">    op_msg =</a>
+<a name="ln382">        cib_create_op(cib-&gt;call_id, native-&gt;token, op, host, section, data, call_options,</a>
+<a name="ln383">                      user_name);</a>
+<a name="ln384">    if (op_msg == NULL) {</a>
+<a name="ln385">        return -EPROTO;</a>
+<a name="ln386">    }</a>
+<a name="ln387"> </a>
+<a name="ln388">    crm_trace(&quot;Sending %s message to CIB service (timeout=%ds)&quot;, op, cib-&gt;call_timeout);</a>
+<a name="ln389">    rc = crm_ipc_send(native-&gt;ipc, op_msg, ipc_flags, cib-&gt;call_timeout * 1000, &amp;op_reply);</a>
+<a name="ln390">    free_xml(op_msg);</a>
+<a name="ln391"> </a>
+<a name="ln392">    if (rc &lt; 0) {</a>
+<a name="ln393">        crm_err(&quot;Couldn't perform %s operation (timeout=%ds): %s (%d)&quot;, op,</a>
+<a name="ln394">                cib-&gt;call_timeout, pcmk_strerror(rc), rc);</a>
+<a name="ln395">        rc = -ECOMM;</a>
+<a name="ln396">        goto done;</a>
+<a name="ln397">    }</a>
+<a name="ln398"> </a>
+<a name="ln399">    crm_log_xml_trace(op_reply, &quot;Reply&quot;);</a>
+<a name="ln400"> </a>
+<a name="ln401">    if (!(call_options &amp; cib_sync_call)) {</a>
+<a name="ln402">        crm_trace(&quot;Async call, returning %d&quot;, cib-&gt;call_id);</a>
+<a name="ln403">        CRM_CHECK(cib-&gt;call_id != 0, return -ENOMSG);</a>
+<a name="ln404">        free_xml(op_reply);</a>
+<a name="ln405">        return cib-&gt;call_id;</a>
+<a name="ln406">    }</a>
+<a name="ln407"> </a>
+<a name="ln408">    rc = pcmk_ok;</a>
+<a name="ln409">    crm_element_value_int(op_reply, F_CIB_CALLID, &amp;reply_id);</a>
+<a name="ln410">    if (reply_id == cib-&gt;call_id) {</a>
+<a name="ln411">        xmlNode *tmp = get_message_xml(op_reply, F_CIB_CALLDATA);</a>
+<a name="ln412"> </a>
+<a name="ln413">        crm_trace(&quot;Synchronous reply %d received&quot;, reply_id);</a>
+<a name="ln414">        if (crm_element_value_int(op_reply, F_CIB_RC, &amp;rc) != 0) {</a>
+<a name="ln415">            rc = -EPROTO;</a>
+<a name="ln416">        }</a>
+<a name="ln417"> </a>
+<a name="ln418">        if (output_data == NULL || (call_options &amp; cib_discard_reply)) {</a>
+<a name="ln419">            crm_trace(&quot;Discarding reply&quot;);</a>
+<a name="ln420"> </a>
+<a name="ln421">        } else if (tmp != NULL) {</a>
+<a name="ln422">            *output_data = copy_xml(tmp);</a>
+<a name="ln423">        }</a>
+<a name="ln424"> </a>
+<a name="ln425">    } else if (reply_id &lt;= 0) {</a>
+<a name="ln426">        crm_err(&quot;Received bad reply: No id set&quot;);</a>
+<a name="ln427">        crm_log_xml_err(op_reply, &quot;Bad reply&quot;);</a>
+<a name="ln428">        rc = -ENOMSG;</a>
+<a name="ln429">        goto done;</a>
+<a name="ln430"> </a>
+<a name="ln431">    } else {</a>
+<a name="ln432">        crm_err(&quot;Received bad reply: %d (wanted %d)&quot;, reply_id, cib-&gt;call_id);</a>
+<a name="ln433">        crm_log_xml_err(op_reply, &quot;Old reply&quot;);</a>
+<a name="ln434">        rc = -ENOMSG;</a>
+<a name="ln435">        goto done;</a>
+<a name="ln436">    }</a>
+<a name="ln437"> </a>
+<a name="ln438">    if (op_reply == NULL &amp;&amp; cib-&gt;state == cib_disconnected) {</a>
+<a name="ln439">        rc = -ENOTCONN;</a>
+<a name="ln440"> </a>
+<a name="ln441">    } else if (rc == pcmk_ok &amp;&amp; op_reply == NULL) {</a>
+<a name="ln442">        rc = -ETIME;</a>
+<a name="ln443">    }</a>
+<a name="ln444"> </a>
+<a name="ln445">    switch (rc) {</a>
+<a name="ln446">        case pcmk_ok:</a>
+<a name="ln447">        case -EPERM:</a>
+<a name="ln448">            break;</a>
+<a name="ln449"> </a>
+<a name="ln450">            /* This is an internal value that clients do not and should not care about */</a>
+<a name="ln451">        case -pcmk_err_diff_resync:</a>
+<a name="ln452">            rc = pcmk_ok;</a>
+<a name="ln453">            break;</a>
+<a name="ln454"> </a>
+<a name="ln455">            /* These indicate internal problems */</a>
+<a name="ln456">        case -EPROTO:</a>
+<a name="ln457">        case -ENOMSG:</a>
+<a name="ln458">            crm_err(&quot;Call failed: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln459">            if (op_reply) {</a>
+<a name="ln460">                crm_log_xml_err(op_reply, &quot;Invalid reply&quot;);</a>
+<a name="ln461">            }</a>
+<a name="ln462">            break;</a>
+<a name="ln463"> </a>
+<a name="ln464">        default:</a>
+<a name="ln465">            if (safe_str_neq(op, CIB_OP_QUERY)) {</a>
+<a name="ln466">                crm_warn(&quot;Call failed: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln467">            }</a>
+<a name="ln468">    }</a>
+<a name="ln469"> </a>
+<a name="ln470">  done:</a>
+<a name="ln471">    if (crm_ipc_connected(native-&gt;ipc) == FALSE) {</a>
+<a name="ln472">        crm_err(&quot;CIB disconnected&quot;);</a>
+<a name="ln473">        cib-&gt;state = cib_disconnected;</a>
+<a name="ln474">    }</a>
+<a name="ln475"> </a>
+<a name="ln476">    free_xml(op_reply);</a>
+<a name="ln477">    return rc;</a>
+<a name="ln478">}</a>
+<a name="ln479"> </a>
+<a name="ln480">int</a>
+<a name="ln481">cib_native_set_connection_dnotify(cib_t * cib, void (*dnotify) (gpointer user_data))</a>
+<a name="ln482">{</a>
+<a name="ln483">    cib_native_opaque_t *native = NULL;</a>
+<a name="ln484"> </a>
+<a name="ln485">    if (cib == NULL) {</a>
+<a name="ln486">        crm_err(&quot;No CIB!&quot;);</a>
+<a name="ln487">        return FALSE;</a>
+<a name="ln488">    }</a>
+<a name="ln489"> </a>
+<a name="ln490">    native = cib-&gt;variant_opaque;</a>
+<a name="ln491">    native-&gt;dnotify_fn = dnotify;</a>
+<a name="ln492"> </a>
+<a name="ln493">    return pcmk_ok;</a>
+<a name="ln494">}</a>
+<a name="ln495"> </a>
+<a name="ln496">int</a>
+<a name="ln497">cib_native_register_notification(cib_t * cib, const char *callback, int enabled)</a>
+<a name="ln498">{</a>
+<a name="ln499">    int rc = pcmk_ok;</a>
+<a name="ln500">    xmlNode *notify_msg = create_xml_node(NULL, &quot;cib-callback&quot;);</a>
+<a name="ln501">    cib_native_opaque_t *native = cib-&gt;variant_opaque;</a>
+<a name="ln502"> </a>
+<a name="ln503">    if (cib-&gt;state != cib_disconnected) {</a>
+<a name="ln504">        crm_xml_add(notify_msg, F_CIB_OPERATION, T_CIB_NOTIFY);</a>
+<a name="ln505">        crm_xml_add(notify_msg, F_CIB_NOTIFY_TYPE, callback);</a>
+<a name="ln506">        crm_xml_add_int(notify_msg, F_CIB_NOTIFY_ACTIVATE, enabled);</a>
+<a name="ln507">        rc = crm_ipc_send(native-&gt;ipc, notify_msg, crm_ipc_client_response,</a>
+<a name="ln508">                          1000 * cib-&gt;call_timeout, NULL);</a>
+<a name="ln509">        if (rc &lt;= 0) {</a>
+<a name="ln510">            crm_trace(&quot;Notification not registered: %d&quot;, rc);</a>
+<a name="ln511">            rc = -ECOMM;</a>
+<a name="ln512">        }</a>
+<a name="ln513">    }</a>
+<a name="ln514"> </a>
+<a name="ln515">    free_xml(notify_msg);</a>
+<a name="ln516">    return rc;</a>
+<a name="ln517">}</a>
+
+</code></pre>
+<div class="balloon" rel="73"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'native'. Check lines: 73, 68.</p></div>
+<div class="balloon" rel="403"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'cib->call_id != 0' is always true.</p></div>
+<div class="balloon" rel="403"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (cib->call_id != 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,512 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#ifndef _GNU_SOURCE</a>
+<a name="ln26">#  define _GNU_SOURCE</a>
+<a name="ln27">#endif</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;sys/param.h&gt;</a>
+<a name="ln30">#include &lt;sys/types.h&gt;</a>
+<a name="ln31">#include &lt;sys/stat.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;stdio.h&gt;</a>
+<a name="ln34">#include &lt;unistd.h&gt;</a>
+<a name="ln35">#include &lt;string.h&gt;</a>
+<a name="ln36">#include &lt;stdlib.h&gt;</a>
+<a name="ln37">#include &lt;dirent.h&gt;</a>
+<a name="ln38">#include &lt;pwd.h&gt;</a>
+<a name="ln39">#include &lt;grp.h&gt;</a>
+<a name="ln40"> </a>
+<a name="ln41">#include &lt;crm/crm.h&gt;</a>
+<a name="ln42">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln43"> </a>
+<a name="ln44">/*!</a>
+<a name="ln45"> * \brief Create a directory, including any parent directories needed</a>
+<a name="ln46"> *</a>
+<a name="ln47"> * \param[in] path_c Pathname of the directory to create</a>
+<a name="ln48"> * \param[in] mode Permissions to be used (with current umask) when creating</a>
+<a name="ln49"> *</a>
+<a name="ln50"> * \note This logs errors but does not return them to the caller.</a>
+<a name="ln51"> */</a>
+<a name="ln52">void</a>
+<a name="ln53">crm_build_path(const char *path_c, mode_t mode)</a>
+<a name="ln54">{</a>
+<a name="ln55">    int offset = 1, len = 0;</a>
+<a name="ln56">    char *path = strdup(path_c);</a>
+<a name="ln57"> </a>
+<a name="ln58">    CRM_CHECK(path != NULL, return);</a>
+<a name="ln59">    for (len = strlen(path); offset &lt; len; offset++) {</a>
+<a name="ln60">        if (path[offset] == '/') {</a>
+<a name="ln61">            path[offset] = 0;</a>
+<a name="ln62">            if (mkdir(path, mode) &lt; 0 &amp;&amp; errno != EEXIST) {</a>
+<a name="ln63">                crm_perror(LOG_ERR, &quot;Could not create directory '%s'&quot;, path);</a>
+<a name="ln64">                break;</a>
+<a name="ln65">            }</a>
+<a name="ln66">            path[offset] = '/';</a>
+<a name="ln67">        }</a>
+<a name="ln68">    }</a>
+<a name="ln69">    if (mkdir(path, mode) &lt; 0 &amp;&amp; errno != EEXIST) {</a>
+<a name="ln70">        crm_perror(LOG_ERR, &quot;Could not create directory '%s'&quot;, path);</a>
+<a name="ln71">    }</a>
+<a name="ln72"> </a>
+<a name="ln73">    free(path);</a>
+<a name="ln74">}</a>
+<a name="ln75"> </a>
+<a name="ln76">/*!</a>
+<a name="ln77"> * \internal</a>
+<a name="ln78"> * \brief Allocate and create a file path using a sequence number</a>
+<a name="ln79"> *</a>
+<a name="ln80"> * \param[in] directory Directory that contains the file series</a>
+<a name="ln81"> * \param[in] series Start of file name</a>
+<a name="ln82"> * \param[in] sequence Sequence number (MUST be less than 33 digits)</a>
+<a name="ln83"> * \param[in] bzip Whether to use &quot;.bz2&quot; instead of &quot;.raw&quot; as extension</a>
+<a name="ln84"> *</a>
+<a name="ln85"> * \return Newly allocated file path, or NULL on error</a>
+<a name="ln86"> * \note Caller is responsible for freeing the returned memory</a>
+<a name="ln87"> */</a>
+<a name="ln88">char *</a>
+<a name="ln89">generate_series_filename(const char *directory, const char *series, int sequence, gboolean bzip)</a>
+<a name="ln90">{</a>
+<a name="ln91">    int len = 40;</a>
+<a name="ln92">    char *filename = NULL;</a>
+<a name="ln93">    const char *ext = &quot;raw&quot;;</a>
+<a name="ln94"> </a>
+<a name="ln95">    CRM_CHECK(directory != NULL, return NULL);</a>
+<a name="ln96">    CRM_CHECK(series != NULL, return NULL);</a>
+<a name="ln97"> </a>
+<a name="ln98">#if !HAVE_BZLIB_H</a>
+<a name="ln99">    bzip = FALSE;</a>
+<a name="ln100">#endif</a>
+<a name="ln101"> </a>
+<a name="ln102">    len += strlen(directory);</a>
+<a name="ln103">    len += strlen(series);</a>
+<a name="ln104">    filename = malloc(len);</a>
+<a name="ln105">    CRM_CHECK(filename != NULL, return NULL);</a>
+<a name="ln106"> </a>
+<a name="ln107">    if (bzip) {</a>
+<a name="ln108">        ext = &quot;bz2&quot;;</a>
+<a name="ln109">    }</a>
+<a name="ln110">    sprintf(filename, &quot;%s/%s-%d.%s&quot;, directory, series, sequence, ext);</a>
+<a name="ln111"> </a>
+<a name="ln112">    return filename;</a>
+<a name="ln113">}</a>
+<a name="ln114"> </a>
+<a name="ln115">/*!</a>
+<a name="ln116"> * \internal</a>
+<a name="ln117"> * \brief Read and return sequence number stored in a file series' .last file</a>
+<a name="ln118"> *</a>
+<a name="ln119"> * \param[in] directory Directory that contains the file series</a>
+<a name="ln120"> * \param[in] series Start of file name</a>
+<a name="ln121"> *</a>
+<a name="ln122"> * \return The last sequence number, or 0 on error</a>
+<a name="ln123"> */</a>
+<a name="ln124">int</a>
+<a name="ln125">get_last_sequence(const char *directory, const char *series)</a>
+<a name="ln126">{</a>
+<a name="ln127">    FILE *file_strm = NULL;</a>
+<a name="ln128">    int start = 0, length = 0, read_len = 0;</a>
+<a name="ln129">    char *series_file = NULL;</a>
+<a name="ln130">    char *buffer = NULL;</a>
+<a name="ln131">    int seq = 0;</a>
+<a name="ln132">    int len = 36;</a>
+<a name="ln133"> </a>
+<a name="ln134">    CRM_CHECK(directory != NULL, return 0);</a>
+<a name="ln135">    CRM_CHECK(series != NULL, return 0);</a>
+<a name="ln136"> </a>
+<a name="ln137">    len += strlen(directory);</a>
+<a name="ln138">    len += strlen(series);</a>
+<a name="ln139">    series_file = malloc(len);</a>
+<a name="ln140">    CRM_CHECK(series_file != NULL, return 0);</a>
+<a name="ln141">    sprintf(series_file, &quot;%s/%s.last&quot;, directory, series);</a>
+<a name="ln142"> </a>
+<a name="ln143">    file_strm = fopen(series_file, &quot;r&quot;);</a>
+<a name="ln144">    if (file_strm == NULL) {</a>
+<a name="ln145">        crm_debug(&quot;Series file %s does not exist&quot;, series_file);</a>
+<a name="ln146">        free(series_file);</a>
+<a name="ln147">        return 0;</a>
+<a name="ln148">    }</a>
+<a name="ln149"> </a>
+<a name="ln150">    /* see how big the file is */</a>
+<a name="ln151">    start = ftell(file_strm);</a>
+<a name="ln152">    fseek(file_strm, 0L, SEEK_END);</a>
+<a name="ln153">    length = ftell(file_strm);</a>
+<a name="ln154">    fseek(file_strm, 0L, start);</a>
+<a name="ln155"> </a>
+<a name="ln156">    CRM_ASSERT(length &gt;= 0);</a>
+<a name="ln157">    CRM_ASSERT(start == ftell(file_strm));</a>
+<a name="ln158"> </a>
+<a name="ln159">    if (length &lt;= 0) {</a>
+<a name="ln160">        crm_info(&quot;%s was not valid&quot;, series_file);</a>
+<a name="ln161">        free(buffer);</a>
+<a name="ln162">        buffer = NULL;</a>
+<a name="ln163"> </a>
+<a name="ln164">    } else {</a>
+<a name="ln165">        crm_trace(&quot;Reading %d bytes from file&quot;, length);</a>
+<a name="ln166">        buffer = calloc(1, (length + 1));</a>
+<a name="ln167">        read_len = fread(buffer, 1, length, file_strm);</a>
+<a name="ln168">        if (read_len != length) {</a>
+<a name="ln169">            crm_err(&quot;Calculated and read bytes differ: %d vs. %d&quot;, length, read_len);</a>
+<a name="ln170">            free(buffer);</a>
+<a name="ln171">            buffer = NULL;</a>
+<a name="ln172">        }</a>
+<a name="ln173">    }</a>
+<a name="ln174"> </a>
+<a name="ln175">    seq = crm_parse_int(buffer, &quot;0&quot;);</a>
+<a name="ln176">    fclose(file_strm);</a>
+<a name="ln177"> </a>
+<a name="ln178">    crm_trace(&quot;Found %d in %s&quot;, seq, series_file);</a>
+<a name="ln179"> </a>
+<a name="ln180">    free(series_file);</a>
+<a name="ln181">    free(buffer);</a>
+<a name="ln182">    return seq;</a>
+<a name="ln183">}</a>
+<a name="ln184"> </a>
+<a name="ln185">/*!</a>
+<a name="ln186"> * \internal</a>
+<a name="ln187"> * \brief Write sequence number to a file series' .last file</a>
+<a name="ln188"> *</a>
+<a name="ln189"> * \param[in] directory Directory that contains the file series</a>
+<a name="ln190"> * \param[in] series Start of file name</a>
+<a name="ln191"> * \param[in] sequence Sequence number to write</a>
+<a name="ln192"> * \param[in] max Maximum sequence value, after which sequence is reset to 0</a>
+<a name="ln193"> *</a>
+<a name="ln194"> * \note This function logs some errors but does not return any to the caller</a>
+<a name="ln195"> */</a>
+<a name="ln196">void</a>
+<a name="ln197">write_last_sequence(const char *directory, const char *series, int sequence, int max)</a>
+<a name="ln198">{</a>
+<a name="ln199">    int rc = 0;</a>
+<a name="ln200">    int len = 36;</a>
+<a name="ln201">    FILE *file_strm = NULL;</a>
+<a name="ln202">    char *series_file = NULL;</a>
+<a name="ln203"> </a>
+<a name="ln204">    CRM_CHECK(directory != NULL, return);</a>
+<a name="ln205">    CRM_CHECK(series != NULL, return);</a>
+<a name="ln206"> </a>
+<a name="ln207">    if (max == 0) {</a>
+<a name="ln208">        return;</a>
+<a name="ln209">    }</a>
+<a name="ln210">    if (max &gt; 0 &amp;&amp; sequence &gt;= max) {</a>
+<a name="ln211">        sequence = 0;</a>
+<a name="ln212">    }</a>
+<a name="ln213"> </a>
+<a name="ln214">    len += strlen(directory);</a>
+<a name="ln215">    len += strlen(series);</a>
+<a name="ln216">    series_file = malloc(len);</a>
+<a name="ln217"> </a>
+<a name="ln218">    if (series_file) {</a>
+<a name="ln219">        sprintf(series_file, &quot;%s/%s.last&quot;, directory, series);</a>
+<a name="ln220">        file_strm = fopen(series_file, &quot;w&quot;);</a>
+<a name="ln221">    }</a>
+<a name="ln222"> </a>
+<a name="ln223">    if (file_strm != NULL) {</a>
+<a name="ln224">        rc = fprintf(file_strm, &quot;%d&quot;, sequence);</a>
+<a name="ln225">        if (rc &lt; 0) {</a>
+<a name="ln226">            crm_perror(LOG_ERR, &quot;Cannot write to series file %s&quot;, series_file);</a>
+<a name="ln227">        }</a>
+<a name="ln228"> </a>
+<a name="ln229">    } else {</a>
+<a name="ln230">        crm_err(&quot;Cannot open series file %s for writing&quot;, series_file);</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    if (file_strm != NULL) {</a>
+<a name="ln234">        fflush(file_strm);</a>
+<a name="ln235">        fclose(file_strm);</a>
+<a name="ln236">    }</a>
+<a name="ln237"> </a>
+<a name="ln238">    crm_trace(&quot;Wrote %d to %s&quot;, sequence, series_file);</a>
+<a name="ln239">    free(series_file);</a>
+<a name="ln240">}</a>
+<a name="ln241"> </a>
+<a name="ln242">/*!</a>
+<a name="ln243"> * \internal</a>
+<a name="ln244"> * \brief Change the owner and group of a file series' .last file</a>
+<a name="ln245"> *</a>
+<a name="ln246"> * \param[in] dir Directory that contains series</a>
+<a name="ln247"> * \param[in] uid Uid of desired file owner</a>
+<a name="ln248"> * \param[in] gid Gid of desired file group</a>
+<a name="ln249"> *</a>
+<a name="ln250"> * \return 0 on success, -1 on error (in which case errno will be set)</a>
+<a name="ln251"> * \note The caller must have the appropriate privileges.</a>
+<a name="ln252"> */</a>
+<a name="ln253">int</a>
+<a name="ln254">crm_chown_last_sequence(const char *directory, const char *series, uid_t uid, gid_t gid)</a>
+<a name="ln255">{</a>
+<a name="ln256">    char *series_file = NULL;</a>
+<a name="ln257">    int rc;</a>
+<a name="ln258"> </a>
+<a name="ln259">    CRM_CHECK((directory != NULL) &amp;&amp; (series != NULL), errno = EINVAL; return -1);</a>
+<a name="ln260"> </a>
+<a name="ln261">    series_file = crm_strdup_printf(&quot;%s/%s.last&quot;, directory, series);</a>
+<a name="ln262">    CRM_CHECK(series_file != NULL, return -1);</a>
+<a name="ln263"> </a>
+<a name="ln264">    rc = chown(series_file, uid, gid);</a>
+<a name="ln265">    free(series_file);</a>
+<a name="ln266">    return rc;</a>
+<a name="ln267">}</a>
+<a name="ln268"> </a>
+<a name="ln269">/*!</a>
+<a name="ln270"> * \internal</a>
+<a name="ln271"> * \brief Return whether a directory or file is writable by a user/group</a>
+<a name="ln272"> *</a>
+<a name="ln273"> * \param[in] dir Directory to check or that contains file</a>
+<a name="ln274"> * \param[in] file File name to check (or NULL to check directory)</a>
+<a name="ln275"> * \param[in] user Name of user that should have write permission</a>
+<a name="ln276"> * \param[in] group Name of group that should have write permission</a>
+<a name="ln277"> * \param[in] need_both Whether both user and group must be able to write</a>
+<a name="ln278"> *</a>
+<a name="ln279"> * \return TRUE if permissions match, FALSE if they don't or on error</a>
+<a name="ln280"> */</a>
+<a name="ln281">gboolean</a>
+<a name="ln282">crm_is_writable(const char *dir, const char *file,</a>
+<a name="ln283">                const char *user, const char *group, gboolean need_both)</a>
+<a name="ln284">{</a>
+<a name="ln285">    int s_res = -1;</a>
+<a name="ln286">    struct stat buf;</a>
+<a name="ln287">    char *full_file = NULL;</a>
+<a name="ln288">    const char *target = NULL;</a>
+<a name="ln289"> </a>
+<a name="ln290">    gboolean pass = TRUE;</a>
+<a name="ln291">    gboolean readwritable = FALSE;</a>
+<a name="ln292"> </a>
+<a name="ln293">    CRM_ASSERT(dir != NULL);</a>
+<a name="ln294">    if (file != NULL) {</a>
+<a name="ln295">        full_file = crm_concat(dir, file, '/');</a>
+<a name="ln296">        target = full_file;</a>
+<a name="ln297">        s_res = stat(full_file, &amp;buf);</a>
+<a name="ln298">        if (s_res == 0 &amp;&amp; S_ISREG(buf.st_mode) == FALSE) {</a>
+<a name="ln299">            crm_err(&quot;%s must be a regular file&quot;, target);</a>
+<a name="ln300">            pass = FALSE;</a>
+<a name="ln301">            goto out;</a>
+<a name="ln302">        }</a>
+<a name="ln303">    }</a>
+<a name="ln304"> </a>
+<a name="ln305">    if (s_res != 0) {</a>
+<a name="ln306">        target = dir;</a>
+<a name="ln307">        s_res = stat(dir, &amp;buf);</a>
+<a name="ln308">        if (s_res != 0) {</a>
+<a name="ln309">            crm_err(&quot;%s must exist and be a directory&quot;, dir);</a>
+<a name="ln310">            pass = FALSE;</a>
+<a name="ln311">            goto out;</a>
+<a name="ln312"> </a>
+<a name="ln313">        } else if (S_ISDIR(buf.st_mode) == FALSE) {</a>
+<a name="ln314">            crm_err(&quot;%s must be a directory&quot;, dir);</a>
+<a name="ln315">            pass = FALSE;</a>
+<a name="ln316">        }</a>
+<a name="ln317">    }</a>
+<a name="ln318"> </a>
+<a name="ln319">    if (user) {</a>
+<a name="ln320">        struct passwd *sys_user = NULL;</a>
+<a name="ln321"> </a>
+<a name="ln322">        sys_user = getpwnam(user);</a>
+<a name="ln323">        readwritable = (sys_user != NULL</a>
+<a name="ln324">                        &amp;&amp; buf.st_uid == sys_user-&gt;pw_uid &amp;&amp; (buf.st_mode &amp; (S_IRUSR | S_IWUSR)));</a>
+<a name="ln325">        if (readwritable == FALSE) {</a>
+<a name="ln326">            crm_err(&quot;%s must be owned and r/w by user %s&quot;, target, user);</a>
+<a name="ln327">            if (need_both) {</a>
+<a name="ln328">                pass = FALSE;</a>
+<a name="ln329">            }</a>
+<a name="ln330">        }</a>
+<a name="ln331">    }</a>
+<a name="ln332"> </a>
+<a name="ln333">    if (group) {</a>
+<a name="ln334">        struct group *sys_grp = getgrnam(group);</a>
+<a name="ln335"> </a>
+<a name="ln336">        readwritable = (sys_grp != NULL</a>
+<a name="ln337">                        &amp;&amp; buf.st_gid == sys_grp-&gt;gr_gid &amp;&amp; (buf.st_mode &amp; (S_IRGRP | S_IWGRP)));</a>
+<a name="ln338">        if (readwritable == FALSE) {</a>
+<a name="ln339">            if (need_both || user == NULL) {</a>
+<a name="ln340">                pass = FALSE;</a>
+<a name="ln341">                crm_err(&quot;%s must be owned and r/w by group %s&quot;, target, group);</a>
+<a name="ln342">            } else {</a>
+<a name="ln343">                crm_warn(&quot;%s should be owned and r/w by group %s&quot;, target, group);</a>
+<a name="ln344">            }</a>
+<a name="ln345">        }</a>
+<a name="ln346">    }</a>
+<a name="ln347"> </a>
+<a name="ln348">  out:</a>
+<a name="ln349">    free(full_file);</a>
+<a name="ln350">    return pass;</a>
+<a name="ln351">}</a>
+<a name="ln352"> </a>
+<a name="ln353">/*!</a>
+<a name="ln354"> * \internal</a>
+<a name="ln355"> * \brief Flush and sync a directory to disk</a>
+<a name="ln356"> *</a>
+<a name="ln357"> * \param[in] name Directory to flush and sync</a>
+<a name="ln358"> * \note This function logs errors but does not return them to the caller</a>
+<a name="ln359"> */</a>
+<a name="ln360">void</a>
+<a name="ln361">crm_sync_directory(const char *name)</a>
+<a name="ln362">{</a>
+<a name="ln363">    int fd;</a>
+<a name="ln364">    DIR *directory;</a>
+<a name="ln365"> </a>
+<a name="ln366">    directory = opendir(name);</a>
+<a name="ln367">    if (directory == NULL) {</a>
+<a name="ln368">        crm_perror(LOG_ERR, &quot;Could not open %s for syncing&quot;, name);</a>
+<a name="ln369">        return;</a>
+<a name="ln370">    }</a>
+<a name="ln371"> </a>
+<a name="ln372">    fd = dirfd(directory);</a>
+<a name="ln373">    if (fd &lt; 0) {</a>
+<a name="ln374">        crm_perror(LOG_ERR, &quot;Could not obtain file descriptor for %s&quot;, name);</a>
+<a name="ln375">        return;</a>
+<a name="ln376">    }</a>
+<a name="ln377"> </a>
+<a name="ln378">    if (fsync(fd) &lt; 0) {</a>
+<a name="ln379">        crm_perror(LOG_ERR, &quot;Could not sync %s&quot;, name);</a>
+<a name="ln380">    }</a>
+<a name="ln381">    if (closedir(directory) &lt; 0) {</a>
+<a name="ln382">        crm_perror(LOG_ERR, &quot;Could not close %s after fsync&quot;, name);</a>
+<a name="ln383">    }</a>
+<a name="ln384">}</a>
+<a name="ln385"> </a>
+<a name="ln386">/*!</a>
+<a name="ln387"> * \internal</a>
+<a name="ln388"> * \brief Allocate, read and return the contents of a file</a>
+<a name="ln389"> *</a>
+<a name="ln390"> * \param[in] filename Name of file to read</a>
+<a name="ln391"> *</a>
+<a name="ln392"> * \return Newly allocated memory with contents of file, or NULL on error</a>
+<a name="ln393"> * \note On success, the caller is responsible for freeing the returned memory;</a>
+<a name="ln394"> *       on error, errno will be 0 (indicating file was nonexistent or empty)</a>
+<a name="ln395"> *       or one of the errno values set by fopen, ftell, or calloc</a>
+<a name="ln396"> */</a>
+<a name="ln397">char *</a>
+<a name="ln398">crm_read_contents(const char *filename)</a>
+<a name="ln399">{</a>
+<a name="ln400">    char *contents = NULL;</a>
+<a name="ln401">    FILE *fp;</a>
+<a name="ln402">    int length, read_len;</a>
+<a name="ln403"> </a>
+<a name="ln404">    errno = 0; /* enable caller to distinguish error from empty file */</a>
+<a name="ln405"> </a>
+<a name="ln406">    fp = fopen(filename, &quot;r&quot;);</a>
+<a name="ln407">    if (fp == NULL) {</a>
+<a name="ln408">        return NULL;</a>
+<a name="ln409">    }</a>
+<a name="ln410"> </a>
+<a name="ln411">    fseek(fp, 0L, SEEK_END);</a>
+<a name="ln412">    length = ftell(fp);</a>
+<a name="ln413"> </a>
+<a name="ln414">    if (length &gt; 0) {</a>
+<a name="ln415">        contents = calloc(length + 1, sizeof(char));</a>
+<a name="ln416">        if (contents == NULL) {</a>
+<a name="ln417">            fclose(fp);</a>
+<a name="ln418">            return NULL;</a>
+<a name="ln419">        }</a>
+<a name="ln420"> </a>
+<a name="ln421">        crm_trace(&quot;Reading %d bytes from %s&quot;, length, filename);</a>
+<a name="ln422">        rewind(fp);</a>
+<a name="ln423">        read_len = fread(contents, 1, length, fp);   /* Coverity: False positive */</a>
+<a name="ln424">        if (read_len != length) {</a>
+<a name="ln425">            free(contents);</a>
+<a name="ln426">            contents = NULL;</a>
+<a name="ln427">        }</a>
+<a name="ln428">    }</a>
+<a name="ln429"> </a>
+<a name="ln430">    fclose(fp);</a>
+<a name="ln431">    return contents;</a>
+<a name="ln432">}</a>
+<a name="ln433"> </a>
+<a name="ln434">/*!</a>
+<a name="ln435"> * \internal</a>
+<a name="ln436"> * \brief Write text to a file, flush and sync it to disk, then close the file</a>
+<a name="ln437"> *</a>
+<a name="ln438"> * \param[in] fd File descriptor opened for writing</a>
+<a name="ln439"> * \param[in] contents String to write to file</a>
+<a name="ln440"> *</a>
+<a name="ln441"> * \return 0 on success, -1 on error (in which case errno will be set)</a>
+<a name="ln442"> */</a>
+<a name="ln443">int</a>
+<a name="ln444">crm_write_sync(int fd, const char *contents)</a>
+<a name="ln445">{</a>
+<a name="ln446">    int rc = 0;</a>
+<a name="ln447">    FILE *fp = fdopen(fd, &quot;w&quot;);</a>
+<a name="ln448"> </a>
+<a name="ln449">    if (fp == NULL) {</a>
+<a name="ln450">        return -1;</a>
+<a name="ln451">    }</a>
+<a name="ln452">    if ((contents != NULL) &amp;&amp; (fprintf(fp, &quot;%s&quot;, contents) &lt; 0)) {</a>
+<a name="ln453">        rc = -1;</a>
+<a name="ln454">    }</a>
+<a name="ln455">    if (fflush(fp) != 0) {</a>
+<a name="ln456">        rc = -1;</a>
+<a name="ln457">    }</a>
+<a name="ln458">    if (fsync(fileno(fp)) &lt; 0) {</a>
+<a name="ln459">        rc = -1;</a>
+<a name="ln460">    }</a>
+<a name="ln461">    fclose(fp);</a>
+<a name="ln462">    return rc;</a>
+<a name="ln463">}</a>
+
+</code></pre>
+<div class="balloon" rel="58"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'path' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="59"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strlen' function. Inspect the first argument. Check lines: 59, 56.</p></div>
+<div class="balloon" rel="105"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'filename' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="110"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 110, 104.</p></div>
+<div class="balloon" rel="140"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V773/" target="_blank">V773</a> The function was exited without releasing the 'series_file' pointer. A memory leak is possible.</p></div>
+<div class="balloon" rel="141"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 141, 139.</p></div>
+<div class="balloon" rel="156"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (length >= 0) == (0).</p></div>
+<div class="balloon" rel="161"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'free' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="226"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'fprintf' function. Under certain conditions the pointer can be null.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

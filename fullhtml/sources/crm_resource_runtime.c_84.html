@@ -1,0 +1,1771 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5"> </a>
+<a name="ln6">/*</a>
+<a name="ln7"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln8"> *</a>
+<a name="ln9"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln10"> * modify it under the terms of the GNU General Public</a>
+<a name="ln11"> * License as published by the Free Software Foundation; either</a>
+<a name="ln12"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln13"> *</a>
+<a name="ln14"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln15"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln17"> * General Public License for more details.</a>
+<a name="ln18"> *</a>
+<a name="ln19"> * You should have received a copy of the GNU General Public</a>
+<a name="ln20"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln21"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_resource.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">bool do_trace = FALSE;</a>
+<a name="ln27">bool do_force = FALSE;</a>
+<a name="ln28">int crmd_replies_needed = 1; /* The welcome message */</a>
+<a name="ln29"> </a>
+<a name="ln30">const char *attr_set_type = XML_TAG_ATTR_SETS;</a>
+<a name="ln31"> </a>
+<a name="ln32">static int</a>
+<a name="ln33">do_find_resource(const char *rsc, resource_t * the_rsc, pe_working_set_t * data_set)</a>
+<a name="ln34">{</a>
+<a name="ln35">    int found = 0;</a>
+<a name="ln36">    GListPtr lpc = NULL;</a>
+<a name="ln37"> </a>
+<a name="ln38">    for (lpc = the_rsc-&gt;running_on; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln39">        node_t *node = (node_t *) lpc-&gt;data;</a>
+<a name="ln40"> </a>
+<a name="ln41">        crm_trace(&quot;resource %s is running on: %s&quot;, rsc, node-&gt;details-&gt;uname);</a>
+<a name="ln42">        if (BE_QUIET) {</a>
+<a name="ln43">            fprintf(stdout, &quot;%s\n&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln44">        } else {</a>
+<a name="ln45">            const char *state = &quot;&quot;;</a>
+<a name="ln46"> </a>
+<a name="ln47">            if (!pe_rsc_is_clone(the_rsc) &amp;&amp; the_rsc-&gt;fns-&gt;state(the_rsc, TRUE) == RSC_ROLE_MASTER) {</a>
+<a name="ln48">                state = &quot;Master&quot;;</a>
+<a name="ln49">            }</a>
+<a name="ln50">            fprintf(stdout, &quot;resource %s is running on: %s %s\n&quot;, rsc, node-&gt;details-&gt;uname, state);</a>
+<a name="ln51">        }</a>
+<a name="ln52"> </a>
+<a name="ln53">        found++;</a>
+<a name="ln54">    }</a>
+<a name="ln55"> </a>
+<a name="ln56">    if (BE_QUIET == FALSE &amp;&amp; found == 0) {</a>
+<a name="ln57">        fprintf(stderr, &quot;resource %s is NOT running\n&quot;, rsc);</a>
+<a name="ln58">    }</a>
+<a name="ln59"> </a>
+<a name="ln60">    return found;</a>
+<a name="ln61">}</a>
+<a name="ln62"> </a>
+<a name="ln63">int</a>
+<a name="ln64">cli_resource_search(const char *rsc, pe_working_set_t * data_set)</a>
+<a name="ln65">{</a>
+<a name="ln66">    int found = 0;</a>
+<a name="ln67">    resource_t *the_rsc = NULL;</a>
+<a name="ln68">    resource_t *parent = NULL;</a>
+<a name="ln69"> </a>
+<a name="ln70">    if (the_rsc == NULL) {</a>
+<a name="ln71">        the_rsc = pe_find_resource(data_set-&gt;resources, rsc);</a>
+<a name="ln72">    }</a>
+<a name="ln73"> </a>
+<a name="ln74">    if (the_rsc == NULL) {</a>
+<a name="ln75">        return -ENXIO;</a>
+<a name="ln76">    }</a>
+<a name="ln77"> </a>
+<a name="ln78">    if (pe_rsc_is_clone(the_rsc)) {</a>
+<a name="ln79">        GListPtr gIter = the_rsc-&gt;children;</a>
+<a name="ln80"> </a>
+<a name="ln81">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln82">            found += do_find_resource(rsc, gIter-&gt;data, data_set);</a>
+<a name="ln83">        }</a>
+<a name="ln84"> </a>
+<a name="ln85">    /* The anonymous clone children's common ID is supplied */</a>
+<a name="ln86">    } else if ((parent = uber_parent(the_rsc)) != NULL</a>
+<a name="ln87">               &amp;&amp; pe_rsc_is_clone(parent)</a>
+<a name="ln88">               &amp;&amp; is_not_set(the_rsc-&gt;flags, pe_rsc_unique)</a>
+<a name="ln89">               &amp;&amp; the_rsc-&gt;clone_name</a>
+<a name="ln90">               &amp;&amp; safe_str_eq(rsc, the_rsc-&gt;clone_name)</a>
+<a name="ln91">               &amp;&amp; safe_str_neq(rsc, the_rsc-&gt;id)) {</a>
+<a name="ln92">        GListPtr gIter = parent-&gt;children;</a>
+<a name="ln93"> </a>
+<a name="ln94">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln95">            found += do_find_resource(rsc, gIter-&gt;data, data_set);</a>
+<a name="ln96">        }</a>
+<a name="ln97"> </a>
+<a name="ln98">    } else {</a>
+<a name="ln99">        found += do_find_resource(rsc, the_rsc, data_set);</a>
+<a name="ln100">    }</a>
+<a name="ln101"> </a>
+<a name="ln102">    return found;</a>
+<a name="ln103">}</a>
+<a name="ln104"> </a>
+<a name="ln105">resource_t *</a>
+<a name="ln106">find_rsc_or_clone(const char *rsc, pe_working_set_t * data_set)</a>
+<a name="ln107">{</a>
+<a name="ln108">    resource_t *the_rsc = pe_find_resource(data_set-&gt;resources, rsc);</a>
+<a name="ln109"> </a>
+<a name="ln110">    if (the_rsc == NULL) {</a>
+<a name="ln111">        char *as_clone = crm_concat(rsc, &quot;0&quot;, ':');</a>
+<a name="ln112"> </a>
+<a name="ln113">        the_rsc = pe_find_resource(data_set-&gt;resources, as_clone);</a>
+<a name="ln114">        free(as_clone);</a>
+<a name="ln115">    }</a>
+<a name="ln116">    return the_rsc;</a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119"> </a>
+<a name="ln120">static int</a>
+<a name="ln121">find_resource_attr(cib_t * the_cib, const char *attr, const char *rsc, const char *set_type,</a>
+<a name="ln122">                   const char *set_name, const char *attr_id, const char *attr_name, char **value)</a>
+<a name="ln123">{</a>
+<a name="ln124">    int offset = 0;</a>
+<a name="ln125">    static int xpath_max = 1024;</a>
+<a name="ln126">    int rc = pcmk_ok;</a>
+<a name="ln127">    xmlNode *xml_search = NULL;</a>
+<a name="ln128">    char *xpath_string = NULL;</a>
+<a name="ln129"> </a>
+<a name="ln130">    if(value) {</a>
+<a name="ln131">        *value = NULL;</a>
+<a name="ln132">    }</a>
+<a name="ln133"> </a>
+<a name="ln134">    if(the_cib == NULL) {</a>
+<a name="ln135">        return -ENOTCONN;</a>
+<a name="ln136">    }</a>
+<a name="ln137"> </a>
+<a name="ln138">    xpath_string = calloc(1, xpath_max);</a>
+<a name="ln139">    offset +=</a>
+<a name="ln140">        snprintf(xpath_string + offset, xpath_max - offset, &quot;%s&quot;, get_object_path(&quot;resources&quot;));</a>
+<a name="ln141"> </a>
+<a name="ln142">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;//*[@id=\&quot;%s\&quot;]&quot;, rsc);</a>
+<a name="ln143"> </a>
+<a name="ln144">    if (set_type) {</a>
+<a name="ln145">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;/%s&quot;, set_type);</a>
+<a name="ln146">        if (set_name) {</a>
+<a name="ln147">            offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;[@id=\&quot;%s\&quot;]&quot;, set_name);</a>
+<a name="ln148">        }</a>
+<a name="ln149">    }</a>
+<a name="ln150"> </a>
+<a name="ln151">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;//nvpair[&quot;);</a>
+<a name="ln152">    if (attr_id) {</a>
+<a name="ln153">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;@id=\&quot;%s\&quot;&quot;, attr_id);</a>
+<a name="ln154">    }</a>
+<a name="ln155"> </a>
+<a name="ln156">    if (attr_name) {</a>
+<a name="ln157">        if (attr_id) {</a>
+<a name="ln158">            offset += snprintf(xpath_string + offset, xpath_max - offset, &quot; and &quot;);</a>
+<a name="ln159">        }</a>
+<a name="ln160">        offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;@name=\&quot;%s\&quot;&quot;, attr_name);</a>
+<a name="ln161">    }</a>
+<a name="ln162">    offset += snprintf(xpath_string + offset, xpath_max - offset, &quot;]&quot;);</a>
+<a name="ln163">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln164"> </a>
+<a name="ln165">    rc = the_cib-&gt;cmds-&gt;query(the_cib, xpath_string, &amp;xml_search,</a>
+<a name="ln166">                              cib_sync_call | cib_scope_local | cib_xpath);</a>
+<a name="ln167"> </a>
+<a name="ln168">    if (rc != pcmk_ok) {</a>
+<a name="ln169">        goto bail;</a>
+<a name="ln170">    }</a>
+<a name="ln171"> </a>
+<a name="ln172">    crm_log_xml_debug(xml_search, &quot;Match&quot;);</a>
+<a name="ln173">    if (xml_has_children(xml_search)) {</a>
+<a name="ln174">        xmlNode *child = NULL;</a>
+<a name="ln175"> </a>
+<a name="ln176">        rc = -EINVAL;</a>
+<a name="ln177">        printf(&quot;Multiple attributes match name=%s\n&quot;, attr_name);</a>
+<a name="ln178"> </a>
+<a name="ln179">        for (child = __xml_first_child(xml_search); child != NULL; child = __xml_next(child)) {</a>
+<a name="ln180">            printf(&quot;  Value: %s \t(id=%s)\n&quot;,</a>
+<a name="ln181">                   crm_element_value(child, XML_NVPAIR_ATTR_VALUE), ID(child));</a>
+<a name="ln182">        }</a>
+<a name="ln183"> </a>
+<a name="ln184">    } else if(value) {</a>
+<a name="ln185">        const char *tmp = crm_element_value(xml_search, attr);</a>
+<a name="ln186"> </a>
+<a name="ln187">        if (tmp) {</a>
+<a name="ln188">            *value = strdup(tmp);</a>
+<a name="ln189">        }</a>
+<a name="ln190">    }</a>
+<a name="ln191"> </a>
+<a name="ln192">  bail:</a>
+<a name="ln193">    free(xpath_string);</a>
+<a name="ln194">    free_xml(xml_search);</a>
+<a name="ln195">    return rc;</a>
+<a name="ln196">}</a>
+<a name="ln197"> </a>
+<a name="ln198">static resource_t *</a>
+<a name="ln199">find_matching_attr_resource(resource_t * rsc, const char * rsc_id, const char * attr_set, const char * attr_id,</a>
+<a name="ln200">                            const char * attr_name, cib_t * cib, const char * cmd)</a>
+<a name="ln201">{</a>
+<a name="ln202">    int rc = pcmk_ok;</a>
+<a name="ln203">    char *lookup_id = NULL;</a>
+<a name="ln204">    char *local_attr_id = NULL;</a>
+<a name="ln205"> </a>
+<a name="ln206">    if(do_force == TRUE) {</a>
+<a name="ln207">        return rsc;</a>
+<a name="ln208"> </a>
+<a name="ln209">    } else if(rsc-&gt;parent) {</a>
+<a name="ln210">        switch(rsc-&gt;parent-&gt;variant) {</a>
+<a name="ln211">            case pe_group:</a>
+<a name="ln212">                if (BE_QUIET == FALSE) {</a>
+<a name="ln213">                    printf(&quot;Performing %s of '%s' for '%s' will not apply to its peers in '%s'\n&quot;, cmd, attr_name, rsc_id, rsc-&gt;parent-&gt;id);</a>
+<a name="ln214">                }</a>
+<a name="ln215">                break;</a>
+<a name="ln216">            case pe_master:</a>
+<a name="ln217">            case pe_clone:</a>
+<a name="ln218"> </a>
+<a name="ln219">                rc = find_resource_attr(cib, XML_ATTR_ID, rsc_id, attr_set_type, attr_set, attr_id, attr_name, &amp;local_attr_id);</a>
+<a name="ln220">                free(local_attr_id);</a>
+<a name="ln221"> </a>
+<a name="ln222">                if(rc != pcmk_ok) {</a>
+<a name="ln223">                    rsc = rsc-&gt;parent;</a>
+<a name="ln224">                    if (BE_QUIET == FALSE) {</a>
+<a name="ln225">                        printf(&quot;Performing %s of '%s' on '%s', the parent of '%s'\n&quot;, cmd, attr_name, rsc-&gt;id, rsc_id);</a>
+<a name="ln226">                    }</a>
+<a name="ln227">                }</a>
+<a name="ln228">                break;</a>
+<a name="ln229">            default:</a>
+<a name="ln230">                break;</a>
+<a name="ln231">        }</a>
+<a name="ln232"> </a>
+<a name="ln233">    } else if (rsc-&gt;parent &amp;&amp; BE_QUIET == FALSE) {</a>
+<a name="ln234">        printf(&quot;Forcing %s of '%s' for '%s' instead of '%s'\n&quot;, cmd, attr_name, rsc_id, rsc-&gt;parent-&gt;id);</a>
+<a name="ln235"> </a>
+<a name="ln236">    } else if(rsc-&gt;parent == NULL &amp;&amp; rsc-&gt;children) {</a>
+<a name="ln237">        resource_t *child = rsc-&gt;children-&gt;data;</a>
+<a name="ln238"> </a>
+<a name="ln239">        if(child-&gt;variant == pe_native) {</a>
+<a name="ln240">            lookup_id = clone_strip(child-&gt;id); /* Could be a cloned group! */</a>
+<a name="ln241">            rc = find_resource_attr(cib, XML_ATTR_ID, lookup_id, attr_set_type, attr_set, attr_id, attr_name, &amp;local_attr_id);</a>
+<a name="ln242"> </a>
+<a name="ln243">            if(rc == pcmk_ok) {</a>
+<a name="ln244">                rsc = child;</a>
+<a name="ln245">                if (BE_QUIET == FALSE) {</a>
+<a name="ln246">                    printf(&quot;A value for '%s' already exists in child '%s', performing %s on that instead of '%s'\n&quot;, attr_name, lookup_id, cmd, rsc_id);</a>
+<a name="ln247">                }</a>
+<a name="ln248">            }</a>
+<a name="ln249"> </a>
+<a name="ln250">            free(local_attr_id);</a>
+<a name="ln251">            free(lookup_id);</a>
+<a name="ln252">        }</a>
+<a name="ln253">    }</a>
+<a name="ln254"> </a>
+<a name="ln255">    return rsc;</a>
+<a name="ln256">}</a>
+<a name="ln257"> </a>
+<a name="ln258">int</a>
+<a name="ln259">cli_resource_update_attribute(const char *rsc_id, const char *attr_set, const char *attr_id,</a>
+<a name="ln260">                  const char *attr_name, const char *attr_value, bool recursive,</a>
+<a name="ln261">                  cib_t * cib, pe_working_set_t * data_set)</a>
+<a name="ln262">{</a>
+<a name="ln263">    int rc = pcmk_ok;</a>
+<a name="ln264">    static bool need_init = TRUE;</a>
+<a name="ln265"> </a>
+<a name="ln266">    char *lookup_id = NULL;</a>
+<a name="ln267">    char *local_attr_id = NULL;</a>
+<a name="ln268">    char *local_attr_set = NULL;</a>
+<a name="ln269"> </a>
+<a name="ln270">    xmlNode *xml_top = NULL;</a>
+<a name="ln271">    xmlNode *xml_obj = NULL;</a>
+<a name="ln272"> </a>
+<a name="ln273">    bool use_attributes_tag = FALSE;</a>
+<a name="ln274">    resource_t *rsc = find_rsc_or_clone(rsc_id, data_set);</a>
+<a name="ln275"> </a>
+<a name="ln276">    if (rsc == NULL) {</a>
+<a name="ln277">        return -ENXIO;</a>
+<a name="ln278">    }</a>
+<a name="ln279"> </a>
+<a name="ln280">    if(attr_id == NULL</a>
+<a name="ln281">       &amp;&amp; do_force == FALSE</a>
+<a name="ln282">       &amp;&amp; pcmk_ok != find_resource_attr(</a>
+<a name="ln283">           cib, XML_ATTR_ID, uber_parent(rsc)-&gt;id, NULL, NULL, NULL, attr_name, NULL)) {</a>
+<a name="ln284">        printf(&quot;\n&quot;);</a>
+<a name="ln285">    }</a>
+<a name="ln286"> </a>
+<a name="ln287">    if (safe_str_eq(attr_set_type, XML_TAG_ATTR_SETS)) {</a>
+<a name="ln288">        if (do_force == FALSE) {</a>
+<a name="ln289">            rc = find_resource_attr(cib, XML_ATTR_ID, uber_parent(rsc)-&gt;id,</a>
+<a name="ln290">                                    XML_TAG_META_SETS, attr_set, attr_id,</a>
+<a name="ln291">                                    attr_name, &amp;local_attr_id);</a>
+<a name="ln292">            if (rc == pcmk_ok &amp;&amp; BE_QUIET == FALSE) {</a>
+<a name="ln293">                printf(&quot;WARNING: There is already a meta attribute for '%s' called '%s' (id=%s)\n&quot;,</a>
+<a name="ln294">                       uber_parent(rsc)-&gt;id, attr_name, local_attr_id);</a>
+<a name="ln295">                printf(&quot;         Delete '%s' first or use --force to override\n&quot;, local_attr_id);</a>
+<a name="ln296">            }</a>
+<a name="ln297">            free(local_attr_id);</a>
+<a name="ln298">            if (rc == pcmk_ok) {</a>
+<a name="ln299">                return -ENOTUNIQ;</a>
+<a name="ln300">            }</a>
+<a name="ln301">        }</a>
+<a name="ln302"> </a>
+<a name="ln303">    } else {</a>
+<a name="ln304">        rsc = find_matching_attr_resource(rsc, rsc_id, attr_set, attr_id, attr_name, cib, &quot;update&quot;);</a>
+<a name="ln305">    }</a>
+<a name="ln306"> </a>
+<a name="ln307">    lookup_id = clone_strip(rsc-&gt;id); /* Could be a cloned group! */</a>
+<a name="ln308">    rc = find_resource_attr(cib, XML_ATTR_ID, lookup_id, attr_set_type, attr_set, attr_id, attr_name,</a>
+<a name="ln309">                            &amp;local_attr_id);</a>
+<a name="ln310"> </a>
+<a name="ln311">    if (rc == pcmk_ok) {</a>
+<a name="ln312">        crm_debug(&quot;Found a match for name=%s: id=%s&quot;, attr_name, local_attr_id);</a>
+<a name="ln313">        attr_id = local_attr_id;</a>
+<a name="ln314"> </a>
+<a name="ln315">    } else if (rc != -ENXIO) {</a>
+<a name="ln316">        free(lookup_id);</a>
+<a name="ln317">        free(local_attr_id);</a>
+<a name="ln318">        return rc;</a>
+<a name="ln319"> </a>
+<a name="ln320">    } else {</a>
+<a name="ln321">        const char *value = NULL;</a>
+<a name="ln322">        xmlNode *cib_top = NULL;</a>
+<a name="ln323">        const char *tag = crm_element_name(rsc-&gt;xml);</a>
+<a name="ln324"> </a>
+<a name="ln325">        cib-&gt;cmds-&gt;query(cib, &quot;/cib&quot;, &amp;cib_top,</a>
+<a name="ln326">                              cib_sync_call | cib_scope_local | cib_xpath | cib_no_children);</a>
+<a name="ln327">        value = crm_element_value(cib_top, &quot;ignore_dtd&quot;);</a>
+<a name="ln328">        if (value != NULL) {</a>
+<a name="ln329">            use_attributes_tag = TRUE;</a>
+<a name="ln330"> </a>
+<a name="ln331">        } else {</a>
+<a name="ln332">            value = crm_element_value(cib_top, XML_ATTR_VALIDATION);</a>
+<a name="ln333">            if (crm_ends_with(value, &quot;-0.6&quot;)) {</a>
+<a name="ln334">                use_attributes_tag = TRUE;</a>
+<a name="ln335">            }</a>
+<a name="ln336">        }</a>
+<a name="ln337">        free_xml(cib_top);</a>
+<a name="ln338"> </a>
+<a name="ln339">        if (attr_set == NULL) {</a>
+<a name="ln340">            local_attr_set = crm_concat(lookup_id, attr_set_type, '-');</a>
+<a name="ln341">            attr_set = local_attr_set;</a>
+<a name="ln342">        }</a>
+<a name="ln343">        if (attr_id == NULL) {</a>
+<a name="ln344">            local_attr_id = crm_concat(attr_set, attr_name, '-');</a>
+<a name="ln345">            attr_id = local_attr_id;</a>
+<a name="ln346">        }</a>
+<a name="ln347"> </a>
+<a name="ln348">        if (use_attributes_tag &amp;&amp; safe_str_eq(tag, XML_CIB_TAG_MASTER)) {</a>
+<a name="ln349">            tag = &quot;master_slave&quot;;       /* use the old name */</a>
+<a name="ln350">        }</a>
+<a name="ln351"> </a>
+<a name="ln352">        xml_top = create_xml_node(NULL, tag);</a>
+<a name="ln353">        crm_xml_add(xml_top, XML_ATTR_ID, lookup_id);</a>
+<a name="ln354"> </a>
+<a name="ln355">        xml_obj = create_xml_node(xml_top, attr_set_type);</a>
+<a name="ln356">        crm_xml_add(xml_obj, XML_ATTR_ID, attr_set);</a>
+<a name="ln357"> </a>
+<a name="ln358">        if (use_attributes_tag) {</a>
+<a name="ln359">            xml_obj = create_xml_node(xml_obj, XML_TAG_ATTRS);</a>
+<a name="ln360">        }</a>
+<a name="ln361">    }</a>
+<a name="ln362"> </a>
+<a name="ln363">    xml_obj = create_xml_node(xml_obj, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln364">    if (xml_top == NULL) {</a>
+<a name="ln365">        xml_top = xml_obj;</a>
+<a name="ln366">    }</a>
+<a name="ln367"> </a>
+<a name="ln368">    crm_xml_add(xml_obj, XML_ATTR_ID, attr_id);</a>
+<a name="ln369">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name);</a>
+<a name="ln370">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_VALUE, attr_value);</a>
+<a name="ln371"> </a>
+<a name="ln372">    crm_log_xml_debug(xml_top, &quot;Update&quot;);</a>
+<a name="ln373"> </a>
+<a name="ln374">    rc = cib-&gt;cmds-&gt;modify(cib, XML_CIB_TAG_RESOURCES, xml_top, cib_options);</a>
+<a name="ln375">    if (rc == pcmk_ok &amp;&amp; BE_QUIET == FALSE) {</a>
+<a name="ln376">        printf(&quot;Set '%s' option: id=%s%s%s%s%s=%s\n&quot;, lookup_id, local_attr_id,</a>
+<a name="ln377">               attr_set ? &quot; set=&quot; : &quot;&quot;, attr_set ? attr_set : &quot;&quot;,</a>
+<a name="ln378">               attr_name ? &quot; name=&quot; : &quot;&quot;, attr_name ? attr_name : &quot;&quot;, attr_value);</a>
+<a name="ln379">    }</a>
+<a name="ln380"> </a>
+<a name="ln381">    free_xml(xml_top);</a>
+<a name="ln382"> </a>
+<a name="ln383">    free(lookup_id);</a>
+<a name="ln384">    free(local_attr_id);</a>
+<a name="ln385">    free(local_attr_set);</a>
+<a name="ln386"> </a>
+<a name="ln387">    if(recursive &amp;&amp; safe_str_eq(attr_set_type, XML_TAG_META_SETS)) {</a>
+<a name="ln388">        GListPtr lpc = NULL;</a>
+<a name="ln389"> </a>
+<a name="ln390">        if(need_init) {</a>
+<a name="ln391">            xmlNode *cib_constraints = get_object_root(XML_CIB_TAG_CONSTRAINTS, data_set-&gt;input);</a>
+<a name="ln392"> </a>
+<a name="ln393">            need_init = FALSE;</a>
+<a name="ln394">            unpack_constraints(cib_constraints, data_set);</a>
+<a name="ln395"> </a>
+<a name="ln396">            for (lpc = data_set-&gt;resources; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln397">                resource_t *r = (resource_t *) lpc-&gt;data;</a>
+<a name="ln398"> </a>
+<a name="ln399">                clear_bit(r-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln400">            }</a>
+<a name="ln401">        }</a>
+<a name="ln402"> </a>
+<a name="ln403">        crm_debug(&quot;Looking for dependencies %p&quot;, rsc-&gt;rsc_cons_lhs);</a>
+<a name="ln404">        set_bit(rsc-&gt;flags, pe_rsc_allocating);</a>
+<a name="ln405">        for (lpc = rsc-&gt;rsc_cons_lhs; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln406">            rsc_colocation_t *cons = (rsc_colocation_t *) lpc-&gt;data;</a>
+<a name="ln407">            resource_t *peer = cons-&gt;rsc_lh;</a>
+<a name="ln408"> </a>
+<a name="ln409">            crm_debug(&quot;Checking %s %d&quot;, cons-&gt;id, cons-&gt;score);</a>
+<a name="ln410">            if (cons-&gt;score &gt; 0 &amp;&amp; is_not_set(peer-&gt;flags, pe_rsc_allocating)) {</a>
+<a name="ln411">                /* Don't get into colocation loops */</a>
+<a name="ln412">                crm_debug(&quot;Setting %s=%s for dependent resource %s&quot;, attr_name, attr_value, peer-&gt;id);</a>
+<a name="ln413">                cli_resource_update_attribute(peer-&gt;id, NULL, NULL, attr_name, attr_value, recursive, cib, data_set);</a>
+<a name="ln414">            }</a>
+<a name="ln415">        }</a>
+<a name="ln416">    }</a>
+<a name="ln417"> </a>
+<a name="ln418">    return rc;</a>
+<a name="ln419">}</a>
+<a name="ln420"> </a>
+<a name="ln421">int</a>
+<a name="ln422">cli_resource_delete_attribute(const char *rsc_id, const char *attr_set, const char *attr_id,</a>
+<a name="ln423">                     const char *attr_name, cib_t * cib, pe_working_set_t * data_set)</a>
+<a name="ln424">{</a>
+<a name="ln425">    xmlNode *xml_obj = NULL;</a>
+<a name="ln426"> </a>
+<a name="ln427">    int rc = pcmk_ok;</a>
+<a name="ln428">    char *lookup_id = NULL;</a>
+<a name="ln429">    char *local_attr_id = NULL;</a>
+<a name="ln430">    resource_t *rsc = find_rsc_or_clone(rsc_id, data_set);</a>
+<a name="ln431"> </a>
+<a name="ln432">    if (rsc == NULL) {</a>
+<a name="ln433">        return -ENXIO;</a>
+<a name="ln434">    }</a>
+<a name="ln435"> </a>
+<a name="ln436">    if(attr_id == NULL</a>
+<a name="ln437">       &amp;&amp; do_force == FALSE</a>
+<a name="ln438">       &amp;&amp; find_resource_attr(</a>
+<a name="ln439">           cib, XML_ATTR_ID, uber_parent(rsc)-&gt;id, NULL, NULL, NULL, attr_name, NULL) != pcmk_ok) {</a>
+<a name="ln440">        printf(&quot;\n&quot;);</a>
+<a name="ln441">    }</a>
+<a name="ln442"> </a>
+<a name="ln443">    if(safe_str_eq(attr_set_type, XML_TAG_META_SETS)) {</a>
+<a name="ln444">        rsc = find_matching_attr_resource(rsc, rsc_id, attr_set, attr_id, attr_name, cib, &quot;delete&quot;);</a>
+<a name="ln445">    }</a>
+<a name="ln446"> </a>
+<a name="ln447">    lookup_id = clone_strip(rsc-&gt;id);</a>
+<a name="ln448">    rc = find_resource_attr(cib, XML_ATTR_ID, lookup_id, attr_set_type, attr_set, attr_id, attr_name,</a>
+<a name="ln449">                            &amp;local_attr_id);</a>
+<a name="ln450"> </a>
+<a name="ln451">    if (rc == -ENXIO) {</a>
+<a name="ln452">        free(lookup_id);</a>
+<a name="ln453">        return pcmk_ok;</a>
+<a name="ln454"> </a>
+<a name="ln455">    } else if (rc != pcmk_ok) {</a>
+<a name="ln456">        free(lookup_id);</a>
+<a name="ln457">        return rc;</a>
+<a name="ln458">    }</a>
+<a name="ln459"> </a>
+<a name="ln460">    if (attr_id == NULL) {</a>
+<a name="ln461">        attr_id = local_attr_id;</a>
+<a name="ln462">    }</a>
+<a name="ln463"> </a>
+<a name="ln464">    xml_obj = create_xml_node(NULL, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln465">    crm_xml_add(xml_obj, XML_ATTR_ID, attr_id);</a>
+<a name="ln466">    crm_xml_add(xml_obj, XML_NVPAIR_ATTR_NAME, attr_name);</a>
+<a name="ln467"> </a>
+<a name="ln468">    crm_log_xml_debug(xml_obj, &quot;Delete&quot;);</a>
+<a name="ln469"> </a>
+<a name="ln470">    CRM_ASSERT(cib);</a>
+<a name="ln471">    rc = cib-&gt;cmds-&gt;delete(cib, XML_CIB_TAG_RESOURCES, xml_obj, cib_options);</a>
+<a name="ln472"> </a>
+<a name="ln473">    if (rc == pcmk_ok &amp;&amp; BE_QUIET == FALSE) {</a>
+<a name="ln474">        printf(&quot;Deleted '%s' option: id=%s%s%s%s%s\n&quot;, lookup_id, local_attr_id,</a>
+<a name="ln475">               attr_set ? &quot; set=&quot; : &quot;&quot;, attr_set ? attr_set : &quot;&quot;,</a>
+<a name="ln476">               attr_name ? &quot; name=&quot; : &quot;&quot;, attr_name ? attr_name : &quot;&quot;);</a>
+<a name="ln477">    }</a>
+<a name="ln478"> </a>
+<a name="ln479">    free(lookup_id);</a>
+<a name="ln480">    free_xml(xml_obj);</a>
+<a name="ln481">    free(local_attr_id);</a>
+<a name="ln482">    return rc;</a>
+<a name="ln483">}</a>
+<a name="ln484"> </a>
+<a name="ln485">static int</a>
+<a name="ln486">send_lrm_rsc_op(crm_ipc_t * crmd_channel, const char *op,</a>
+<a name="ln487">                const char *host_uname, const char *rsc_id,</a>
+<a name="ln488">                bool only_failed, pe_working_set_t * data_set)</a>
+<a name="ln489">{</a>
+<a name="ln490">    char *our_pid = NULL;</a>
+<a name="ln491">    char *key = NULL;</a>
+<a name="ln492">    int rc = -ECOMM;</a>
+<a name="ln493">    xmlNode *cmd = NULL;</a>
+<a name="ln494">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln495">    const char *value = NULL;</a>
+<a name="ln496">    const char *router_node = host_uname;</a>
+<a name="ln497">    xmlNode *params = NULL;</a>
+<a name="ln498">    xmlNode *msg_data = NULL;</a>
+<a name="ln499">    resource_t *rsc = pe_find_resource(data_set-&gt;resources, rsc_id);</a>
+<a name="ln500"> </a>
+<a name="ln501">    if (rsc == NULL) {</a>
+<a name="ln502">        CMD_ERR(&quot;Resource %s not found&quot;, rsc_id);</a>
+<a name="ln503">        return -ENXIO;</a>
+<a name="ln504"> </a>
+<a name="ln505">    } else if (rsc-&gt;variant != pe_native) {</a>
+<a name="ln506">        CMD_ERR(&quot;We can only process primitive resources, not %s&quot;, rsc_id);</a>
+<a name="ln507">        return -EINVAL;</a>
+<a name="ln508"> </a>
+<a name="ln509">    } else if (host_uname == NULL) {</a>
+<a name="ln510">        CMD_ERR(&quot;Please supply a hostname with -H&quot;);</a>
+<a name="ln511">        return -EINVAL;</a>
+<a name="ln512">    } else {</a>
+<a name="ln513">        node_t *node = pe_find_node(data_set-&gt;nodes, host_uname);</a>
+<a name="ln514"> </a>
+<a name="ln515">        if (node &amp;&amp; is_remote_node(node)) {</a>
+<a name="ln516">            if (node-&gt;details-&gt;remote_rsc == NULL || node-&gt;details-&gt;remote_rsc-&gt;running_on == NULL) {</a>
+<a name="ln517">                CMD_ERR(&quot;No lrmd connection detected to remote node %s&quot;, host_uname);</a>
+<a name="ln518">                return -ENXIO;</a>
+<a name="ln519">            }</a>
+<a name="ln520">            node = node-&gt;details-&gt;remote_rsc-&gt;running_on-&gt;data;</a>
+<a name="ln521">            router_node = node-&gt;details-&gt;uname;</a>
+<a name="ln522">        }</a>
+<a name="ln523">    }</a>
+<a name="ln524"> </a>
+<a name="ln525">    key = generate_transition_key(0, getpid(), 0, &quot;xxxxxxxx-xrsc-opxx-xcrm-resourcexxxx&quot;);</a>
+<a name="ln526"> </a>
+<a name="ln527">    msg_data = create_xml_node(NULL, XML_GRAPH_TAG_RSC_OP);</a>
+<a name="ln528">    crm_xml_add(msg_data, XML_ATTR_TRANSITION_KEY, key);</a>
+<a name="ln529">    free(key);</a>
+<a name="ln530"> </a>
+<a name="ln531">    crm_xml_add(msg_data, XML_LRM_ATTR_TARGET, host_uname);</a>
+<a name="ln532">    if (safe_str_neq(router_node, host_uname)) {</a>
+<a name="ln533">        crm_xml_add(msg_data, XML_LRM_ATTR_ROUTER_NODE, router_node);</a>
+<a name="ln534">    }</a>
+<a name="ln535"> </a>
+<a name="ln536">    xml_rsc = create_xml_node(msg_data, XML_CIB_TAG_RESOURCE);</a>
+<a name="ln537">    if (rsc-&gt;clone_name) {</a>
+<a name="ln538">        crm_xml_add(xml_rsc, XML_ATTR_ID, rsc-&gt;clone_name);</a>
+<a name="ln539">        crm_xml_add(xml_rsc, XML_ATTR_ID_LONG, rsc-&gt;id);</a>
+<a name="ln540"> </a>
+<a name="ln541">    } else {</a>
+<a name="ln542">        crm_xml_add(xml_rsc, XML_ATTR_ID, rsc-&gt;id);</a>
+<a name="ln543">    }</a>
+<a name="ln544"> </a>
+<a name="ln545">    value = crm_copy_xml_element(rsc-&gt;xml, xml_rsc, XML_ATTR_TYPE);</a>
+<a name="ln546">    if (value == NULL) {</a>
+<a name="ln547">        CMD_ERR(&quot;%s has no type!  Aborting...&quot;, rsc_id);</a>
+<a name="ln548">        return -ENXIO;</a>
+<a name="ln549">    }</a>
+<a name="ln550"> </a>
+<a name="ln551">    value = crm_copy_xml_element(rsc-&gt;xml, xml_rsc, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln552">    if (value == NULL) {</a>
+<a name="ln553">        CMD_ERR(&quot;%s has no class!  Aborting...&quot;, rsc_id);</a>
+<a name="ln554">        return -ENXIO;</a>
+<a name="ln555">    }</a>
+<a name="ln556"> </a>
+<a name="ln557">    crm_copy_xml_element(rsc-&gt;xml, xml_rsc, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln558"> </a>
+<a name="ln559">    params = create_xml_node(msg_data, XML_TAG_ATTRS);</a>
+<a name="ln560">    crm_xml_add(params, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);</a>
+<a name="ln561"> </a>
+<a name="ln562">    key = crm_meta_name(XML_LRM_ATTR_INTERVAL);</a>
+<a name="ln563">    crm_xml_add(params, key, &quot;60000&quot;);  /* 1 minute */</a>
+<a name="ln564">    free(key);</a>
+<a name="ln565"> </a>
+<a name="ln566">    our_pid = calloc(1, 11);</a>
+<a name="ln567">    if (our_pid != NULL) {</a>
+<a name="ln568">        snprintf(our_pid, 10, &quot;%d&quot;, getpid());</a>
+<a name="ln569">        our_pid[10] = '\0';</a>
+<a name="ln570">    }</a>
+<a name="ln571">    cmd = create_request(op, msg_data, router_node, CRM_SYSTEM_CRMD, crm_system_name, our_pid);</a>
+<a name="ln572"> </a>
+<a name="ln573">/* 	crm_log_xml_warn(cmd, &quot;send_lrm_rsc_op&quot;); */</a>
+<a name="ln574">    free_xml(msg_data);</a>
+<a name="ln575"> </a>
+<a name="ln576">    if (crm_ipc_send(crmd_channel, cmd, 0, 0, NULL) &gt; 0) {</a>
+<a name="ln577">        rc = 0;</a>
+<a name="ln578"> </a>
+<a name="ln579">    } else {</a>
+<a name="ln580">        CMD_ERR(&quot;Could not send %s op to the crmd&quot;, op);</a>
+<a name="ln581">        rc = -ENOTCONN;</a>
+<a name="ln582">    }</a>
+<a name="ln583"> </a>
+<a name="ln584">    free_xml(cmd);</a>
+<a name="ln585">    return rc;</a>
+<a name="ln586">}</a>
+<a name="ln587"> </a>
+<a name="ln588">/*!</a>
+<a name="ln589"> * \internal</a>
+<a name="ln590"> * \brief Get resource name as used in failure-related node attributes</a>
+<a name="ln591"> *</a>
+<a name="ln592"> * \param[in] rsc  Resource to check</a>
+<a name="ln593"> *</a>
+<a name="ln594"> * \return Newly allocated string containing resource's fail name</a>
+<a name="ln595"> * \note The caller is responsible for freeing the result.</a>
+<a name="ln596"> */</a>
+<a name="ln597">static inline char *</a>
+<a name="ln598">rsc_fail_name(resource_t *rsc)</a>
+<a name="ln599">{</a>
+<a name="ln600">    const char *name = (rsc-&gt;clone_name? rsc-&gt;clone_name : rsc-&gt;id);</a>
+<a name="ln601"> </a>
+<a name="ln602">    return is_set(rsc-&gt;flags, pe_rsc_unique)? strdup(name) : clone_strip(name);</a>
+<a name="ln603">}</a>
+<a name="ln604"> </a>
+<a name="ln605">int</a>
+<a name="ln606">cli_resource_delete(crm_ipc_t *crmd_channel, const char *host_uname,</a>
+<a name="ln607">                    resource_t *rsc, const char *operation,</a>
+<a name="ln608">                    const char *interval, pe_working_set_t *data_set)</a>
+<a name="ln609">{</a>
+<a name="ln610">    int rc = pcmk_ok;</a>
+<a name="ln611">    node_t *node = NULL;</a>
+<a name="ln612">    char *rsc_name = NULL;</a>
+<a name="ln613">    int attr_options = attrd_opt_none;</a>
+<a name="ln614"> </a>
+<a name="ln615">    if (rsc == NULL) {</a>
+<a name="ln616">        return -ENXIO;</a>
+<a name="ln617"> </a>
+<a name="ln618">    } else if (rsc-&gt;children) {</a>
+<a name="ln619">        GListPtr lpc = NULL;</a>
+<a name="ln620"> </a>
+<a name="ln621">        for (lpc = rsc-&gt;children; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln622">            resource_t *child = (resource_t *) lpc-&gt;data;</a>
+<a name="ln623"> </a>
+<a name="ln624">            rc = cli_resource_delete(crmd_channel, host_uname, child, operation,</a>
+<a name="ln625">                                     interval, data_set);</a>
+<a name="ln626">            if(rc != pcmk_ok || (pe_rsc_is_clone(rsc) &amp;&amp; is_not_set(rsc-&gt;flags, pe_rsc_unique))) {</a>
+<a name="ln627">                return rc;</a>
+<a name="ln628">            }</a>
+<a name="ln629">        }</a>
+<a name="ln630">        return pcmk_ok;</a>
+<a name="ln631"> </a>
+<a name="ln632">    } else if (host_uname == NULL) {</a>
+<a name="ln633">        GListPtr lpc = NULL;</a>
+<a name="ln634"> </a>
+<a name="ln635">        for (lpc = data_set-&gt;nodes; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln636">            node = (node_t *) lpc-&gt;data;</a>
+<a name="ln637"> </a>
+<a name="ln638">            if (node-&gt;details-&gt;online) {</a>
+<a name="ln639">                cli_resource_delete(crmd_channel, node-&gt;details-&gt;uname, rsc,</a>
+<a name="ln640">                                    operation, interval, data_set);</a>
+<a name="ln641">            }</a>
+<a name="ln642">        }</a>
+<a name="ln643"> </a>
+<a name="ln644">        return pcmk_ok;</a>
+<a name="ln645">    }</a>
+<a name="ln646"> </a>
+<a name="ln647">    node = pe_find_node(data_set-&gt;nodes, host_uname);</a>
+<a name="ln648"> </a>
+<a name="ln649">    if (node == NULL) {</a>
+<a name="ln650">        printf(&quot;Unable to clean up %s because node %s not found\n&quot;,</a>
+<a name="ln651">               rsc-&gt;id, host_uname);</a>
+<a name="ln652">        return -ENODEV;</a>
+<a name="ln653">    }</a>
+<a name="ln654"> </a>
+<a name="ln655">    if (!node-&gt;details-&gt;rsc_discovery_enabled) {</a>
+<a name="ln656">        printf(&quot;Unable to clean up %s because resource discovery disabled on %s\n&quot;,</a>
+<a name="ln657">               rsc-&gt;id, host_uname);</a>
+<a name="ln658">        return -EOPNOTSUPP;</a>
+<a name="ln659">    }</a>
+<a name="ln660"> </a>
+<a name="ln661">    /* Erase the resource's entire LRM history in the CIB, even if we're only</a>
+<a name="ln662">     * clearing a single operation's fail count. If we erased only entries for a</a>
+<a name="ln663">     * single operation, we might wind up with a wrong idea of the current</a>
+<a name="ln664">     * resource state, and we might not re-probe the resource.</a>
+<a name="ln665">     */</a>
+<a name="ln666">    rc = send_lrm_rsc_op(crmd_channel, CRM_OP_LRM_DELETE, host_uname, rsc-&gt;id,</a>
+<a name="ln667">                         TRUE, data_set);</a>
+<a name="ln668">    if (rc != pcmk_ok) {</a>
+<a name="ln669">        printf(&quot;Unable to clean up %s history on %s: %s\n&quot;,</a>
+<a name="ln670">               rsc-&gt;id, host_uname, pcmk_strerror(rc));</a>
+<a name="ln671">        return rc;</a>
+<a name="ln672">    }</a>
+<a name="ln673">    if (node-&gt;details-&gt;remote_rsc == NULL) {</a>
+<a name="ln674">        crmd_replies_needed++;</a>
+<a name="ln675">    }</a>
+<a name="ln676"> </a>
+<a name="ln677">    rsc_name = rsc_fail_name(rsc);</a>
+<a name="ln678">    if (is_remote_node(node)) {</a>
+<a name="ln679">        attr_options |= attrd_opt_remote;</a>
+<a name="ln680">    }</a>
+<a name="ln681">    rc = attrd_clear_delegate(NULL, host_uname, rsc_name, operation, interval,</a>
+<a name="ln682">                              NULL, attr_options);</a>
+<a name="ln683">    if (rc != pcmk_ok) {</a>
+<a name="ln684">        printf(&quot;Cleaned %s history on %s, but unable to clear failures: %s\n&quot;,</a>
+<a name="ln685">               rsc-&gt;id, host_uname, pcmk_strerror(rc));</a>
+<a name="ln686">    } else {</a>
+<a name="ln687">        printf(&quot;Cleaned up %s on %s\n&quot;, rsc-&gt;id, host_uname);</a>
+<a name="ln688">    }</a>
+<a name="ln689">    free(rsc_name);</a>
+<a name="ln690"> </a>
+<a name="ln691">    return rc;</a>
+<a name="ln692">}</a>
+<a name="ln693"> </a>
+<a name="ln694">void</a>
+<a name="ln695">cli_resource_check(cib_t * cib_conn, resource_t *rsc)</a>
+<a name="ln696">{</a>
+<a name="ln697">    int need_nl = 0;</a>
+<a name="ln698">    char *role_s = NULL;</a>
+<a name="ln699">    char *managed = NULL;</a>
+<a name="ln700">    resource_t *parent = uber_parent(rsc);</a>
+<a name="ln701"> </a>
+<a name="ln702">    find_resource_attr(cib_conn, XML_NVPAIR_ATTR_VALUE, parent-&gt;id,</a>
+<a name="ln703">                       NULL, NULL, NULL, XML_RSC_ATTR_MANAGED, &amp;managed);</a>
+<a name="ln704"> </a>
+<a name="ln705">    find_resource_attr(cib_conn, XML_NVPAIR_ATTR_VALUE, parent-&gt;id,</a>
+<a name="ln706">                       NULL, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, &amp;role_s);</a>
+<a name="ln707"> </a>
+<a name="ln708">    if(role_s) {</a>
+<a name="ln709">        enum rsc_role_e role = text2role(role_s);</a>
+<a name="ln710">        if(role == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln711">            // Treated as if unset</a>
+<a name="ln712"> </a>
+<a name="ln713">        } else if(role == RSC_ROLE_STOPPED) {</a>
+<a name="ln714">            printf(&quot;\n  * The configuration specifies that '%s' should remain stopped\n&quot;, parent-&gt;id);</a>
+<a name="ln715">            need_nl++;</a>
+<a name="ln716"> </a>
+<a name="ln717">        } else if(parent-&gt;variant == pe_master &amp;&amp; role == RSC_ROLE_SLAVE) {</a>
+<a name="ln718">            printf(&quot;\n  * The configuration specifies that '%s' should not be promoted\n&quot;, parent-&gt;id);</a>
+<a name="ln719">            need_nl++;</a>
+<a name="ln720">        }</a>
+<a name="ln721">    }</a>
+<a name="ln722"> </a>
+<a name="ln723">    if(managed &amp;&amp; crm_is_true(managed) == FALSE) {</a>
+<a name="ln724">        printf(&quot;%s  * The configuration prevents the cluster from stopping or starting '%s' (unmanaged)\n&quot;, need_nl == 0?&quot;\n&quot;:&quot;&quot;, parent-&gt;id);</a>
+<a name="ln725">        need_nl++;</a>
+<a name="ln726">    }</a>
+<a name="ln727"> </a>
+<a name="ln728">    if(need_nl) {</a>
+<a name="ln729">        printf(&quot;\n&quot;);</a>
+<a name="ln730">    }</a>
+<a name="ln731">}</a>
+<a name="ln732"> </a>
+<a name="ln733">int</a>
+<a name="ln734">cli_resource_fail(crm_ipc_t * crmd_channel, const char *host_uname,</a>
+<a name="ln735">             const char *rsc_id, pe_working_set_t * data_set)</a>
+<a name="ln736">{</a>
+<a name="ln737">    crm_warn(&quot;Failing: %s&quot;, rsc_id);</a>
+<a name="ln738">    return send_lrm_rsc_op(crmd_channel, CRM_OP_LRM_FAIL, host_uname, rsc_id, FALSE, data_set);</a>
+<a name="ln739">}</a>
+<a name="ln740"> </a>
+<a name="ln741">static GHashTable *</a>
+<a name="ln742">generate_resource_params(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln743">{</a>
+<a name="ln744">    GHashTable *params = NULL;</a>
+<a name="ln745">    GHashTable *meta = NULL;</a>
+<a name="ln746">    GHashTable *combined = NULL;</a>
+<a name="ln747">    GHashTableIter iter;</a>
+<a name="ln748"> </a>
+<a name="ln749">    if (!rsc) {</a>
+<a name="ln750">        crm_err(&quot;Resource does not exist in config&quot;);</a>
+<a name="ln751">        return NULL;</a>
+<a name="ln752">    }</a>
+<a name="ln753"> </a>
+<a name="ln754">    params =</a>
+<a name="ln755">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln756">    meta = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln757">    combined =</a>
+<a name="ln758">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln759"> </a>
+<a name="ln760">    get_rsc_attributes(params, rsc, NULL /* TODO: Pass in local node */ , data_set);</a>
+<a name="ln761">    get_meta_attributes(meta, rsc, NULL /* TODO: Pass in local node */ , data_set);</a>
+<a name="ln762"> </a>
+<a name="ln763">    if (params) {</a>
+<a name="ln764">        char *key = NULL;</a>
+<a name="ln765">        char *value = NULL;</a>
+<a name="ln766"> </a>
+<a name="ln767">        g_hash_table_iter_init(&amp;iter, params);</a>
+<a name="ln768">        while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln769">            g_hash_table_insert(combined, strdup(key), strdup(value));</a>
+<a name="ln770">        }</a>
+<a name="ln771">        g_hash_table_destroy(params);</a>
+<a name="ln772">    }</a>
+<a name="ln773"> </a>
+<a name="ln774">    if (meta) {</a>
+<a name="ln775">        char *key = NULL;</a>
+<a name="ln776">        char *value = NULL;</a>
+<a name="ln777"> </a>
+<a name="ln778">        g_hash_table_iter_init(&amp;iter, meta);</a>
+<a name="ln779">        while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln780">            char *crm_name = crm_meta_name(key);</a>
+<a name="ln781"> </a>
+<a name="ln782">            g_hash_table_insert(combined, crm_name, strdup(value));</a>
+<a name="ln783">        }</a>
+<a name="ln784">        g_hash_table_destroy(meta);</a>
+<a name="ln785">    }</a>
+<a name="ln786"> </a>
+<a name="ln787">    return combined;</a>
+<a name="ln788">}</a>
+<a name="ln789"> </a>
+<a name="ln790">static bool resource_is_running_on(resource_t *rsc, const char *host) </a>
+<a name="ln791">{</a>
+<a name="ln792">    bool found = TRUE;</a>
+<a name="ln793">    GListPtr hIter = NULL;</a>
+<a name="ln794">    GListPtr hosts = NULL;</a>
+<a name="ln795"> </a>
+<a name="ln796">    if(rsc == NULL) {</a>
+<a name="ln797">        return FALSE;</a>
+<a name="ln798">    }</a>
+<a name="ln799"> </a>
+<a name="ln800">    rsc-&gt;fns-&gt;location(rsc, &amp;hosts, TRUE);</a>
+<a name="ln801">    for (hIter = hosts; host != NULL &amp;&amp; hIter != NULL; hIter = hIter-&gt;next) {</a>
+<a name="ln802">        pe_node_t *node = (pe_node_t *) hIter-&gt;data;</a>
+<a name="ln803"> </a>
+<a name="ln804">        if(strcmp(host, node-&gt;details-&gt;uname) == 0) {</a>
+<a name="ln805">            crm_trace(&quot;Resource %s is running on %s\n&quot;, rsc-&gt;id, host);</a>
+<a name="ln806">            goto done;</a>
+<a name="ln807">        } else if(strcmp(host, node-&gt;details-&gt;id) == 0) {</a>
+<a name="ln808">            crm_trace(&quot;Resource %s is running on %s\n&quot;, rsc-&gt;id, host);</a>
+<a name="ln809">            goto done;</a>
+<a name="ln810">        }</a>
+<a name="ln811">    }</a>
+<a name="ln812"> </a>
+<a name="ln813">    if(host != NULL) {</a>
+<a name="ln814">        crm_trace(&quot;Resource %s is not running on: %s\n&quot;, rsc-&gt;id, host);</a>
+<a name="ln815">        found = FALSE;</a>
+<a name="ln816"> </a>
+<a name="ln817">    } else if(host == NULL &amp;&amp; hosts == NULL) {</a>
+<a name="ln818">        crm_trace(&quot;Resource %s is not running\n&quot;, rsc-&gt;id);</a>
+<a name="ln819">        found = FALSE;</a>
+<a name="ln820">    }</a>
+<a name="ln821"> </a>
+<a name="ln822">  done:</a>
+<a name="ln823"> </a>
+<a name="ln824">    g_list_free(hosts);</a>
+<a name="ln825">    return found;</a>
+<a name="ln826">}</a>
+<a name="ln827"> </a>
+<a name="ln828">/*!</a>
+<a name="ln829"> * \internal</a>
+<a name="ln830"> * \brief Create a list of all resources active on host from a given list</a>
+<a name="ln831"> *</a>
+<a name="ln832"> * \param[in] host      Name of host to check whether resources are active</a>
+<a name="ln833"> * \param[in] rsc_list  List of resources to check</a>
+<a name="ln834"> *</a>
+<a name="ln835"> * \return New list of resources from list that are active on host</a>
+<a name="ln836"> */</a>
+<a name="ln837">static GList *</a>
+<a name="ln838">get_active_resources(const char *host, GList *rsc_list)</a>
+<a name="ln839">{</a>
+<a name="ln840">    GList *rIter = NULL;</a>
+<a name="ln841">    GList *active = NULL;</a>
+<a name="ln842"> </a>
+<a name="ln843">    for (rIter = rsc_list; rIter != NULL; rIter = rIter-&gt;next) {</a>
+<a name="ln844">        resource_t *rsc = (resource_t *) rIter-&gt;data;</a>
+<a name="ln845"> </a>
+<a name="ln846">        /* Expand groups to their members, because if we're restarting a member</a>
+<a name="ln847">         * other than the first, we can't otherwise tell which resources are</a>
+<a name="ln848">         * stopping and starting.</a>
+<a name="ln849">         */</a>
+<a name="ln850">        if (rsc-&gt;variant == pe_group) {</a>
+<a name="ln851">            active = g_list_concat(active,</a>
+<a name="ln852">                                   get_active_resources(host, rsc-&gt;children));</a>
+<a name="ln853">        } else if (resource_is_running_on(rsc, host)) {</a>
+<a name="ln854">            active = g_list_append(active, strdup(rsc-&gt;id));</a>
+<a name="ln855">        }</a>
+<a name="ln856">    }</a>
+<a name="ln857">    return active;</a>
+<a name="ln858">}</a>
+<a name="ln859"> </a>
+<a name="ln860">static GList *subtract_lists(GList *from, GList *items) </a>
+<a name="ln861">{</a>
+<a name="ln862">    GList *item = NULL;</a>
+<a name="ln863">    GList *result = g_list_copy(from);</a>
+<a name="ln864"> </a>
+<a name="ln865">    for (item = items; item != NULL; item = item-&gt;next) {</a>
+<a name="ln866">        GList *candidate = NULL;</a>
+<a name="ln867">        for (candidate = from; candidate != NULL; candidate = candidate-&gt;next) {</a>
+<a name="ln868">            crm_info(&quot;Comparing %s with %s&quot;, candidate-&gt;data, item-&gt;data);</a>
+<a name="ln869">            if(strcmp(candidate-&gt;data, item-&gt;data) == 0) {</a>
+<a name="ln870">                result = g_list_remove(result, candidate-&gt;data);</a>
+<a name="ln871">                break;</a>
+<a name="ln872">            }</a>
+<a name="ln873">        }</a>
+<a name="ln874">    }</a>
+<a name="ln875"> </a>
+<a name="ln876">    return result;</a>
+<a name="ln877">}</a>
+<a name="ln878"> </a>
+<a name="ln879">static void dump_list(GList *items, const char *tag) </a>
+<a name="ln880">{</a>
+<a name="ln881">    int lpc = 0;</a>
+<a name="ln882">    GList *item = NULL;</a>
+<a name="ln883"> </a>
+<a name="ln884">    for (item = items; item != NULL; item = item-&gt;next) {</a>
+<a name="ln885">        crm_trace(&quot;%s[%d]: %s&quot;, tag, lpc, (char*)item-&gt;data);</a>
+<a name="ln886">        lpc++;</a>
+<a name="ln887">    }</a>
+<a name="ln888">}</a>
+<a name="ln889"> </a>
+<a name="ln890">static void display_list(GList *items, const char *tag) </a>
+<a name="ln891">{</a>
+<a name="ln892">    GList *item = NULL;</a>
+<a name="ln893"> </a>
+<a name="ln894">    for (item = items; item != NULL; item = item-&gt;next) {</a>
+<a name="ln895">        fprintf(stdout, &quot;%s%s\n&quot;, tag, (const char *)item-&gt;data);</a>
+<a name="ln896">    }</a>
+<a name="ln897">}</a>
+<a name="ln898"> </a>
+<a name="ln899">/*!</a>
+<a name="ln900"> * \internal</a>
+<a name="ln901"> * \brief Upgrade XML to latest schema version and use it as working set input</a>
+<a name="ln902"> *</a>
+<a name="ln903"> * This also updates the working set timestamp to the current time.</a>
+<a name="ln904"> *</a>
+<a name="ln905"> * \param[in] data_set   Working set instance to update</a>
+<a name="ln906"> * \param[in] xml        XML to use as input</a>
+<a name="ln907"> *</a>
+<a name="ln908"> * \return pcmk_ok on success, -ENOKEY if unable to upgrade XML</a>
+<a name="ln909"> * \note On success, caller is responsible for freeing memory allocated for</a>
+<a name="ln910"> *       data_set-&gt;now.</a>
+<a name="ln911"> * \todo This follows the example of other callers of cli_config_update()</a>
+<a name="ln912"> *       and returns -ENOKEY (&quot;Required key not available&quot;) if that fails,</a>
+<a name="ln913"> *       but perhaps -pcmk_err_schema_validation would be better in that case.</a>
+<a name="ln914"> */</a>
+<a name="ln915">int</a>
+<a name="ln916">update_working_set_xml(pe_working_set_t *data_set, xmlNode **xml)</a>
+<a name="ln917">{</a>
+<a name="ln918">    if (cli_config_update(xml, NULL, FALSE) == FALSE) {</a>
+<a name="ln919">        return -ENOKEY;</a>
+<a name="ln920">    }</a>
+<a name="ln921">    data_set-&gt;input = *xml;</a>
+<a name="ln922">    data_set-&gt;now = crm_time_new(NULL);</a>
+<a name="ln923">    return pcmk_ok;</a>
+<a name="ln924">}</a>
+<a name="ln925"> </a>
+<a name="ln926">/*!</a>
+<a name="ln927"> * \internal</a>
+<a name="ln928"> * \brief Update a working set's XML input based on a CIB query</a>
+<a name="ln929"> *</a>
+<a name="ln930"> * \param[in] data_set   Data set instance to initialize</a>
+<a name="ln931"> * \param[in] cib        Connection to the CIB</a>
+<a name="ln932"> *</a>
+<a name="ln933"> * \return pcmk_ok on success, -errno on failure</a>
+<a name="ln934"> * \note On success, caller is responsible for freeing memory allocated for</a>
+<a name="ln935"> *       data_set-&gt;input and data_set-&gt;now.</a>
+<a name="ln936"> */</a>
+<a name="ln937">static int</a>
+<a name="ln938">update_working_set_from_cib(pe_working_set_t * data_set, cib_t *cib)</a>
+<a name="ln939">{</a>
+<a name="ln940">    xmlNode *cib_xml_copy = NULL;</a>
+<a name="ln941">    int rc;</a>
+<a name="ln942"> </a>
+<a name="ln943">    rc = cib-&gt;cmds-&gt;query(cib, NULL, &amp;cib_xml_copy, cib_scope_local | cib_sync_call);</a>
+<a name="ln944">    if (rc != pcmk_ok) {</a>
+<a name="ln945">        fprintf(stderr, &quot;Could not obtain the current CIB: %s (%d)\n&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln946">        return rc;</a>
+<a name="ln947">    }</a>
+<a name="ln948">    rc = update_working_set_xml(data_set, &amp;cib_xml_copy);</a>
+<a name="ln949">    if (rc != pcmk_ok) {</a>
+<a name="ln950">        fprintf(stderr, &quot;Could not upgrade the current CIB XML\n&quot;);</a>
+<a name="ln951">        free_xml(cib_xml_copy);</a>
+<a name="ln952">        return rc;</a>
+<a name="ln953">    }</a>
+<a name="ln954">    return pcmk_ok;</a>
+<a name="ln955">}</a>
+<a name="ln956"> </a>
+<a name="ln957">static int</a>
+<a name="ln958">update_dataset(cib_t *cib, pe_working_set_t * data_set, bool simulate)</a>
+<a name="ln959">{</a>
+<a name="ln960">    char *pid = NULL;</a>
+<a name="ln961">    char *shadow_file = NULL;</a>
+<a name="ln962">    cib_t *shadow_cib = NULL;</a>
+<a name="ln963">    int rc;</a>
+<a name="ln964"> </a>
+<a name="ln965">    cleanup_alloc_calculations(data_set);</a>
+<a name="ln966">    rc = update_working_set_from_cib(data_set, cib);</a>
+<a name="ln967">    if (rc != pcmk_ok) {</a>
+<a name="ln968">        return rc;</a>
+<a name="ln969">    }</a>
+<a name="ln970"> </a>
+<a name="ln971">    if(simulate) {</a>
+<a name="ln972">        pid = crm_itoa(getpid());</a>
+<a name="ln973">        shadow_cib = cib_shadow_new(pid);</a>
+<a name="ln974">        shadow_file = get_shadow_file(pid);</a>
+<a name="ln975"> </a>
+<a name="ln976">        if (shadow_cib == NULL) {</a>
+<a name="ln977">            fprintf(stderr, &quot;Could not create shadow cib: '%s'\n&quot;, pid);</a>
+<a name="ln978">            rc = -ENXIO;</a>
+<a name="ln979">            goto cleanup;</a>
+<a name="ln980">        }</a>
+<a name="ln981"> </a>
+<a name="ln982">        rc = write_xml_file(data_set-&gt;input, shadow_file, FALSE);</a>
+<a name="ln983"> </a>
+<a name="ln984">        if (rc &lt; 0) {</a>
+<a name="ln985">            fprintf(stderr, &quot;Could not populate shadow cib: %s (%d)\n&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln986">            goto cleanup;</a>
+<a name="ln987">        }</a>
+<a name="ln988"> </a>
+<a name="ln989">        rc = shadow_cib-&gt;cmds-&gt;signon(shadow_cib, crm_system_name, cib_command);</a>
+<a name="ln990">        if(rc != pcmk_ok) {</a>
+<a name="ln991">            fprintf(stderr, &quot;Could not connect to shadow cib: %s (%d)\n&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln992">            goto cleanup;</a>
+<a name="ln993">        }</a>
+<a name="ln994"> </a>
+<a name="ln995">        do_calculations(data_set, data_set-&gt;input, NULL);</a>
+<a name="ln996">        run_simulation(data_set, shadow_cib, NULL, TRUE);</a>
+<a name="ln997">        rc = update_dataset(shadow_cib, data_set, FALSE);</a>
+<a name="ln998"> </a>
+<a name="ln999">    } else {</a>
+<a name="ln1000">        cluster_status(data_set);</a>
+<a name="ln1001">    }</a>
+<a name="ln1002"> </a>
+<a name="ln1003">  cleanup:</a>
+<a name="ln1004">    /* Do not free data_set-&gt;input here, we need rsc-&gt;xml to be valid later on */</a>
+<a name="ln1005">    cib_delete(shadow_cib);</a>
+<a name="ln1006">    free(pid);</a>
+<a name="ln1007"> </a>
+<a name="ln1008">    if(shadow_file) {</a>
+<a name="ln1009">        unlink(shadow_file);</a>
+<a name="ln1010">        free(shadow_file);</a>
+<a name="ln1011">    }</a>
+<a name="ln1012"> </a>
+<a name="ln1013">    return rc;</a>
+<a name="ln1014">}</a>
+<a name="ln1015"> </a>
+<a name="ln1016">static int</a>
+<a name="ln1017">max_delay_for_resource(pe_working_set_t * data_set, resource_t *rsc) </a>
+<a name="ln1018">{</a>
+<a name="ln1019">    int delay = 0;</a>
+<a name="ln1020">    int max_delay = 0;</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    if(rsc &amp;&amp; rsc-&gt;children) {</a>
+<a name="ln1023">        GList *iter = NULL;</a>
+<a name="ln1024"> </a>
+<a name="ln1025">        for(iter = rsc-&gt;children; iter; iter = iter-&gt;next) {</a>
+<a name="ln1026">            resource_t *child = (resource_t *)iter-&gt;data;</a>
+<a name="ln1027"> </a>
+<a name="ln1028">            delay = max_delay_for_resource(data_set, child);</a>
+<a name="ln1029">            if(delay &gt; max_delay) {</a>
+<a name="ln1030">                double seconds = delay / 1000.0;</a>
+<a name="ln1031">                crm_trace(&quot;Calculated new delay of %.1fs due to %s&quot;, seconds, child-&gt;id);</a>
+<a name="ln1032">                max_delay = delay;</a>
+<a name="ln1033">            }</a>
+<a name="ln1034">        }</a>
+<a name="ln1035"> </a>
+<a name="ln1036">    } else if(rsc) {</a>
+<a name="ln1037">        char *key = crm_strdup_printf(&quot;%s_%s_0&quot;, rsc-&gt;id, RSC_STOP);</a>
+<a name="ln1038">        action_t *stop = custom_action(rsc, key, RSC_STOP, NULL, TRUE, FALSE, data_set);</a>
+<a name="ln1039">        const char *value = g_hash_table_lookup(stop-&gt;meta, XML_ATTR_TIMEOUT);</a>
+<a name="ln1040"> </a>
+<a name="ln1041">        max_delay = crm_int_helper(value, NULL);</a>
+<a name="ln1042">        pe_free_action(stop);</a>
+<a name="ln1043">    }</a>
+<a name="ln1044"> </a>
+<a name="ln1045"> </a>
+<a name="ln1046">    return max_delay;</a>
+<a name="ln1047">}</a>
+<a name="ln1048"> </a>
+<a name="ln1049">static int</a>
+<a name="ln1050">max_delay_in(pe_working_set_t * data_set, GList *resources) </a>
+<a name="ln1051">{</a>
+<a name="ln1052">    int max_delay = 0;</a>
+<a name="ln1053">    GList *item = NULL;</a>
+<a name="ln1054"> </a>
+<a name="ln1055">    for (item = resources; item != NULL; item = item-&gt;next) {</a>
+<a name="ln1056">        int delay = 0;</a>
+<a name="ln1057">        resource_t *rsc = pe_find_resource(data_set-&gt;resources, (const char *)item-&gt;data);</a>
+<a name="ln1058"> </a>
+<a name="ln1059">        delay = max_delay_for_resource(data_set, rsc);</a>
+<a name="ln1060"> </a>
+<a name="ln1061">        if(delay &gt; max_delay) {</a>
+<a name="ln1062">            double seconds = delay / 1000.0;</a>
+<a name="ln1063">            crm_trace(&quot;Calculated new delay of %.1fs due to %s&quot;, seconds, rsc-&gt;id);</a>
+<a name="ln1064">            max_delay = delay;</a>
+<a name="ln1065">        }</a>
+<a name="ln1066">    }</a>
+<a name="ln1067"> </a>
+<a name="ln1068">    return 5 + (max_delay / 1000);</a>
+<a name="ln1069">}</a>
+<a name="ln1070"> </a>
+<a name="ln1071">#define waiting_for_starts(d, r, h) ((g_list_length(d) &gt; 0) || \</a>
+<a name="ln1072">                                    (resource_is_running_on((r), (h)) == FALSE))</a>
+<a name="ln1073"> </a>
+<a name="ln1074">/*!</a>
+<a name="ln1075"> * \internal</a>
+<a name="ln1076"> * \brief Restart a resource (on a particular host if requested).</a>
+<a name="ln1077"> *</a>
+<a name="ln1078"> * \param[in] rsc        The resource to restart</a>
+<a name="ln1079"> * \param[in] host       The host to restart the resource on (or NULL for all)</a>
+<a name="ln1080"> * \param[in] timeout_ms Consider failed if actions do not complete in this time</a>
+<a name="ln1081"> *                       (specified in milliseconds, but a two-second</a>
+<a name="ln1082"> *                       granularity is actually used; if 0, a timeout will be</a>
+<a name="ln1083"> *                       calculated based on the resource timeout)</a>
+<a name="ln1084"> * \param[in] cib        Connection to the CIB for modifying/checking resource</a>
+<a name="ln1085"> *</a>
+<a name="ln1086"> * \return pcmk_ok on success, -errno on failure (exits on certain failures)</a>
+<a name="ln1087"> */</a>
+<a name="ln1088">int</a>
+<a name="ln1089">cli_resource_restart(resource_t * rsc, const char *host, int timeout_ms, cib_t * cib)</a>
+<a name="ln1090">{</a>
+<a name="ln1091">    int rc = 0;</a>
+<a name="ln1092">    int lpc = 0;</a>
+<a name="ln1093">    int before = 0;</a>
+<a name="ln1094">    int step_timeout_s = 0;</a>
+<a name="ln1095">    int sleep_interval = 2;</a>
+<a name="ln1096">    int timeout = timeout_ms / 1000;</a>
+<a name="ln1097"> </a>
+<a name="ln1098">    bool is_clone = FALSE;</a>
+<a name="ln1099">    char *rsc_id = NULL;</a>
+<a name="ln1100">    char *orig_target_role = NULL;</a>
+<a name="ln1101"> </a>
+<a name="ln1102">    GList *list_delta = NULL;</a>
+<a name="ln1103">    GList *target_active = NULL;</a>
+<a name="ln1104">    GList *current_active = NULL;</a>
+<a name="ln1105">    GList *restart_target_active = NULL;</a>
+<a name="ln1106"> </a>
+<a name="ln1107">    pe_working_set_t data_set;</a>
+<a name="ln1108"> </a>
+<a name="ln1109">    if(resource_is_running_on(rsc, host) == FALSE) {</a>
+<a name="ln1110">        const char *id = rsc-&gt;clone_name?rsc-&gt;clone_name:rsc-&gt;id;</a>
+<a name="ln1111">        if(host) {</a>
+<a name="ln1112">            printf(&quot;%s is not running on %s and so cannot be restarted\n&quot;, id, host);</a>
+<a name="ln1113">        } else {</a>
+<a name="ln1114">            printf(&quot;%s is not running anywhere and so cannot be restarted\n&quot;, id);</a>
+<a name="ln1115">        }</a>
+<a name="ln1116">        return -ENXIO;</a>
+<a name="ln1117">    }</a>
+<a name="ln1118"> </a>
+<a name="ln1119">    /* We might set the target-role meta-attribute */</a>
+<a name="ln1120">    attr_set_type = XML_TAG_META_SETS;</a>
+<a name="ln1121"> </a>
+<a name="ln1122">    rsc_id = strdup(rsc-&gt;id);</a>
+<a name="ln1123">    if(pe_rsc_is_clone(rsc)) {</a>
+<a name="ln1124">        is_clone = TRUE;</a>
+<a name="ln1125">    }</a>
+<a name="ln1126"> </a>
+<a name="ln1127">    /*</a>
+<a name="ln1128">      grab full cib</a>
+<a name="ln1129">      determine originally active resources</a>
+<a name="ln1130">      disable or ban</a>
+<a name="ln1131">      poll cib and watch for affected resources to get stopped</a>
+<a name="ln1132">      without --timeout, calculate the stop timeout for each step and wait for that</a>
+<a name="ln1133">      if we hit --timeout or the service timeout, re-enable or un-ban, report failure and indicate which resources we couldn't take down</a>
+<a name="ln1134">      if everything stopped, re-enable or un-ban</a>
+<a name="ln1135">      poll cib and watch for affected resources to get started</a>
+<a name="ln1136">      without --timeout, calculate the start timeout for each step and wait for that</a>
+<a name="ln1137">      if we hit --timeout or the service timeout, report (different) failure and indicate which resources we couldn't bring back up</a>
+<a name="ln1138">      report success</a>
+<a name="ln1139"> </a>
+<a name="ln1140">      Optimizations:</a>
+<a name="ln1141">      - use constraints to determine ordered list of affected resources</a>
+<a name="ln1142">      - Allow a --no-deps option (aka. --force-restart)</a>
+<a name="ln1143">    */</a>
+<a name="ln1144"> </a>
+<a name="ln1145"> </a>
+<a name="ln1146">    set_working_set_defaults(&amp;data_set);</a>
+<a name="ln1147">    rc = update_dataset(cib, &amp;data_set, FALSE);</a>
+<a name="ln1148">    if(rc != pcmk_ok) {</a>
+<a name="ln1149">        fprintf(stdout, &quot;Could not get new resource list: %s (%d)\n&quot;, pcmk_strerror(rc), rc);</a>
+<a name="ln1150">        free(rsc_id);</a>
+<a name="ln1151">        return rc;</a>
+<a name="ln1152">    }</a>
+<a name="ln1153"> </a>
+<a name="ln1154">    restart_target_active = get_active_resources(host, data_set.resources);</a>
+<a name="ln1155">    current_active = get_active_resources(host, data_set.resources);</a>
+<a name="ln1156"> </a>
+<a name="ln1157">    dump_list(current_active, &quot;Origin&quot;);</a>
+<a name="ln1158"> </a>
+<a name="ln1159">    if(is_clone &amp;&amp; host) {</a>
+<a name="ln1160">        /* Stop the clone instance by banning it from the host */</a>
+<a name="ln1161">        BE_QUIET = TRUE;</a>
+<a name="ln1162">        rc = cli_resource_ban(rsc_id, host, NULL, cib);</a>
+<a name="ln1163"> </a>
+<a name="ln1164">    } else {</a>
+<a name="ln1165">        /* Stop the resource by setting target-role to Stopped.</a>
+<a name="ln1166">         * Remember any existing target-role so we can restore it later</a>
+<a name="ln1167">         * (though it only makes any difference if it's Slave).</a>
+<a name="ln1168">         */</a>
+<a name="ln1169">        char *lookup_id = clone_strip(rsc-&gt;id);</a>
+<a name="ln1170"> </a>
+<a name="ln1171">        find_resource_attr(cib, XML_NVPAIR_ATTR_VALUE, lookup_id, NULL, NULL,</a>
+<a name="ln1172">                           NULL, XML_RSC_ATTR_TARGET_ROLE, &amp;orig_target_role);</a>
+<a name="ln1173">        free(lookup_id);</a>
+<a name="ln1174">        rc = cli_resource_update_attribute(rsc_id, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, RSC_STOPPED, FALSE, cib, &amp;data_set);</a>
+<a name="ln1175">    }</a>
+<a name="ln1176">    if(rc != pcmk_ok) {</a>
+<a name="ln1177">        fprintf(stderr, &quot;Could not set target-role for %s: %s (%d)\n&quot;, rsc_id, pcmk_strerror(rc), rc);</a>
+<a name="ln1178">        if (current_active) {</a>
+<a name="ln1179">            g_list_free_full(current_active, free);</a>
+<a name="ln1180">        }</a>
+<a name="ln1181">        if (restart_target_active) {</a>
+<a name="ln1182">            g_list_free_full(restart_target_active, free);</a>
+<a name="ln1183">        }</a>
+<a name="ln1184">        free(rsc_id);</a>
+<a name="ln1185">        return crm_exit(rc);</a>
+<a name="ln1186">    }</a>
+<a name="ln1187"> </a>
+<a name="ln1188">    rc = update_dataset(cib, &amp;data_set, TRUE);</a>
+<a name="ln1189">    if(rc != pcmk_ok) {</a>
+<a name="ln1190">        fprintf(stderr, &quot;Could not determine which resources would be stopped\n&quot;);</a>
+<a name="ln1191">        goto failure;</a>
+<a name="ln1192">    }</a>
+<a name="ln1193"> </a>
+<a name="ln1194">    target_active = get_active_resources(host, data_set.resources);</a>
+<a name="ln1195">    dump_list(target_active, &quot;Target&quot;);</a>
+<a name="ln1196"> </a>
+<a name="ln1197">    list_delta = subtract_lists(current_active, target_active);</a>
+<a name="ln1198">    fprintf(stdout, &quot;Waiting for %d resources to stop:\n&quot;, g_list_length(list_delta));</a>
+<a name="ln1199">    display_list(list_delta, &quot; * &quot;);</a>
+<a name="ln1200"> </a>
+<a name="ln1201">    step_timeout_s = timeout / sleep_interval;</a>
+<a name="ln1202">    while(g_list_length(list_delta) &gt; 0) {</a>
+<a name="ln1203">        before = g_list_length(list_delta);</a>
+<a name="ln1204">        if(timeout_ms == 0) {</a>
+<a name="ln1205">            step_timeout_s = max_delay_in(&amp;data_set, list_delta) / sleep_interval;</a>
+<a name="ln1206">        }</a>
+<a name="ln1207"> </a>
+<a name="ln1208">        /* We probably don't need the entire step timeout */</a>
+<a name="ln1209">        for(lpc = 0; lpc &lt; step_timeout_s &amp;&amp; g_list_length(list_delta) &gt; 0; lpc++) {</a>
+<a name="ln1210">            sleep(sleep_interval);</a>
+<a name="ln1211">            if(timeout) {</a>
+<a name="ln1212">                timeout -= sleep_interval;</a>
+<a name="ln1213">                crm_trace(&quot;%ds remaining&quot;, timeout);</a>
+<a name="ln1214">            }</a>
+<a name="ln1215">            rc = update_dataset(cib, &amp;data_set, FALSE);</a>
+<a name="ln1216">            if(rc != pcmk_ok) {</a>
+<a name="ln1217">                fprintf(stderr, &quot;Could not determine which resources were stopped\n&quot;);</a>
+<a name="ln1218">                goto failure;</a>
+<a name="ln1219">            }</a>
+<a name="ln1220"> </a>
+<a name="ln1221">            if (current_active) {</a>
+<a name="ln1222">                g_list_free_full(current_active, free);</a>
+<a name="ln1223">            }</a>
+<a name="ln1224">            current_active = get_active_resources(host, data_set.resources);</a>
+<a name="ln1225">            g_list_free(list_delta);</a>
+<a name="ln1226">            list_delta = subtract_lists(current_active, target_active);</a>
+<a name="ln1227">            dump_list(current_active, &quot;Current&quot;);</a>
+<a name="ln1228">            dump_list(list_delta, &quot;Delta&quot;);</a>
+<a name="ln1229">        }</a>
+<a name="ln1230"> </a>
+<a name="ln1231">        crm_trace(&quot;%d (was %d) resources remaining&quot;, g_list_length(list_delta), before);</a>
+<a name="ln1232">        if(before == g_list_length(list_delta)) {</a>
+<a name="ln1233">            /* aborted during stop phase, print the contents of list_delta */</a>
+<a name="ln1234">            fprintf(stderr, &quot;Could not complete shutdown of %s, %d resources remaining\n&quot;, rsc_id, g_list_length(list_delta));</a>
+<a name="ln1235">            display_list(list_delta, &quot; * &quot;);</a>
+<a name="ln1236">            rc = -ETIME;</a>
+<a name="ln1237">            goto failure;</a>
+<a name="ln1238">        }</a>
+<a name="ln1239"> </a>
+<a name="ln1240">    }</a>
+<a name="ln1241"> </a>
+<a name="ln1242">    if(is_clone &amp;&amp; host) {</a>
+<a name="ln1243">        rc = cli_resource_clear(rsc_id, host, NULL, cib);</a>
+<a name="ln1244"> </a>
+<a name="ln1245">    } else if (orig_target_role) {</a>
+<a name="ln1246">        rc = cli_resource_update_attribute(rsc_id, NULL, NULL,</a>
+<a name="ln1247">                                           XML_RSC_ATTR_TARGET_ROLE,</a>
+<a name="ln1248">                                           orig_target_role, FALSE, cib,</a>
+<a name="ln1249">                                           &amp;data_set);</a>
+<a name="ln1250">        free(orig_target_role);</a>
+<a name="ln1251">        orig_target_role = NULL;</a>
+<a name="ln1252">    } else {</a>
+<a name="ln1253">        rc = cli_resource_delete_attribute(rsc_id, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, cib, &amp;data_set);</a>
+<a name="ln1254">    }</a>
+<a name="ln1255"> </a>
+<a name="ln1256">    if(rc != pcmk_ok) {</a>
+<a name="ln1257">        fprintf(stderr, &quot;Could not unset target-role for %s: %s (%d)\n&quot;, rsc_id, pcmk_strerror(rc), rc);</a>
+<a name="ln1258">        free(rsc_id);</a>
+<a name="ln1259">        return crm_exit(rc);</a>
+<a name="ln1260">    }</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    if (target_active) {</a>
+<a name="ln1263">        g_list_free_full(target_active, free);</a>
+<a name="ln1264">    }</a>
+<a name="ln1265">    target_active = restart_target_active;</a>
+<a name="ln1266">    if (list_delta) {</a>
+<a name="ln1267">        g_list_free(list_delta);</a>
+<a name="ln1268">    }</a>
+<a name="ln1269">    list_delta = subtract_lists(target_active, current_active);</a>
+<a name="ln1270">    fprintf(stdout, &quot;Waiting for %d resources to start again:\n&quot;, g_list_length(list_delta));</a>
+<a name="ln1271">    display_list(list_delta, &quot; * &quot;);</a>
+<a name="ln1272"> </a>
+<a name="ln1273">    step_timeout_s = timeout / sleep_interval;</a>
+<a name="ln1274">    while (waiting_for_starts(list_delta, rsc, host)) {</a>
+<a name="ln1275">        before = g_list_length(list_delta);</a>
+<a name="ln1276">        if(timeout_ms == 0) {</a>
+<a name="ln1277">            step_timeout_s = max_delay_in(&amp;data_set, list_delta) / sleep_interval;</a>
+<a name="ln1278">        }</a>
+<a name="ln1279"> </a>
+<a name="ln1280">        /* We probably don't need the entire step timeout */</a>
+<a name="ln1281">        for (lpc = 0; (lpc &lt; step_timeout_s) &amp;&amp; waiting_for_starts(list_delta, rsc, host); lpc++) {</a>
+<a name="ln1282"> </a>
+<a name="ln1283">            sleep(sleep_interval);</a>
+<a name="ln1284">            if(timeout) {</a>
+<a name="ln1285">                timeout -= sleep_interval;</a>
+<a name="ln1286">                crm_trace(&quot;%ds remaining&quot;, timeout);</a>
+<a name="ln1287">            }</a>
+<a name="ln1288"> </a>
+<a name="ln1289">            rc = update_dataset(cib, &amp;data_set, FALSE);</a>
+<a name="ln1290">            if(rc != pcmk_ok) {</a>
+<a name="ln1291">                fprintf(stderr, &quot;Could not determine which resources were started\n&quot;);</a>
+<a name="ln1292">                goto failure;</a>
+<a name="ln1293">            }</a>
+<a name="ln1294"> </a>
+<a name="ln1295">            if (current_active) {</a>
+<a name="ln1296">                g_list_free_full(current_active, free);</a>
+<a name="ln1297">            }</a>
+<a name="ln1298"> </a>
+<a name="ln1299">            /* It's OK if dependent resources moved to a different node,</a>
+<a name="ln1300">             * so we check active resources on all nodes.</a>
+<a name="ln1301">             */</a>
+<a name="ln1302">            current_active = get_active_resources(NULL, data_set.resources);</a>
+<a name="ln1303">            g_list_free(list_delta);</a>
+<a name="ln1304">            list_delta = subtract_lists(target_active, current_active);</a>
+<a name="ln1305">            dump_list(current_active, &quot;Current&quot;);</a>
+<a name="ln1306">            dump_list(list_delta, &quot;Delta&quot;);</a>
+<a name="ln1307">        }</a>
+<a name="ln1308"> </a>
+<a name="ln1309">        if(before == g_list_length(list_delta)) {</a>
+<a name="ln1310">            /* aborted during start phase, print the contents of list_delta */</a>
+<a name="ln1311">            fprintf(stdout, &quot;Could not complete restart of %s, %d resources remaining\n&quot;, rsc_id, g_list_length(list_delta));</a>
+<a name="ln1312">            display_list(list_delta, &quot; * &quot;);</a>
+<a name="ln1313">            rc = -ETIME;</a>
+<a name="ln1314">            goto failure;</a>
+<a name="ln1315">        }</a>
+<a name="ln1316"> </a>
+<a name="ln1317">    }</a>
+<a name="ln1318"> </a>
+<a name="ln1319">    rc = pcmk_ok;</a>
+<a name="ln1320">    goto done;</a>
+<a name="ln1321"> </a>
+<a name="ln1322">  failure:</a>
+<a name="ln1323">    if(is_clone &amp;&amp; host) {</a>
+<a name="ln1324">        cli_resource_clear(rsc_id, host, NULL, cib);</a>
+<a name="ln1325">    } else if (orig_target_role) {</a>
+<a name="ln1326">        cli_resource_update_attribute(rsc_id, NULL, NULL,</a>
+<a name="ln1327">                                      XML_RSC_ATTR_TARGET_ROLE,</a>
+<a name="ln1328">                                      orig_target_role, FALSE, cib, &amp;data_set);</a>
+<a name="ln1329">        free(orig_target_role);</a>
+<a name="ln1330">    } else {</a>
+<a name="ln1331">        cli_resource_delete_attribute(rsc_id, NULL, NULL, XML_RSC_ATTR_TARGET_ROLE, cib, &amp;data_set);</a>
+<a name="ln1332">    }</a>
+<a name="ln1333"> </a>
+<a name="ln1334">done:</a>
+<a name="ln1335">    if (list_delta) {</a>
+<a name="ln1336">        g_list_free(list_delta);</a>
+<a name="ln1337">    }</a>
+<a name="ln1338">    if (current_active) {</a>
+<a name="ln1339">        g_list_free_full(current_active, free);</a>
+<a name="ln1340">    }</a>
+<a name="ln1341">    if (target_active &amp;&amp; (target_active != restart_target_active)) {</a>
+<a name="ln1342">        g_list_free_full(target_active, free);</a>
+<a name="ln1343">    }</a>
+<a name="ln1344">    if (restart_target_active) {</a>
+<a name="ln1345">        g_list_free_full(restart_target_active, free);</a>
+<a name="ln1346">    }</a>
+<a name="ln1347">    cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln1348">    free(rsc_id);</a>
+<a name="ln1349">    return rc;</a>
+<a name="ln1350">}</a>
+<a name="ln1351"> </a>
+<a name="ln1352">#define action_is_pending(action) \</a>
+<a name="ln1353">    ((is_set((action)-&gt;flags, pe_action_optional) == FALSE) \</a>
+<a name="ln1354">    &amp;&amp; (is_set((action)-&gt;flags, pe_action_runnable) == TRUE) \</a>
+<a name="ln1355">    &amp;&amp; (is_set((action)-&gt;flags, pe_action_pseudo) == FALSE))</a>
+<a name="ln1356"> </a>
+<a name="ln1357">/*!</a>
+<a name="ln1358"> * \internal</a>
+<a name="ln1359"> * \brief Return TRUE if any actions in a list are pending</a>
+<a name="ln1360"> *</a>
+<a name="ln1361"> * \param[in] actions   List of actions to check</a>
+<a name="ln1362"> *</a>
+<a name="ln1363"> * \return TRUE if any actions in the list are pending, FALSE otherwise</a>
+<a name="ln1364"> */</a>
+<a name="ln1365">static bool</a>
+<a name="ln1366">actions_are_pending(GListPtr actions)</a>
+<a name="ln1367">{</a>
+<a name="ln1368">    GListPtr action;</a>
+<a name="ln1369"> </a>
+<a name="ln1370">    for (action = actions; action != NULL; action = action-&gt;next) {</a>
+<a name="ln1371">        if (action_is_pending((action_t *) action-&gt;data)) {</a>
+<a name="ln1372">            return TRUE;</a>
+<a name="ln1373">        }</a>
+<a name="ln1374">    }</a>
+<a name="ln1375">    return FALSE;</a>
+<a name="ln1376">}</a>
+<a name="ln1377"> </a>
+<a name="ln1378">/*!</a>
+<a name="ln1379"> * \internal</a>
+<a name="ln1380"> * \brief Print pending actions to stderr</a>
+<a name="ln1381"> *</a>
+<a name="ln1382"> * \param[in] actions   List of actions to check</a>
+<a name="ln1383"> *</a>
+<a name="ln1384"> * \return void</a>
+<a name="ln1385"> */</a>
+<a name="ln1386">static void</a>
+<a name="ln1387">print_pending_actions(GListPtr actions)</a>
+<a name="ln1388">{</a>
+<a name="ln1389">    GListPtr action;</a>
+<a name="ln1390"> </a>
+<a name="ln1391">    fprintf(stderr, &quot;Pending actions:\n&quot;);</a>
+<a name="ln1392">    for (action = actions; action != NULL; action = action-&gt;next) {</a>
+<a name="ln1393">        action_t *a = (action_t *) action-&gt;data;</a>
+<a name="ln1394"> </a>
+<a name="ln1395">        if (action_is_pending(a)) {</a>
+<a name="ln1396">            fprintf(stderr, &quot;\tAction %d: %s&quot;, a-&gt;id, a-&gt;uuid);</a>
+<a name="ln1397">            if (a-&gt;node) {</a>
+<a name="ln1398">                fprintf(stderr, &quot;\ton %s&quot;, a-&gt;node-&gt;details-&gt;uname);</a>
+<a name="ln1399">            }</a>
+<a name="ln1400">            fprintf(stderr, &quot;\n&quot;);</a>
+<a name="ln1401">        }</a>
+<a name="ln1402">    }</a>
+<a name="ln1403">}</a>
+<a name="ln1404"> </a>
+<a name="ln1405">/* For --wait, timeout (in seconds) to use if caller doesn't specify one */</a>
+<a name="ln1406">#define WAIT_DEFAULT_TIMEOUT_S (60 * 60)</a>
+<a name="ln1407"> </a>
+<a name="ln1408">/* For --wait, how long to sleep between cluster state checks */</a>
+<a name="ln1409">#define WAIT_SLEEP_S (2)</a>
+<a name="ln1410"> </a>
+<a name="ln1411">/*!</a>
+<a name="ln1412"> * \internal</a>
+<a name="ln1413"> * \brief Wait until all pending cluster actions are complete</a>
+<a name="ln1414"> *</a>
+<a name="ln1415"> * This waits until either the CIB's transition graph is idle or a timeout is</a>
+<a name="ln1416"> * reached.</a>
+<a name="ln1417"> *</a>
+<a name="ln1418"> * \param[in] timeout_ms Consider failed if actions do not complete in this time</a>
+<a name="ln1419"> *                       (specified in milliseconds, but one-second granularity</a>
+<a name="ln1420"> *                       is actually used; if 0, a default will be used)</a>
+<a name="ln1421"> * \param[in] cib        Connection to the CIB</a>
+<a name="ln1422"> *</a>
+<a name="ln1423"> * \return pcmk_ok on success, -errno on failure</a>
+<a name="ln1424"> */</a>
+<a name="ln1425">int</a>
+<a name="ln1426">wait_till_stable(int timeout_ms, cib_t * cib)</a>
+<a name="ln1427">{</a>
+<a name="ln1428">    pe_working_set_t data_set;</a>
+<a name="ln1429">    int rc = -1;</a>
+<a name="ln1430">    int timeout_s = timeout_ms? ((timeout_ms + 999) / 1000) : WAIT_DEFAULT_TIMEOUT_S;</a>
+<a name="ln1431">    time_t expire_time = time(NULL) + timeout_s;</a>
+<a name="ln1432">    time_t time_diff;</a>
+<a name="ln1433"> </a>
+<a name="ln1434">    set_working_set_defaults(&amp;data_set);</a>
+<a name="ln1435">    do {</a>
+<a name="ln1436"> </a>
+<a name="ln1437">        /* Abort if timeout is reached */</a>
+<a name="ln1438">        time_diff = expire_time - time(NULL);</a>
+<a name="ln1439">        if (time_diff &gt; 0) {</a>
+<a name="ln1440">            crm_info(&quot;Waiting up to %d seconds for cluster actions to complete&quot;, time_diff);</a>
+<a name="ln1441">        } else {</a>
+<a name="ln1442">            print_pending_actions(data_set.actions);</a>
+<a name="ln1443">            cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln1444">            return -ETIME;</a>
+<a name="ln1445">        }</a>
+<a name="ln1446">        if (rc == pcmk_ok) { /* this avoids sleep on first loop iteration */</a>
+<a name="ln1447">            sleep(WAIT_SLEEP_S);</a>
+<a name="ln1448">        }</a>
+<a name="ln1449"> </a>
+<a name="ln1450">        /* Get latest transition graph */</a>
+<a name="ln1451">        cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln1452">        rc = update_working_set_from_cib(&amp;data_set, cib);</a>
+<a name="ln1453">        if (rc != pcmk_ok) {</a>
+<a name="ln1454">            cleanup_alloc_calculations(&amp;data_set);</a>
+<a name="ln1455">            return rc;</a>
+<a name="ln1456">        }</a>
+<a name="ln1457">        do_calculations(&amp;data_set, data_set.input, NULL);</a>
+<a name="ln1458"> </a>
+<a name="ln1459">    } while (actions_are_pending(data_set.actions));</a>
+<a name="ln1460"> </a>
+<a name="ln1461">    return pcmk_ok;</a>
+<a name="ln1462">}</a>
+<a name="ln1463"> </a>
+<a name="ln1464">int</a>
+<a name="ln1465">cli_resource_execute(const char *rsc_id, const char *rsc_action, GHashTable *override_hash, cib_t * cib, pe_working_set_t *data_set)</a>
+<a name="ln1466">{</a>
+<a name="ln1467">    int rc = pcmk_ok;</a>
+<a name="ln1468">    svc_action_t *op = NULL;</a>
+<a name="ln1469">    const char *rtype = NULL;</a>
+<a name="ln1470">    const char *rprov = NULL;</a>
+<a name="ln1471">    const char *rclass = NULL;</a>
+<a name="ln1472">    const char *action = NULL;</a>
+<a name="ln1473">    GHashTable *params = NULL;</a>
+<a name="ln1474">    resource_t *rsc = pe_find_resource(data_set-&gt;resources, rsc_id);</a>
+<a name="ln1475"> </a>
+<a name="ln1476">    if (rsc == NULL) {</a>
+<a name="ln1477">        CMD_ERR(&quot;Must supply a resource id with -r&quot;);</a>
+<a name="ln1478">        return -ENXIO;</a>
+<a name="ln1479">    }</a>
+<a name="ln1480"> </a>
+<a name="ln1481">    if (safe_str_eq(rsc_action, &quot;validate&quot;)) {</a>
+<a name="ln1482">        action = &quot;validate-all&quot;;</a>
+<a name="ln1483"> </a>
+<a name="ln1484">    } else if (safe_str_eq(rsc_action, &quot;force-check&quot;)) {</a>
+<a name="ln1485">        action = &quot;monitor&quot;;</a>
+<a name="ln1486"> </a>
+<a name="ln1487">    } else if (safe_str_eq(rsc_action, &quot;force-stop&quot;)) {</a>
+<a name="ln1488">        action = rsc_action+6;</a>
+<a name="ln1489"> </a>
+<a name="ln1490">    } else if (safe_str_eq(rsc_action, &quot;force-start&quot;)</a>
+<a name="ln1491">               || safe_str_eq(rsc_action, &quot;force-demote&quot;)</a>
+<a name="ln1492">               || safe_str_eq(rsc_action, &quot;force-promote&quot;)) {</a>
+<a name="ln1493">        action = rsc_action+6;</a>
+<a name="ln1494"> </a>
+<a name="ln1495">        if(pe_rsc_is_clone(rsc)) {</a>
+<a name="ln1496">            rc = cli_resource_search(rsc_id, data_set);</a>
+<a name="ln1497">            if(rc &gt; 0 &amp;&amp; do_force == FALSE) {</a>
+<a name="ln1498">                CMD_ERR(&quot;It is not safe to %s %s here: the cluster claims it is already active&quot;, action, rsc_id);</a>
+<a name="ln1499">                CMD_ERR(&quot;Try setting target-role=stopped first or specifying --force&quot;);</a>
+<a name="ln1500">                crm_exit(EPERM);</a>
+<a name="ln1501">            }</a>
+<a name="ln1502">        }</a>
+<a name="ln1503">    }</a>
+<a name="ln1504"> </a>
+<a name="ln1505">    if(pe_rsc_is_clone(rsc)) {</a>
+<a name="ln1506">        /* Grab the first child resource in the hope it's not a group */</a>
+<a name="ln1507">        rsc = rsc-&gt;children-&gt;data;</a>
+<a name="ln1508">    }</a>
+<a name="ln1509"> </a>
+<a name="ln1510">    if(rsc-&gt;variant == pe_group) {</a>
+<a name="ln1511">        CMD_ERR(&quot;Sorry, --%s doesn't support group resources&quot;, rsc_action);</a>
+<a name="ln1512">        crm_exit(EOPNOTSUPP);</a>
+<a name="ln1513">    }</a>
+<a name="ln1514"> </a>
+<a name="ln1515">    rclass = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln1516">    rprov = crm_element_value(rsc-&gt;xml, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln1517">    rtype = crm_element_value(rsc-&gt;xml, XML_ATTR_TYPE);</a>
+<a name="ln1518"> </a>
+<a name="ln1519">    if (safe_str_eq(rclass, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln1520">        CMD_ERR(&quot;Sorry, --%s doesn't support %s resources yet&quot;, rsc_action, rclass);</a>
+<a name="ln1521">        crm_exit(EOPNOTSUPP);</a>
+<a name="ln1522">    }</a>
+<a name="ln1523"> </a>
+<a name="ln1524">    params = generate_resource_params(rsc, data_set);</a>
+<a name="ln1525"> </a>
+<a name="ln1526">    /* add crm_feature_set env needed by some resource agents */</a>
+<a name="ln1527">    g_hash_table_insert(params, strdup(XML_ATTR_CRM_VERSION), strdup(CRM_FEATURE_SET));</a>
+<a name="ln1528"> </a>
+<a name="ln1529">    op = resources_action_create(rsc-&gt;id, rclass, rprov, rtype, action, 0, -1, params, 0);</a>
+<a name="ln1530">    if (op == NULL) {</a>
+<a name="ln1531">        /* Re-run with stderr enabled so we can display a sane error message */</a>
+<a name="ln1532">        crm_enable_stderr(TRUE);</a>
+<a name="ln1533">        op = resources_action_create(rsc-&gt;id, rclass, rprov, rtype, action, 0,</a>
+<a name="ln1534">                                     -1, params, 0);</a>
+<a name="ln1535"> </a>
+<a name="ln1536">        /* We know op will be NULL, but this makes static analysis happy */</a>
+<a name="ln1537">        services_action_free(op);</a>
+<a name="ln1538"> </a>
+<a name="ln1539">        return crm_exit(EINVAL);</a>
+<a name="ln1540">    }</a>
+<a name="ln1541"> </a>
+<a name="ln1542"> </a>
+<a name="ln1543">    if(do_trace) {</a>
+<a name="ln1544">        setenv(&quot;OCF_TRACE_RA&quot;, &quot;1&quot;, 1);</a>
+<a name="ln1545">    }</a>
+<a name="ln1546"> </a>
+<a name="ln1547">    if (override_hash) {</a>
+<a name="ln1548">        GHashTableIter iter;</a>
+<a name="ln1549">        char *name = NULL;</a>
+<a name="ln1550">        char *value = NULL;</a>
+<a name="ln1551"> </a>
+<a name="ln1552">        g_hash_table_iter_init(&amp;iter, override_hash);</a>
+<a name="ln1553">        while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; name, (gpointer *) &amp; value)) {</a>
+<a name="ln1554">            printf(&quot;Overriding the cluster configuration for '%s' with '%s' = '%s'\n&quot;,</a>
+<a name="ln1555">                   rsc-&gt;id, name, value);</a>
+<a name="ln1556">            g_hash_table_replace(op-&gt;params, strdup(name), strdup(value));</a>
+<a name="ln1557">        }</a>
+<a name="ln1558">    }</a>
+<a name="ln1559"> </a>
+<a name="ln1560">    if (services_action_sync(op)) {</a>
+<a name="ln1561">        int more, lpc, last;</a>
+<a name="ln1562">        char *local_copy = NULL;</a>
+<a name="ln1563"> </a>
+<a name="ln1564">        if (op-&gt;status == PCMK_LRM_OP_DONE) {</a>
+<a name="ln1565">            printf(&quot;Operation %s for %s (%s:%s:%s) returned %d\n&quot;,</a>
+<a name="ln1566">                   action, rsc-&gt;id, rclass, rprov ? rprov : &quot;&quot;, rtype, op-&gt;rc);</a>
+<a name="ln1567">        } else {</a>
+<a name="ln1568">            printf(&quot;Operation %s for %s (%s:%s:%s) failed: %d\n&quot;,</a>
+<a name="ln1569">                   action, rsc-&gt;id, rclass, rprov ? rprov : &quot;&quot;, rtype, op-&gt;status);</a>
+<a name="ln1570">        }</a>
+<a name="ln1571"> </a>
+<a name="ln1572">        /* hide output for validate-all if not in verbose */</a>
+<a name="ln1573">        if (!do_trace &amp;&amp; safe_str_eq(action, &quot;validate-all&quot;))</a>
+<a name="ln1574">            goto done;</a>
+<a name="ln1575"> </a>
+<a name="ln1576">        if (op-&gt;stdout_data) {</a>
+<a name="ln1577">            local_copy = strdup(op-&gt;stdout_data);</a>
+<a name="ln1578">            more = strlen(local_copy);</a>
+<a name="ln1579">            last = 0;</a>
+<a name="ln1580"> </a>
+<a name="ln1581">            for (lpc = 0; lpc &lt; more; lpc++) {</a>
+<a name="ln1582">                if (local_copy[lpc] == '\n' || local_copy[lpc] == 0) {</a>
+<a name="ln1583">                    local_copy[lpc] = 0;</a>
+<a name="ln1584">                    printf(&quot; &gt;  stdout: %s\n&quot;, local_copy + last);</a>
+<a name="ln1585">                    last = lpc + 1;</a>
+<a name="ln1586">                }</a>
+<a name="ln1587">            }</a>
+<a name="ln1588">            free(local_copy);</a>
+<a name="ln1589">        }</a>
+<a name="ln1590">        if (op-&gt;stderr_data) {</a>
+<a name="ln1591">            local_copy = strdup(op-&gt;stderr_data);</a>
+<a name="ln1592">            more = strlen(local_copy);</a>
+<a name="ln1593">            last = 0;</a>
+<a name="ln1594"> </a>
+<a name="ln1595">            for (lpc = 0; lpc &lt; more; lpc++) {</a>
+<a name="ln1596">                if (local_copy[lpc] == '\n' || local_copy[lpc] == 0) {</a>
+<a name="ln1597">                    local_copy[lpc] = 0;</a>
+<a name="ln1598">                    printf(&quot; &gt;  stderr: %s\n&quot;, local_copy + last);</a>
+<a name="ln1599">                    last = lpc + 1;</a>
+<a name="ln1600">                }</a>
+<a name="ln1601">            }</a>
+<a name="ln1602">            free(local_copy);</a>
+<a name="ln1603">        }</a>
+<a name="ln1604">    }</a>
+<a name="ln1605">  done:</a>
+<a name="ln1606">    rc = op-&gt;rc;</a>
+<a name="ln1607">    services_action_free(op);</a>
+<a name="ln1608">    return rc;</a>
+<a name="ln1609">}</a>
+<a name="ln1610"> </a>
+<a name="ln1611">int</a>
+<a name="ln1612">cli_resource_move(const char *rsc_id, const char *host_name, cib_t * cib, pe_working_set_t *data_set)</a>
+<a name="ln1613">{</a>
+<a name="ln1614">    int rc = -EINVAL;</a>
+<a name="ln1615">    int count = 0;</a>
+<a name="ln1616">    node_t *current = NULL;</a>
+<a name="ln1617">    node_t *dest = pe_find_node(data_set-&gt;nodes, host_name);</a>
+<a name="ln1618">    resource_t *rsc = pe_find_resource(data_set-&gt;resources, rsc_id);</a>
+<a name="ln1619">    bool cur_is_dest = FALSE;</a>
+<a name="ln1620"> </a>
+<a name="ln1621">    if (rsc == NULL) {</a>
+<a name="ln1622">        CMD_ERR(&quot;Resource '%s' not moved: not found&quot;, rsc_id);</a>
+<a name="ln1623">        return -ENXIO;</a>
+<a name="ln1624"> </a>
+<a name="ln1625">    } else if (scope_master &amp;&amp; rsc-&gt;variant != pe_master) {</a>
+<a name="ln1626">        resource_t *p = uber_parent(rsc);</a>
+<a name="ln1627">        if(p-&gt;variant == pe_master) {</a>
+<a name="ln1628">            CMD_ERR(&quot;Using parent '%s' for --move command instead of '%s'.&quot;, rsc-&gt;id, rsc_id);</a>
+<a name="ln1629">            rsc_id = p-&gt;id;</a>
+<a name="ln1630">            rsc = p;</a>
+<a name="ln1631"> </a>
+<a name="ln1632">        } else {</a>
+<a name="ln1633">            CMD_ERR(&quot;Ignoring '--master' option: not valid for %s resources.&quot;,</a>
+<a name="ln1634">                    get_resource_typename(rsc-&gt;variant));</a>
+<a name="ln1635">            scope_master = FALSE;</a>
+<a name="ln1636">        }</a>
+<a name="ln1637">    }</a>
+<a name="ln1638"> </a>
+<a name="ln1639">    if(rsc-&gt;variant == pe_master) {</a>
+<a name="ln1640">        GListPtr iter = NULL;</a>
+<a name="ln1641"> </a>
+<a name="ln1642">        for(iter = rsc-&gt;children; iter; iter = iter-&gt;next) {</a>
+<a name="ln1643">            resource_t *child = (resource_t *)iter-&gt;data;</a>
+<a name="ln1644">            enum rsc_role_e child_role = child-&gt;fns-&gt;state(child, TRUE);</a>
+<a name="ln1645"> </a>
+<a name="ln1646">            if(child_role == RSC_ROLE_MASTER) {</a>
+<a name="ln1647">                rsc = child;</a>
+<a name="ln1648">                count++;</a>
+<a name="ln1649">            }</a>
+<a name="ln1650">        }</a>
+<a name="ln1651"> </a>
+<a name="ln1652">        if(scope_master == FALSE &amp;&amp; count == 0) {</a>
+<a name="ln1653">            count = g_list_length(rsc-&gt;running_on);</a>
+<a name="ln1654">        }</a>
+<a name="ln1655"> </a>
+<a name="ln1656">    } else if (pe_rsc_is_clone(rsc)) {</a>
+<a name="ln1657">        count = g_list_length(rsc-&gt;running_on);</a>
+<a name="ln1658"> </a>
+<a name="ln1659">    } else if (g_list_length(rsc-&gt;running_on) &gt; 1) {</a>
+<a name="ln1660">        CMD_ERR(&quot;Resource '%s' not moved: active on multiple nodes&quot;, rsc_id);</a>
+<a name="ln1661">        return rc;</a>
+<a name="ln1662">    }</a>
+<a name="ln1663"> </a>
+<a name="ln1664">    if(dest == NULL) {</a>
+<a name="ln1665">        CMD_ERR(&quot;Error performing operation: node '%s' is unknown&quot;, host_name);</a>
+<a name="ln1666">        return -ENXIO;</a>
+<a name="ln1667">    }</a>
+<a name="ln1668"> </a>
+<a name="ln1669">    if(g_list_length(rsc-&gt;running_on) == 1) {</a>
+<a name="ln1670">        current = rsc-&gt;running_on-&gt;data;</a>
+<a name="ln1671">    }</a>
+<a name="ln1672"> </a>
+<a name="ln1673">    if(current == NULL) {</a>
+<a name="ln1674">        /* Nothing to check */</a>
+<a name="ln1675"> </a>
+<a name="ln1676">    } else if(scope_master &amp;&amp; rsc-&gt;fns-&gt;state(rsc, TRUE) != RSC_ROLE_MASTER) {</a>
+<a name="ln1677">        crm_trace(&quot;%s is already active on %s but not in correct state&quot;, rsc_id, dest-&gt;details-&gt;uname);</a>
+<a name="ln1678">    } else if (safe_str_eq(current-&gt;details-&gt;uname, dest-&gt;details-&gt;uname)) {</a>
+<a name="ln1679">        cur_is_dest = TRUE;</a>
+<a name="ln1680">        if (do_force) {</a>
+<a name="ln1681">            crm_info(&quot;%s is already %s on %s, reinforcing placement with location constraint.&quot;,</a>
+<a name="ln1682">                     rsc_id, scope_master?&quot;promoted&quot;:&quot;active&quot;, dest-&gt;details-&gt;uname);</a>
+<a name="ln1683">        } else {</a>
+<a name="ln1684">            CMD_ERR(&quot;Error performing operation: %s is already %s on %s&quot;,</a>
+<a name="ln1685">                    rsc_id, scope_master?&quot;promoted&quot;:&quot;active&quot;, dest-&gt;details-&gt;uname);</a>
+<a name="ln1686">            return rc;</a>
+<a name="ln1687">        }</a>
+<a name="ln1688">    }</a>
+<a name="ln1689"> </a>
+<a name="ln1690">    /* Clear any previous constraints for 'dest' */</a>
+<a name="ln1691">    cli_resource_clear(rsc_id, dest-&gt;details-&gt;uname, data_set-&gt;nodes, cib);</a>
+<a name="ln1692"> </a>
+<a name="ln1693">    /* Record an explicit preference for 'dest' */</a>
+<a name="ln1694">    rc = cli_resource_prefer(rsc_id, dest-&gt;details-&gt;uname, cib);</a>
+<a name="ln1695"> </a>
+<a name="ln1696">    crm_trace(&quot;%s%s now prefers node %s%s&quot;,</a>
+<a name="ln1697">              rsc-&gt;id, scope_master?&quot; (master)&quot;:&quot;&quot;, dest-&gt;details-&gt;uname, do_force?&quot;(forced)&quot;:&quot;&quot;);</a>
+<a name="ln1698"> </a>
+<a name="ln1699">    /* only ban the previous location if current location != destination location.</a>
+<a name="ln1700">     * it is possible to use -M to enforce a location without regard of where the</a>
+<a name="ln1701">     * resource is currently located */</a>
+<a name="ln1702">    if(do_force &amp;&amp; (cur_is_dest == FALSE)) {</a>
+<a name="ln1703">        /* Ban the original location if possible */</a>
+<a name="ln1704">        if(current) {</a>
+<a name="ln1705">            (void)cli_resource_ban(rsc_id, current-&gt;details-&gt;uname, NULL, cib);</a>
+<a name="ln1706"> </a>
+<a name="ln1707">        } else if(count &gt; 1) {</a>
+<a name="ln1708">            CMD_ERR(&quot;Resource '%s' is currently %s in %d locations.  One may now move one to %s&quot;,</a>
+<a name="ln1709">                    rsc_id, scope_master?&quot;promoted&quot;:&quot;active&quot;, count, dest-&gt;details-&gt;uname);</a>
+<a name="ln1710">            CMD_ERR(&quot;You can prevent '%s' from being %s at a specific location with:&quot;</a>
+<a name="ln1711">                    &quot; --ban %s--host &lt;name&gt;&quot;, rsc_id, scope_master?&quot;promoted&quot;:&quot;active&quot;, scope_master?&quot;--master &quot;:&quot;&quot;);</a>
+<a name="ln1712"> </a>
+<a name="ln1713">        } else {</a>
+<a name="ln1714">            crm_trace(&quot;Not banning %s from its current location: not active&quot;, rsc_id);</a>
+<a name="ln1715">        }</a>
+<a name="ln1716">    }</a>
+<a name="ln1717"> </a>
+<a name="ln1718">    return rc;</a>
+<a name="ln1719">}</a>
+
+</code></pre>
+<div class="balloon" rel="70"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'the_rsc == NULL' is always true.</p></div>
+<div class="balloon" rel="140"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'xpath_string' pointer in the 'xpath_string + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 140, 138.</p></div>
+<div class="balloon" rel="163"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+<div class="balloon" rel="233"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always false: rsc->parent.</p></div>
+<div class="balloon" rel="236"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: rsc->parent == NULL.</p></div>
+<div class="balloon" rel="769"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 769, 769.</p></div>
+<div class="balloon" rel="817"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: host == NULL.</p></div>
+<div class="balloon" rel="851"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'g_list_concat' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="1177"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'fprintf' function. Under certain conditions the pointer can be null.</p></div>
+<div class="balloon" rel="1527"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 1527, 1527.</p></div>
+<div class="balloon" rel="1556"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 1556, 1556.</p></div>
+<div class="balloon" rel="1578"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strlen' function. Inspect the first argument. Check lines: 1578, 1577.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

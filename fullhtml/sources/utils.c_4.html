@@ -1,0 +1,2062 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;dlfcn.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#ifndef _GNU_SOURCE</a>
+<a name="ln27">#  define _GNU_SOURCE</a>
+<a name="ln28">#endif</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;sys/param.h&gt;</a>
+<a name="ln31">#include &lt;sys/types.h&gt;</a>
+<a name="ln32">#include &lt;sys/wait.h&gt;</a>
+<a name="ln33">#include &lt;sys/stat.h&gt;</a>
+<a name="ln34">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;stdio.h&gt;</a>
+<a name="ln37">#include &lt;unistd.h&gt;</a>
+<a name="ln38">#include &lt;string.h&gt;</a>
+<a name="ln39">#include &lt;stdlib.h&gt;</a>
+<a name="ln40">#include &lt;limits.h&gt;</a>
+<a name="ln41">#include &lt;ctype.h&gt;</a>
+<a name="ln42">#include &lt;pwd.h&gt;</a>
+<a name="ln43">#include &lt;time.h&gt;</a>
+<a name="ln44">#include &lt;libgen.h&gt;</a>
+<a name="ln45">#include &lt;signal.h&gt;</a>
+<a name="ln46"> </a>
+<a name="ln47">#include &lt;qb/qbdefs.h&gt;</a>
+<a name="ln48"> </a>
+<a name="ln49">#include &lt;crm/crm.h&gt;</a>
+<a name="ln50">#include &lt;crm/lrmd.h&gt;</a>
+<a name="ln51">#include &lt;crm/services.h&gt;</a>
+<a name="ln52">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln53">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln54">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln55">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln56">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln57">#include &lt;crm/common/iso8601.h&gt;</a>
+<a name="ln58">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln59">#include &lt;libxml2/libxml/relaxng.h&gt;</a>
+<a name="ln60"> </a>
+<a name="ln61">#ifndef MAXLINE</a>
+<a name="ln62">#  define MAXLINE 512</a>
+<a name="ln63">#endif</a>
+<a name="ln64"> </a>
+<a name="ln65">#ifdef HAVE_GETOPT_H</a>
+<a name="ln66">#  include &lt;getopt.h&gt;</a>
+<a name="ln67">#endif</a>
+<a name="ln68"> </a>
+<a name="ln69">#ifndef PW_BUFFER_LEN</a>
+<a name="ln70">#  define PW_BUFFER_LEN		500</a>
+<a name="ln71">#endif</a>
+<a name="ln72"> </a>
+<a name="ln73">CRM_TRACE_INIT_DATA(common);</a>
+<a name="ln74"> </a>
+<a name="ln75">gboolean crm_config_error = FALSE;</a>
+<a name="ln76">gboolean crm_config_warning = FALSE;</a>
+<a name="ln77">char *crm_system_name = NULL;</a>
+<a name="ln78"> </a>
+<a name="ln79">int node_score_red = 0;</a>
+<a name="ln80">int node_score_green = 0;</a>
+<a name="ln81">int node_score_yellow = 0;</a>
+<a name="ln82">int node_score_infinity = INFINITY;</a>
+<a name="ln83"> </a>
+<a name="ln84">static struct crm_option *crm_long_options = NULL;</a>
+<a name="ln85">static const char *crm_app_description = NULL;</a>
+<a name="ln86">static char *crm_short_options = NULL;</a>
+<a name="ln87">static const char *crm_app_usage = NULL;</a>
+<a name="ln88"> </a>
+<a name="ln89">int</a>
+<a name="ln90">crm_exit(int rc)</a>
+<a name="ln91">{</a>
+<a name="ln92">    mainloop_cleanup();</a>
+<a name="ln93"> </a>
+<a name="ln94">#if HAVE_LIBXML2</a>
+<a name="ln95">    crm_trace(&quot;cleaning up libxml&quot;);</a>
+<a name="ln96">    crm_xml_cleanup();</a>
+<a name="ln97">#endif</a>
+<a name="ln98"> </a>
+<a name="ln99">    crm_trace(&quot;exit %d&quot;, rc);</a>
+<a name="ln100">    qb_log_fini();</a>
+<a name="ln101"> </a>
+<a name="ln102">    free(crm_short_options);</a>
+<a name="ln103">    free(crm_system_name);</a>
+<a name="ln104"> </a>
+<a name="ln105">    exit(ABS(rc)); /* Always exit with a positive value so that it can be passed to crm_error</a>
+<a name="ln106">                    *</a>
+<a name="ln107">                    * Otherwise the system wraps it around and people</a>
+<a name="ln108">                    * have to jump through hoops figuring out what the</a>
+<a name="ln109">                    * error was</a>
+<a name="ln110">                    */</a>
+<a name="ln111">    return rc;     /* Can never happen, but allows return crm_exit(rc)</a>
+<a name="ln112">                    * where &quot;return rc&quot; was used previously - which</a>
+<a name="ln113">                    * keeps compilers happy.</a>
+<a name="ln114">                    */</a>
+<a name="ln115">}</a>
+<a name="ln116"> </a>
+<a name="ln117">gboolean</a>
+<a name="ln118">check_time(const char *value)</a>
+<a name="ln119">{</a>
+<a name="ln120">    if (crm_get_msec(value) &lt; 5000) {</a>
+<a name="ln121">        return FALSE;</a>
+<a name="ln122">    }</a>
+<a name="ln123">    return TRUE;</a>
+<a name="ln124">}</a>
+<a name="ln125"> </a>
+<a name="ln126">gboolean</a>
+<a name="ln127">check_timer(const char *value)</a>
+<a name="ln128">{</a>
+<a name="ln129">    if (crm_get_msec(value) &lt; 0) {</a>
+<a name="ln130">        return FALSE;</a>
+<a name="ln131">    }</a>
+<a name="ln132">    return TRUE;</a>
+<a name="ln133">}</a>
+<a name="ln134"> </a>
+<a name="ln135">gboolean</a>
+<a name="ln136">check_boolean(const char *value)</a>
+<a name="ln137">{</a>
+<a name="ln138">    int tmp = FALSE;</a>
+<a name="ln139"> </a>
+<a name="ln140">    if (crm_str_to_boolean(value, &amp;tmp) != 1) {</a>
+<a name="ln141">        return FALSE;</a>
+<a name="ln142">    }</a>
+<a name="ln143">    return TRUE;</a>
+<a name="ln144">}</a>
+<a name="ln145"> </a>
+<a name="ln146">gboolean</a>
+<a name="ln147">check_number(const char *value)</a>
+<a name="ln148">{</a>
+<a name="ln149">    errno = 0;</a>
+<a name="ln150">    if (value == NULL) {</a>
+<a name="ln151">        return FALSE;</a>
+<a name="ln152"> </a>
+<a name="ln153">    } else if (safe_str_eq(value, MINUS_INFINITY_S)) {</a>
+<a name="ln154"> </a>
+<a name="ln155">    } else if (safe_str_eq(value, INFINITY_S)) {</a>
+<a name="ln156"> </a>
+<a name="ln157">    } else {</a>
+<a name="ln158">        crm_int_helper(value, NULL);</a>
+<a name="ln159">    }</a>
+<a name="ln160"> </a>
+<a name="ln161">    if (errno != 0) {</a>
+<a name="ln162">        return FALSE;</a>
+<a name="ln163">    }</a>
+<a name="ln164">    return TRUE;</a>
+<a name="ln165">}</a>
+<a name="ln166"> </a>
+<a name="ln167">gboolean</a>
+<a name="ln168">check_positive_number(const char* value)</a>
+<a name="ln169">{</a>
+<a name="ln170">    if (safe_str_eq(value, INFINITY_S) || (crm_int_helper(value, NULL))) {</a>
+<a name="ln171">        return TRUE;</a>
+<a name="ln172">    }</a>
+<a name="ln173">    return FALSE;</a>
+<a name="ln174">}</a>
+<a name="ln175"> </a>
+<a name="ln176">gboolean</a>
+<a name="ln177">check_quorum(const char *value)</a>
+<a name="ln178">{</a>
+<a name="ln179">    if (safe_str_eq(value, &quot;stop&quot;)) {</a>
+<a name="ln180">        return TRUE;</a>
+<a name="ln181"> </a>
+<a name="ln182">    } else if (safe_str_eq(value, &quot;freeze&quot;)) {</a>
+<a name="ln183">        return TRUE;</a>
+<a name="ln184"> </a>
+<a name="ln185">    } else if (safe_str_eq(value, &quot;ignore&quot;)) {</a>
+<a name="ln186">        return TRUE;</a>
+<a name="ln187"> </a>
+<a name="ln188">    } else if (safe_str_eq(value, &quot;suicide&quot;)) {</a>
+<a name="ln189">        return TRUE;</a>
+<a name="ln190">    }</a>
+<a name="ln191">    return FALSE;</a>
+<a name="ln192">}</a>
+<a name="ln193"> </a>
+<a name="ln194">gboolean</a>
+<a name="ln195">check_script(const char *value)</a>
+<a name="ln196">{</a>
+<a name="ln197">    struct stat st;</a>
+<a name="ln198"> </a>
+<a name="ln199">    if(safe_str_eq(value, &quot;/dev/null&quot;)) {</a>
+<a name="ln200">        return TRUE;</a>
+<a name="ln201">    }</a>
+<a name="ln202"> </a>
+<a name="ln203">    if(stat(value, &amp;st) != 0) {</a>
+<a name="ln204">        crm_err(&quot;Script %s does not exist&quot;, value);</a>
+<a name="ln205">        return FALSE;</a>
+<a name="ln206">    }</a>
+<a name="ln207"> </a>
+<a name="ln208">    if(S_ISREG(st.st_mode) == 0) {</a>
+<a name="ln209">        crm_err(&quot;Script %s is not a regular file&quot;, value);</a>
+<a name="ln210">        return FALSE;</a>
+<a name="ln211">    }</a>
+<a name="ln212"> </a>
+<a name="ln213">    if( (st.st_mode &amp; (S_IXUSR | S_IXGRP )) == 0) {</a>
+<a name="ln214">        crm_err(&quot;Script %s is not executable&quot;, value);</a>
+<a name="ln215">        return FALSE;</a>
+<a name="ln216">    }</a>
+<a name="ln217"> </a>
+<a name="ln218">    return TRUE;</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">gboolean</a>
+<a name="ln222">check_utilization(const char *value)</a>
+<a name="ln223">{</a>
+<a name="ln224">    char *end = NULL;</a>
+<a name="ln225">    long number = strtol(value, &amp;end, 10);</a>
+<a name="ln226"> </a>
+<a name="ln227">    if(end &amp;&amp; end[0] != '%') {</a>
+<a name="ln228">        return FALSE;</a>
+<a name="ln229">    } else if(number &lt; 0) {</a>
+<a name="ln230">        return FALSE;</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    return TRUE;</a>
+<a name="ln234">}</a>
+<a name="ln235"> </a>
+<a name="ln236">int</a>
+<a name="ln237">char2score(const char *score)</a>
+<a name="ln238">{</a>
+<a name="ln239">    int score_f = 0;</a>
+<a name="ln240"> </a>
+<a name="ln241">    if (score == NULL) {</a>
+<a name="ln242"> </a>
+<a name="ln243">    } else if (safe_str_eq(score, MINUS_INFINITY_S)) {</a>
+<a name="ln244">        score_f = -node_score_infinity;</a>
+<a name="ln245"> </a>
+<a name="ln246">    } else if (safe_str_eq(score, INFINITY_S)) {</a>
+<a name="ln247">        score_f = node_score_infinity;</a>
+<a name="ln248"> </a>
+<a name="ln249">    } else if (safe_str_eq(score, &quot;+&quot; INFINITY_S)) {</a>
+<a name="ln250">        score_f = node_score_infinity;</a>
+<a name="ln251"> </a>
+<a name="ln252">    } else if (safe_str_eq(score, &quot;red&quot;)) {</a>
+<a name="ln253">        score_f = node_score_red;</a>
+<a name="ln254"> </a>
+<a name="ln255">    } else if (safe_str_eq(score, &quot;yellow&quot;)) {</a>
+<a name="ln256">        score_f = node_score_yellow;</a>
+<a name="ln257"> </a>
+<a name="ln258">    } else if (safe_str_eq(score, &quot;green&quot;)) {</a>
+<a name="ln259">        score_f = node_score_green;</a>
+<a name="ln260"> </a>
+<a name="ln261">    } else {</a>
+<a name="ln262">        score_f = crm_parse_int(score, NULL);</a>
+<a name="ln263">        if (score_f &gt; 0 &amp;&amp; score_f &gt; node_score_infinity) {</a>
+<a name="ln264">            score_f = node_score_infinity;</a>
+<a name="ln265"> </a>
+<a name="ln266">        } else if (score_f &lt; 0 &amp;&amp; score_f &lt; -node_score_infinity) {</a>
+<a name="ln267">            score_f = -node_score_infinity;</a>
+<a name="ln268">        }</a>
+<a name="ln269">    }</a>
+<a name="ln270"> </a>
+<a name="ln271">    return score_f;</a>
+<a name="ln272">}</a>
+<a name="ln273"> </a>
+<a name="ln274">char *</a>
+<a name="ln275">score2char_stack(int score, char *buf, size_t len)</a>
+<a name="ln276">{</a>
+<a name="ln277">    if (score &gt;= node_score_infinity) {</a>
+<a name="ln278">        strncpy(buf, INFINITY_S, 9);</a>
+<a name="ln279">    } else if (score &lt;= -node_score_infinity) {</a>
+<a name="ln280">        strncpy(buf, MINUS_INFINITY_S , 10);</a>
+<a name="ln281">    } else {</a>
+<a name="ln282">        return crm_itoa_stack(score, buf, len);</a>
+<a name="ln283">    }</a>
+<a name="ln284"> </a>
+<a name="ln285">    return buf;</a>
+<a name="ln286">}</a>
+<a name="ln287"> </a>
+<a name="ln288">char *</a>
+<a name="ln289">score2char(int score)</a>
+<a name="ln290">{</a>
+<a name="ln291">    if (score &gt;= node_score_infinity) {</a>
+<a name="ln292">        return strdup(INFINITY_S);</a>
+<a name="ln293"> </a>
+<a name="ln294">    } else if (score &lt;= -node_score_infinity) {</a>
+<a name="ln295">        return strdup(&quot;-&quot; INFINITY_S);</a>
+<a name="ln296">    }</a>
+<a name="ln297">    return crm_itoa(score);</a>
+<a name="ln298">}</a>
+<a name="ln299"> </a>
+<a name="ln300">const char *</a>
+<a name="ln301">cluster_option(GHashTable * options, gboolean(*validate) (const char *),</a>
+<a name="ln302">               const char *name, const char *old_name, const char *def_value)</a>
+<a name="ln303">{</a>
+<a name="ln304">    const char *value = NULL;</a>
+<a name="ln305"> </a>
+<a name="ln306">    CRM_ASSERT(name != NULL);</a>
+<a name="ln307"> </a>
+<a name="ln308">    if (options != NULL) {</a>
+<a name="ln309">        value = g_hash_table_lookup(options, name);</a>
+<a name="ln310">    }</a>
+<a name="ln311"> </a>
+<a name="ln312">    if (value == NULL &amp;&amp; old_name &amp;&amp; options != NULL) {</a>
+<a name="ln313">        value = g_hash_table_lookup(options, old_name);</a>
+<a name="ln314">        if (value != NULL) {</a>
+<a name="ln315">            crm_config_warn(&quot;Using deprecated name '%s' for&quot;</a>
+<a name="ln316">                            &quot; cluster option '%s'&quot;, old_name, name);</a>
+<a name="ln317">            g_hash_table_insert(options, strdup(name), strdup(value));</a>
+<a name="ln318">            value = g_hash_table_lookup(options, old_name);</a>
+<a name="ln319">        }</a>
+<a name="ln320">    }</a>
+<a name="ln321"> </a>
+<a name="ln322">    if (value == NULL) {</a>
+<a name="ln323">        crm_trace(&quot;Using default value '%s' for cluster option '%s'&quot;, def_value, name);</a>
+<a name="ln324"> </a>
+<a name="ln325">        if (options == NULL) {</a>
+<a name="ln326">            return def_value;</a>
+<a name="ln327"> </a>
+<a name="ln328">        } else if(def_value == NULL) {</a>
+<a name="ln329">            return def_value;</a>
+<a name="ln330">        }</a>
+<a name="ln331"> </a>
+<a name="ln332">        g_hash_table_insert(options, strdup(name), strdup(def_value));</a>
+<a name="ln333">        value = g_hash_table_lookup(options, name);</a>
+<a name="ln334">    }</a>
+<a name="ln335"> </a>
+<a name="ln336">    if (validate &amp;&amp; validate(value) == FALSE) {</a>
+<a name="ln337">        crm_config_err(&quot;Value '%s' for cluster option '%s' is invalid.&quot;</a>
+<a name="ln338">                       &quot;  Defaulting to %s&quot;, value, name, def_value);</a>
+<a name="ln339">        g_hash_table_replace(options, strdup(name), strdup(def_value));</a>
+<a name="ln340">        value = g_hash_table_lookup(options, name);</a>
+<a name="ln341">    }</a>
+<a name="ln342"> </a>
+<a name="ln343">    return value;</a>
+<a name="ln344">}</a>
+<a name="ln345"> </a>
+<a name="ln346">const char *</a>
+<a name="ln347">get_cluster_pref(GHashTable * options, pe_cluster_option * option_list, int len, const char *name)</a>
+<a name="ln348">{</a>
+<a name="ln349">    int lpc = 0;</a>
+<a name="ln350">    const char *value = NULL;</a>
+<a name="ln351">    gboolean found = FALSE;</a>
+<a name="ln352"> </a>
+<a name="ln353">    for (lpc = 0; lpc &lt; len; lpc++) {</a>
+<a name="ln354">        if (safe_str_eq(name, option_list[lpc].name)) {</a>
+<a name="ln355">            found = TRUE;</a>
+<a name="ln356">            value = cluster_option(options,</a>
+<a name="ln357">                                   option_list[lpc].is_valid,</a>
+<a name="ln358">                                   option_list[lpc].name,</a>
+<a name="ln359">                                   option_list[lpc].alt_name, option_list[lpc].default_value);</a>
+<a name="ln360">        }</a>
+<a name="ln361">    }</a>
+<a name="ln362">    CRM_CHECK(found, crm_err(&quot;No option named: %s&quot;, name));</a>
+<a name="ln363">    return value;</a>
+<a name="ln364">}</a>
+<a name="ln365"> </a>
+<a name="ln366">void</a>
+<a name="ln367">config_metadata(const char *name, const char *version, const char *desc_short,</a>
+<a name="ln368">                const char *desc_long, pe_cluster_option * option_list, int len)</a>
+<a name="ln369">{</a>
+<a name="ln370">    int lpc = 0;</a>
+<a name="ln371"> </a>
+<a name="ln372">    fprintf(stdout, &quot;&lt;?xml version=\&quot;1.0\&quot;?&gt;&quot;</a>
+<a name="ln373">            &quot;&lt;!DOCTYPE resource-agent SYSTEM \&quot;ra-api-1.dtd\&quot;&gt;\n&quot;</a>
+<a name="ln374">            &quot;&lt;resource-agent name=\&quot;%s\&quot;&gt;\n&quot;</a>
+<a name="ln375">            &quot;  &lt;version&gt;%s&lt;/version&gt;\n&quot;</a>
+<a name="ln376">            &quot;  &lt;longdesc lang=\&quot;en\&quot;&gt;%s&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln377">            &quot;  &lt;shortdesc lang=\&quot;en\&quot;&gt;%s&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln378">            &quot;  &lt;parameters&gt;\n&quot;, name, version, desc_long, desc_short);</a>
+<a name="ln379"> </a>
+<a name="ln380">    for (lpc = 0; lpc &lt; len; lpc++) {</a>
+<a name="ln381">        if (option_list[lpc].description_long == NULL &amp;&amp; option_list[lpc].description_short == NULL) {</a>
+<a name="ln382">            continue;</a>
+<a name="ln383">        }</a>
+<a name="ln384">        fprintf(stdout, &quot;    &lt;parameter name=\&quot;%s\&quot; unique=\&quot;0\&quot;&gt;\n&quot;</a>
+<a name="ln385">                &quot;      &lt;shortdesc lang=\&quot;en\&quot;&gt;%s&lt;/shortdesc&gt;\n&quot;</a>
+<a name="ln386">                &quot;      &lt;content type=\&quot;%s\&quot; default=\&quot;%s\&quot;/&gt;\n&quot;</a>
+<a name="ln387">                &quot;      &lt;longdesc lang=\&quot;en\&quot;&gt;%s%s%s&lt;/longdesc&gt;\n&quot;</a>
+<a name="ln388">                &quot;    &lt;/parameter&gt;\n&quot;,</a>
+<a name="ln389">                option_list[lpc].name,</a>
+<a name="ln390">                option_list[lpc].description_short,</a>
+<a name="ln391">                option_list[lpc].type,</a>
+<a name="ln392">                option_list[lpc].default_value,</a>
+<a name="ln393">                option_list[lpc].description_long ? option_list[lpc].</a>
+<a name="ln394">                description_long : option_list[lpc].description_short,</a>
+<a name="ln395">                option_list[lpc].values ? &quot;  Allowed values: &quot; : &quot;&quot;,</a>
+<a name="ln396">                option_list[lpc].values ? option_list[lpc].values : &quot;&quot;);</a>
+<a name="ln397">    }</a>
+<a name="ln398">    fprintf(stdout, &quot;  &lt;/parameters&gt;\n&lt;/resource-agent&gt;\n&quot;);</a>
+<a name="ln399">}</a>
+<a name="ln400"> </a>
+<a name="ln401">void</a>
+<a name="ln402">verify_all_options(GHashTable * options, pe_cluster_option * option_list, int len)</a>
+<a name="ln403">{</a>
+<a name="ln404">    int lpc = 0;</a>
+<a name="ln405"> </a>
+<a name="ln406">    for (lpc = 0; lpc &lt; len; lpc++) {</a>
+<a name="ln407">        cluster_option(options,</a>
+<a name="ln408">                       option_list[lpc].is_valid,</a>
+<a name="ln409">                       option_list[lpc].name,</a>
+<a name="ln410">                       option_list[lpc].alt_name, option_list[lpc].default_value);</a>
+<a name="ln411">    }</a>
+<a name="ln412">}</a>
+<a name="ln413"> </a>
+<a name="ln414">char *</a>
+<a name="ln415">generate_hash_key(const char *crm_msg_reference, const char *sys)</a>
+<a name="ln416">{</a>
+<a name="ln417">    char *hash_key = crm_concat(sys ? sys : &quot;none&quot;, crm_msg_reference, '_');</a>
+<a name="ln418"> </a>
+<a name="ln419">    crm_trace(&quot;created hash key: (%s)&quot;, hash_key);</a>
+<a name="ln420">    return hash_key;</a>
+<a name="ln421">}</a>
+<a name="ln422"> </a>
+<a name="ln423"> </a>
+<a name="ln424">int</a>
+<a name="ln425">crm_user_lookup(const char *name, uid_t * uid, gid_t * gid)</a>
+<a name="ln426">{</a>
+<a name="ln427">    int rc = -1;</a>
+<a name="ln428">    char *buffer = NULL;</a>
+<a name="ln429">    struct passwd pwd;</a>
+<a name="ln430">    struct passwd *pwentry = NULL;</a>
+<a name="ln431"> </a>
+<a name="ln432">    buffer = calloc(1, PW_BUFFER_LEN);</a>
+<a name="ln433">    getpwnam_r(name, &amp;pwd, buffer, PW_BUFFER_LEN, &amp;pwentry);</a>
+<a name="ln434">    if (pwentry) {</a>
+<a name="ln435">        rc = 0;</a>
+<a name="ln436">        if (uid) {</a>
+<a name="ln437">            *uid = pwentry-&gt;pw_uid;</a>
+<a name="ln438">        }</a>
+<a name="ln439">        if (gid) {</a>
+<a name="ln440">            *gid = pwentry-&gt;pw_gid;</a>
+<a name="ln441">        }</a>
+<a name="ln442">        crm_trace(&quot;Cluster user %s has uid=%d gid=%d&quot;, name, pwentry-&gt;pw_uid, pwentry-&gt;pw_gid);</a>
+<a name="ln443"> </a>
+<a name="ln444">    } else {</a>
+<a name="ln445">        crm_err(&quot;Cluster user %s does not exist&quot;, name);</a>
+<a name="ln446">    }</a>
+<a name="ln447"> </a>
+<a name="ln448">    free(buffer);</a>
+<a name="ln449">    return rc;</a>
+<a name="ln450">}</a>
+<a name="ln451"> </a>
+<a name="ln452">static int</a>
+<a name="ln453">crm_version_helper(const char *text, char **end_text)</a>
+<a name="ln454">{</a>
+<a name="ln455">    int atoi_result = -1;</a>
+<a name="ln456"> </a>
+<a name="ln457">    CRM_ASSERT(end_text != NULL);</a>
+<a name="ln458"> </a>
+<a name="ln459">    errno = 0;</a>
+<a name="ln460"> </a>
+<a name="ln461">    if (text != NULL &amp;&amp; text[0] != 0) {</a>
+<a name="ln462">        atoi_result = (int)strtol(text, end_text, 10);</a>
+<a name="ln463"> </a>
+<a name="ln464">        if (errno == EINVAL) {</a>
+<a name="ln465">            crm_err(&quot;Conversion of '%s' %c failed&quot;, text, text[0]);</a>
+<a name="ln466">            atoi_result = -1;</a>
+<a name="ln467">        }</a>
+<a name="ln468">    }</a>
+<a name="ln469">    return atoi_result;</a>
+<a name="ln470">}</a>
+<a name="ln471"> </a>
+<a name="ln472">/*</a>
+<a name="ln473"> * version1 &lt; version2 : -1</a>
+<a name="ln474"> * version1 = version2 :  0</a>
+<a name="ln475"> * version1 &gt; version2 :  1</a>
+<a name="ln476"> */</a>
+<a name="ln477">int</a>
+<a name="ln478">compare_version(const char *version1, const char *version2)</a>
+<a name="ln479">{</a>
+<a name="ln480">    int rc = 0;</a>
+<a name="ln481">    int lpc = 0;</a>
+<a name="ln482">    char *ver1_copy = NULL, *ver2_copy = NULL;</a>
+<a name="ln483">    char *rest1 = NULL, *rest2 = NULL;</a>
+<a name="ln484"> </a>
+<a name="ln485">    if (version1 == NULL &amp;&amp; version2 == NULL) {</a>
+<a name="ln486">        return 0;</a>
+<a name="ln487">    } else if (version1 == NULL) {</a>
+<a name="ln488">        return -1;</a>
+<a name="ln489">    } else if (version2 == NULL) {</a>
+<a name="ln490">        return 1;</a>
+<a name="ln491">    }</a>
+<a name="ln492"> </a>
+<a name="ln493">    ver1_copy = strdup(version1);</a>
+<a name="ln494">    ver2_copy = strdup(version2);</a>
+<a name="ln495">    rest1 = ver1_copy;</a>
+<a name="ln496">    rest2 = ver2_copy;</a>
+<a name="ln497"> </a>
+<a name="ln498">    while (1) {</a>
+<a name="ln499">        int digit1 = 0;</a>
+<a name="ln500">        int digit2 = 0;</a>
+<a name="ln501"> </a>
+<a name="ln502">        lpc++;</a>
+<a name="ln503"> </a>
+<a name="ln504">        if (rest1 == rest2) {</a>
+<a name="ln505">            break;</a>
+<a name="ln506">        }</a>
+<a name="ln507"> </a>
+<a name="ln508">        if (rest1 != NULL) {</a>
+<a name="ln509">            digit1 = crm_version_helper(rest1, &amp;rest1);</a>
+<a name="ln510">        }</a>
+<a name="ln511"> </a>
+<a name="ln512">        if (rest2 != NULL) {</a>
+<a name="ln513">            digit2 = crm_version_helper(rest2, &amp;rest2);</a>
+<a name="ln514">        }</a>
+<a name="ln515"> </a>
+<a name="ln516">        if (digit1 &lt; digit2) {</a>
+<a name="ln517">            rc = -1;</a>
+<a name="ln518">            break;</a>
+<a name="ln519"> </a>
+<a name="ln520">        } else if (digit1 &gt; digit2) {</a>
+<a name="ln521">            rc = 1;</a>
+<a name="ln522">            break;</a>
+<a name="ln523">        }</a>
+<a name="ln524"> </a>
+<a name="ln525">        if (rest1 != NULL &amp;&amp; rest1[0] == '.') {</a>
+<a name="ln526">            rest1++;</a>
+<a name="ln527">        }</a>
+<a name="ln528">        if (rest1 != NULL &amp;&amp; rest1[0] == 0) {</a>
+<a name="ln529">            rest1 = NULL;</a>
+<a name="ln530">        }</a>
+<a name="ln531"> </a>
+<a name="ln532">        if (rest2 != NULL &amp;&amp; rest2[0] == '.') {</a>
+<a name="ln533">            rest2++;</a>
+<a name="ln534">        }</a>
+<a name="ln535">        if (rest2 != NULL &amp;&amp; rest2[0] == 0) {</a>
+<a name="ln536">            rest2 = NULL;</a>
+<a name="ln537">        }</a>
+<a name="ln538">    }</a>
+<a name="ln539"> </a>
+<a name="ln540">    free(ver1_copy);</a>
+<a name="ln541">    free(ver2_copy);</a>
+<a name="ln542"> </a>
+<a name="ln543">    if (rc == 0) {</a>
+<a name="ln544">        crm_trace(&quot;%s == %s (%d)&quot;, version1, version2, lpc);</a>
+<a name="ln545">    } else if (rc &lt; 0) {</a>
+<a name="ln546">        crm_trace(&quot;%s &lt; %s (%d)&quot;, version1, version2, lpc);</a>
+<a name="ln547">    } else if (rc &gt; 0) {</a>
+<a name="ln548">        crm_trace(&quot;%s &gt; %s (%d)&quot;, version1, version2, lpc);</a>
+<a name="ln549">    }</a>
+<a name="ln550"> </a>
+<a name="ln551">    return rc;</a>
+<a name="ln552">}</a>
+<a name="ln553"> </a>
+<a name="ln554">gboolean do_stderr = FALSE;</a>
+<a name="ln555"> </a>
+<a name="ln556">#ifndef NUMCHARS</a>
+<a name="ln557">#  define	NUMCHARS	&quot;0123456789.&quot;</a>
+<a name="ln558">#endif</a>
+<a name="ln559"> </a>
+<a name="ln560">#ifndef WHITESPACE</a>
+<a name="ln561">#  define	WHITESPACE	&quot; \t\n\r\f&quot;</a>
+<a name="ln562">#endif</a>
+<a name="ln563"> </a>
+<a name="ln564">unsigned long long</a>
+<a name="ln565">crm_get_interval(const char *input)</a>
+<a name="ln566">{</a>
+<a name="ln567">    unsigned long long msec = 0;</a>
+<a name="ln568"> </a>
+<a name="ln569">    if (input == NULL) {</a>
+<a name="ln570">        return msec;</a>
+<a name="ln571"> </a>
+<a name="ln572">    } else if (input[0] != 'P') {</a>
+<a name="ln573">        long long tmp = crm_get_msec(input);</a>
+<a name="ln574"> </a>
+<a name="ln575">        if(tmp &gt; 0) {</a>
+<a name="ln576">            msec = tmp;</a>
+<a name="ln577">        }</a>
+<a name="ln578"> </a>
+<a name="ln579">    } else {</a>
+<a name="ln580">        crm_time_t *interval = crm_time_parse_duration(input);</a>
+<a name="ln581"> </a>
+<a name="ln582">        msec = 1000 * crm_time_get_seconds(interval);</a>
+<a name="ln583">        crm_time_free(interval);</a>
+<a name="ln584">    }</a>
+<a name="ln585"> </a>
+<a name="ln586">    return msec;</a>
+<a name="ln587">}</a>
+<a name="ln588"> </a>
+<a name="ln589">long long</a>
+<a name="ln590">crm_get_msec(const char *input)</a>
+<a name="ln591">{</a>
+<a name="ln592">    const char *cp = input;</a>
+<a name="ln593">    const char *units;</a>
+<a name="ln594">    long long multiplier = 1000;</a>
+<a name="ln595">    long long divisor = 1;</a>
+<a name="ln596">    long long msec = -1;</a>
+<a name="ln597">    char *end_text = NULL;</a>
+<a name="ln598"> </a>
+<a name="ln599">    /* double dret; */</a>
+<a name="ln600"> </a>
+<a name="ln601">    if (input == NULL) {</a>
+<a name="ln602">        return msec;</a>
+<a name="ln603">    }</a>
+<a name="ln604"> </a>
+<a name="ln605">    cp += strspn(cp, WHITESPACE);</a>
+<a name="ln606">    units = cp + strspn(cp, NUMCHARS);</a>
+<a name="ln607">    units += strspn(units, WHITESPACE);</a>
+<a name="ln608"> </a>
+<a name="ln609">    if (strchr(NUMCHARS, *cp) == NULL) {</a>
+<a name="ln610">        return msec;</a>
+<a name="ln611">    }</a>
+<a name="ln612"> </a>
+<a name="ln613">    if (strncasecmp(units, &quot;ms&quot;, 2) == 0 || strncasecmp(units, &quot;msec&quot;, 4) == 0) {</a>
+<a name="ln614">        multiplier = 1;</a>
+<a name="ln615">        divisor = 1;</a>
+<a name="ln616">    } else if (strncasecmp(units, &quot;us&quot;, 2) == 0 || strncasecmp(units, &quot;usec&quot;, 4) == 0) {</a>
+<a name="ln617">        multiplier = 1;</a>
+<a name="ln618">        divisor = 1000;</a>
+<a name="ln619">    } else if (strncasecmp(units, &quot;s&quot;, 1) == 0 || strncasecmp(units, &quot;sec&quot;, 3) == 0) {</a>
+<a name="ln620">        multiplier = 1000;</a>
+<a name="ln621">        divisor = 1;</a>
+<a name="ln622">    } else if (strncasecmp(units, &quot;m&quot;, 1) == 0 || strncasecmp(units, &quot;min&quot;, 3) == 0) {</a>
+<a name="ln623">        multiplier = 60 * 1000;</a>
+<a name="ln624">        divisor = 1;</a>
+<a name="ln625">    } else if (strncasecmp(units, &quot;h&quot;, 1) == 0 || strncasecmp(units, &quot;hr&quot;, 2) == 0) {</a>
+<a name="ln626">        multiplier = 60 * 60 * 1000;</a>
+<a name="ln627">        divisor = 1;</a>
+<a name="ln628">    } else if (*units != EOS &amp;&amp; *units != '\n' &amp;&amp; *units != '\r') {</a>
+<a name="ln629">        return msec;</a>
+<a name="ln630">    }</a>
+<a name="ln631"> </a>
+<a name="ln632">    msec = crm_int_helper(cp, &amp;end_text);</a>
+<a name="ln633">    if (msec &gt; LLONG_MAX/multiplier) {</a>
+<a name="ln634">        /* arithmetics overflow while multiplier/divisor mutually exclusive */</a>
+<a name="ln635">        return LLONG_MAX;</a>
+<a name="ln636">    }</a>
+<a name="ln637">    msec *= multiplier;</a>
+<a name="ln638">    msec /= divisor;</a>
+<a name="ln639">    /* dret += 0.5; */</a>
+<a name="ln640">    /* msec = (long long)dret; */</a>
+<a name="ln641">    return msec;</a>
+<a name="ln642">}</a>
+<a name="ln643"> </a>
+<a name="ln644">/*!</a>
+<a name="ln645"> * \brief Generate an operation key</a>
+<a name="ln646"> *</a>
+<a name="ln647"> * \param[in] rsc_id    ID of resource being operated on</a>
+<a name="ln648"> * \param[in] op_type   Operation name</a>
+<a name="ln649"> * \param[in] interval  Operation interval</a>
+<a name="ln650"> *</a>
+<a name="ln651"> * \return Newly allocated memory containing operation key as string</a>
+<a name="ln652"> *</a>
+<a name="ln653"> * \note It is the caller's responsibility to free() the result.</a>
+<a name="ln654"> */</a>
+<a name="ln655">char *</a>
+<a name="ln656">generate_op_key(const char *rsc_id, const char *op_type, int interval)</a>
+<a name="ln657">{</a>
+<a name="ln658">    CRM_ASSERT(rsc_id != NULL);</a>
+<a name="ln659">    CRM_ASSERT(op_type != NULL);</a>
+<a name="ln660">    CRM_ASSERT(interval &gt;= 0);</a>
+<a name="ln661">    return crm_strdup_printf(&quot;%s_%s_%d&quot;, rsc_id, op_type, interval);</a>
+<a name="ln662">}</a>
+<a name="ln663"> </a>
+<a name="ln664">gboolean</a>
+<a name="ln665">parse_op_key(const char *key, char **rsc_id, char **op_type, int *interval)</a>
+<a name="ln666">{</a>
+<a name="ln667">    char *notify = NULL;</a>
+<a name="ln668">    char *mutable_key = NULL;</a>
+<a name="ln669">    char *mutable_key_ptr = NULL;</a>
+<a name="ln670">    int len = 0, offset = 0, ch = 0;</a>
+<a name="ln671"> </a>
+<a name="ln672">    CRM_CHECK(key != NULL, return FALSE);</a>
+<a name="ln673"> </a>
+<a name="ln674">    *interval = 0;</a>
+<a name="ln675">    len = strlen(key);</a>
+<a name="ln676">    offset = len - 1;</a>
+<a name="ln677"> </a>
+<a name="ln678">    crm_trace(&quot;Source: %s&quot;, key);</a>
+<a name="ln679"> </a>
+<a name="ln680">    while (offset &gt; 0 &amp;&amp; isdigit(key[offset])) {</a>
+<a name="ln681">        int digits = len - offset;</a>
+<a name="ln682"> </a>
+<a name="ln683">        ch = key[offset] - '0';</a>
+<a name="ln684">        CRM_CHECK(ch &lt; 10, return FALSE);</a>
+<a name="ln685">        CRM_CHECK(ch &gt;= 0, return FALSE);</a>
+<a name="ln686">        while (digits &gt; 1) {</a>
+<a name="ln687">            digits--;</a>
+<a name="ln688">            ch = ch * 10;</a>
+<a name="ln689">        }</a>
+<a name="ln690">        *interval += ch;</a>
+<a name="ln691">        offset--;</a>
+<a name="ln692">    }</a>
+<a name="ln693"> </a>
+<a name="ln694">    crm_trace(&quot;  Interval: %d&quot;, *interval);</a>
+<a name="ln695">    CRM_CHECK(key[offset] == '_', return FALSE);</a>
+<a name="ln696"> </a>
+<a name="ln697">    mutable_key = strdup(key);</a>
+<a name="ln698">    mutable_key[offset] = 0;</a>
+<a name="ln699">    offset--;</a>
+<a name="ln700"> </a>
+<a name="ln701">    while (offset &gt; 0 &amp;&amp; key[offset] != '_') {</a>
+<a name="ln702">        offset--;</a>
+<a name="ln703">    }</a>
+<a name="ln704"> </a>
+<a name="ln705">    CRM_CHECK(key[offset] == '_', free(mutable_key);</a>
+<a name="ln706">              return FALSE);</a>
+<a name="ln707"> </a>
+<a name="ln708">    mutable_key_ptr = mutable_key + offset + 1;</a>
+<a name="ln709"> </a>
+<a name="ln710">    crm_trace(&quot;  Action: %s&quot;, mutable_key_ptr);</a>
+<a name="ln711"> </a>
+<a name="ln712">    *op_type = strdup(mutable_key_ptr);</a>
+<a name="ln713"> </a>
+<a name="ln714">    mutable_key[offset] = 0;</a>
+<a name="ln715">    offset--;</a>
+<a name="ln716"> </a>
+<a name="ln717">    CRM_CHECK(mutable_key != mutable_key_ptr, free(mutable_key);</a>
+<a name="ln718">              return FALSE);</a>
+<a name="ln719"> </a>
+<a name="ln720">    notify = strstr(mutable_key, &quot;_post_notify&quot;);</a>
+<a name="ln721">    if (notify &amp;&amp; safe_str_eq(notify, &quot;_post_notify&quot;)) {</a>
+<a name="ln722">        notify[0] = 0;</a>
+<a name="ln723">    }</a>
+<a name="ln724"> </a>
+<a name="ln725">    notify = strstr(mutable_key, &quot;_pre_notify&quot;);</a>
+<a name="ln726">    if (notify &amp;&amp; safe_str_eq(notify, &quot;_pre_notify&quot;)) {</a>
+<a name="ln727">        notify[0] = 0;</a>
+<a name="ln728">    }</a>
+<a name="ln729"> </a>
+<a name="ln730">    crm_trace(&quot;  Resource: %s&quot;, mutable_key);</a>
+<a name="ln731">    *rsc_id = mutable_key;</a>
+<a name="ln732"> </a>
+<a name="ln733">    return TRUE;</a>
+<a name="ln734">}</a>
+<a name="ln735"> </a>
+<a name="ln736">char *</a>
+<a name="ln737">generate_notify_key(const char *rsc_id, const char *notify_type, const char *op_type)</a>
+<a name="ln738">{</a>
+<a name="ln739">    int len = 12;</a>
+<a name="ln740">    char *op_id = NULL;</a>
+<a name="ln741"> </a>
+<a name="ln742">    CRM_CHECK(rsc_id != NULL, return NULL);</a>
+<a name="ln743">    CRM_CHECK(op_type != NULL, return NULL);</a>
+<a name="ln744">    CRM_CHECK(notify_type != NULL, return NULL);</a>
+<a name="ln745"> </a>
+<a name="ln746">    len += strlen(op_type);</a>
+<a name="ln747">    len += strlen(rsc_id);</a>
+<a name="ln748">    len += strlen(notify_type);</a>
+<a name="ln749">    if(len &gt; 0) {</a>
+<a name="ln750">        op_id = malloc(len);</a>
+<a name="ln751">    }</a>
+<a name="ln752">    if (op_id != NULL) {</a>
+<a name="ln753">        sprintf(op_id, &quot;%s_%s_notify_%s_0&quot;, rsc_id, notify_type, op_type);</a>
+<a name="ln754">    }</a>
+<a name="ln755">    return op_id;</a>
+<a name="ln756">}</a>
+<a name="ln757"> </a>
+<a name="ln758">char *</a>
+<a name="ln759">generate_transition_magic_v202(const char *transition_key, int op_status)</a>
+<a name="ln760">{</a>
+<a name="ln761">    int len = 80;</a>
+<a name="ln762">    char *fail_state = NULL;</a>
+<a name="ln763"> </a>
+<a name="ln764">    CRM_CHECK(transition_key != NULL, return NULL);</a>
+<a name="ln765"> </a>
+<a name="ln766">    len += strlen(transition_key);</a>
+<a name="ln767"> </a>
+<a name="ln768">    fail_state = malloc(len);</a>
+<a name="ln769">    if (fail_state != NULL) {</a>
+<a name="ln770">        snprintf(fail_state, len, &quot;%d:%s&quot;, op_status, transition_key);</a>
+<a name="ln771">    }</a>
+<a name="ln772">    return fail_state;</a>
+<a name="ln773">}</a>
+<a name="ln774"> </a>
+<a name="ln775">char *</a>
+<a name="ln776">generate_transition_magic(const char *transition_key, int op_status, int op_rc)</a>
+<a name="ln777">{</a>
+<a name="ln778">    int len = 80;</a>
+<a name="ln779">    char *fail_state = NULL;</a>
+<a name="ln780"> </a>
+<a name="ln781">    CRM_CHECK(transition_key != NULL, return NULL);</a>
+<a name="ln782"> </a>
+<a name="ln783">    len += strlen(transition_key);</a>
+<a name="ln784"> </a>
+<a name="ln785">    fail_state = malloc(len);</a>
+<a name="ln786">    if (fail_state != NULL) {</a>
+<a name="ln787">        snprintf(fail_state, len, &quot;%d:%d;%s&quot;, op_status, op_rc, transition_key);</a>
+<a name="ln788">    }</a>
+<a name="ln789">    return fail_state;</a>
+<a name="ln790">}</a>
+<a name="ln791"> </a>
+<a name="ln792">gboolean</a>
+<a name="ln793">decode_transition_magic(const char *magic, char **uuid, int *transition_id, int *action_id,</a>
+<a name="ln794">                        int *op_status, int *op_rc, int *target_rc)</a>
+<a name="ln795">{</a>
+<a name="ln796">    int res = 0;</a>
+<a name="ln797">    char *key = NULL;</a>
+<a name="ln798">    gboolean result = TRUE;</a>
+<a name="ln799"> </a>
+<a name="ln800">    CRM_CHECK(magic != NULL, return FALSE);</a>
+<a name="ln801">    CRM_CHECK(op_rc != NULL, return FALSE);</a>
+<a name="ln802">    CRM_CHECK(op_status != NULL, return FALSE);</a>
+<a name="ln803"> </a>
+<a name="ln804">    key = calloc(1, strlen(magic) + 1);</a>
+<a name="ln805">    res = sscanf(magic, &quot;%d:%d;%s&quot;, op_status, op_rc, key);</a>
+<a name="ln806">    if (res != 3) {</a>
+<a name="ln807">        crm_warn(&quot;Only found %d items in: '%s'&quot;, res, magic);</a>
+<a name="ln808">        free(key);</a>
+<a name="ln809">        return FALSE;</a>
+<a name="ln810">    }</a>
+<a name="ln811"> </a>
+<a name="ln812">    CRM_CHECK(decode_transition_key(key, uuid, transition_id, action_id, target_rc), result = FALSE);</a>
+<a name="ln813"> </a>
+<a name="ln814">    free(key);</a>
+<a name="ln815">    return result;</a>
+<a name="ln816">}</a>
+<a name="ln817"> </a>
+<a name="ln818">char *</a>
+<a name="ln819">generate_transition_key(int transition_id, int action_id, int target_rc, const char *node)</a>
+<a name="ln820">{</a>
+<a name="ln821">    int len = 40;</a>
+<a name="ln822">    char *fail_state = NULL;</a>
+<a name="ln823"> </a>
+<a name="ln824">    CRM_CHECK(node != NULL, return NULL);</a>
+<a name="ln825"> </a>
+<a name="ln826">    len += strlen(node);</a>
+<a name="ln827"> </a>
+<a name="ln828">    fail_state = malloc(len);</a>
+<a name="ln829">    if (fail_state != NULL) {</a>
+<a name="ln830">        snprintf(fail_state, len, &quot;%d:%d:%d:%-*s&quot;, action_id, transition_id, target_rc, 36, node);</a>
+<a name="ln831">    }</a>
+<a name="ln832">    return fail_state;</a>
+<a name="ln833">}</a>
+<a name="ln834"> </a>
+<a name="ln835">gboolean</a>
+<a name="ln836">decode_transition_key(const char *key, char **uuid, int *transition_id, int *action_id,</a>
+<a name="ln837">                      int *target_rc)</a>
+<a name="ln838">{</a>
+<a name="ln839">    int res = 0;</a>
+<a name="ln840">    gboolean done = FALSE;</a>
+<a name="ln841"> </a>
+<a name="ln842">    CRM_CHECK(uuid != NULL, return FALSE);</a>
+<a name="ln843">    CRM_CHECK(target_rc != NULL, return FALSE);</a>
+<a name="ln844">    CRM_CHECK(action_id != NULL, return FALSE);</a>
+<a name="ln845">    CRM_CHECK(transition_id != NULL, return FALSE);</a>
+<a name="ln846"> </a>
+<a name="ln847">    *uuid = calloc(1, 37);</a>
+<a name="ln848">    res = sscanf(key, &quot;%d:%d:%d:%36s&quot;, action_id, transition_id, target_rc, *uuid);</a>
+<a name="ln849">    switch (res) {</a>
+<a name="ln850">        case 4:</a>
+<a name="ln851">            /* Post Pacemaker 0.6 */</a>
+<a name="ln852">            done = TRUE;</a>
+<a name="ln853">            break;</a>
+<a name="ln854">        case 3:</a>
+<a name="ln855">        case 2:</a>
+<a name="ln856">            /* this can be tricky - the UUID might start with an integer */</a>
+<a name="ln857"> </a>
+<a name="ln858">            /* Until Pacemaker 0.6 */</a>
+<a name="ln859">            done = TRUE;</a>
+<a name="ln860">            *target_rc = -1;</a>
+<a name="ln861">            res = sscanf(key, &quot;%d:%d:%36s&quot;, action_id, transition_id, *uuid);</a>
+<a name="ln862">            if (res == 2) {</a>
+<a name="ln863">                *action_id = -1;</a>
+<a name="ln864">                res = sscanf(key, &quot;%d:%36s&quot;, transition_id, *uuid);</a>
+<a name="ln865">                CRM_CHECK(res == 2, done = FALSE);</a>
+<a name="ln866"> </a>
+<a name="ln867">            } else if (res != 3) {</a>
+<a name="ln868">                CRM_CHECK(res == 3, done = FALSE);</a>
+<a name="ln869">            }</a>
+<a name="ln870">            break;</a>
+<a name="ln871"> </a>
+<a name="ln872">        case 1:</a>
+<a name="ln873">            /* Prior to Heartbeat 2.0.8 */</a>
+<a name="ln874">            done = TRUE;</a>
+<a name="ln875">            *action_id = -1;</a>
+<a name="ln876">            *target_rc = -1;</a>
+<a name="ln877">            res = sscanf(key, &quot;%d:%36s&quot;, transition_id, *uuid);</a>
+<a name="ln878">            CRM_CHECK(res == 2, done = FALSE);</a>
+<a name="ln879">            break;</a>
+<a name="ln880">        default:</a>
+<a name="ln881">            crm_crit(&quot;Unhandled sscanf result (%d) for %s&quot;, res, key);</a>
+<a name="ln882">    }</a>
+<a name="ln883"> </a>
+<a name="ln884">    if (strlen(*uuid) != 36) {</a>
+<a name="ln885">        crm_warn(&quot;Bad UUID (%s) in sscanf result (%d) for %s&quot;, *uuid, res, key);</a>
+<a name="ln886">    }</a>
+<a name="ln887"> </a>
+<a name="ln888">    if (done == FALSE) {</a>
+<a name="ln889">        crm_err(&quot;Cannot decode '%s' rc=%d&quot;, key, res);</a>
+<a name="ln890"> </a>
+<a name="ln891">        free(*uuid);</a>
+<a name="ln892">        *uuid = NULL;</a>
+<a name="ln893">        *target_rc = -1;</a>
+<a name="ln894">        *action_id = -1;</a>
+<a name="ln895">        *transition_id = -1;</a>
+<a name="ln896">    }</a>
+<a name="ln897"> </a>
+<a name="ln898">    return done;</a>
+<a name="ln899">}</a>
+<a name="ln900"> </a>
+<a name="ln901">void</a>
+<a name="ln902">filter_action_parameters(xmlNode * param_set, const char *version)</a>
+<a name="ln903">{</a>
+<a name="ln904">    char *key = NULL;</a>
+<a name="ln905">    char *timeout = NULL;</a>
+<a name="ln906">    char *interval = NULL;</a>
+<a name="ln907"> </a>
+<a name="ln908">    const char *attr_filter[] = {</a>
+<a name="ln909">        XML_ATTR_ID,</a>
+<a name="ln910">        XML_ATTR_CRM_VERSION,</a>
+<a name="ln911">        XML_LRM_ATTR_OP_DIGEST,</a>
+<a name="ln912">        XML_LRM_ATTR_TARGET,</a>
+<a name="ln913">        XML_LRM_ATTR_TARGET_UUID,</a>
+<a name="ln914">        &quot;pcmk_external_ip&quot;</a>
+<a name="ln915">    };</a>
+<a name="ln916"> </a>
+<a name="ln917">    gboolean do_delete = FALSE;</a>
+<a name="ln918">    int lpc = 0;</a>
+<a name="ln919">    static int meta_len = 0;</a>
+<a name="ln920"> </a>
+<a name="ln921">    if (meta_len == 0) {</a>
+<a name="ln922">        meta_len = strlen(CRM_META);</a>
+<a name="ln923">    }</a>
+<a name="ln924"> </a>
+<a name="ln925">    if (param_set == NULL) {</a>
+<a name="ln926">        return;</a>
+<a name="ln927">    }</a>
+<a name="ln928"> </a>
+<a name="ln929">    for (lpc = 0; lpc &lt; DIMOF(attr_filter); lpc++) {</a>
+<a name="ln930">        xml_remove_prop(param_set, attr_filter[lpc]);</a>
+<a name="ln931">    }</a>
+<a name="ln932"> </a>
+<a name="ln933">    key = crm_meta_name(XML_LRM_ATTR_INTERVAL);</a>
+<a name="ln934">    interval = crm_element_value_copy(param_set, key);</a>
+<a name="ln935">    free(key);</a>
+<a name="ln936"> </a>
+<a name="ln937">    key = crm_meta_name(XML_ATTR_TIMEOUT);</a>
+<a name="ln938">    timeout = crm_element_value_copy(param_set, key);</a>
+<a name="ln939"> </a>
+<a name="ln940">    if (param_set) {</a>
+<a name="ln941">        xmlAttrPtr xIter = param_set-&gt;properties;</a>
+<a name="ln942"> </a>
+<a name="ln943">        while (xIter) {</a>
+<a name="ln944">            const char *prop_name = (const char *)xIter-&gt;name;</a>
+<a name="ln945"> </a>
+<a name="ln946">            xIter = xIter-&gt;next;</a>
+<a name="ln947">            do_delete = FALSE;</a>
+<a name="ln948">            if (strncasecmp(prop_name, CRM_META, meta_len) == 0) {</a>
+<a name="ln949">                do_delete = TRUE;</a>
+<a name="ln950">            }</a>
+<a name="ln951"> </a>
+<a name="ln952">            if (do_delete) {</a>
+<a name="ln953">                xml_remove_prop(param_set, prop_name);</a>
+<a name="ln954">            }</a>
+<a name="ln955">        }</a>
+<a name="ln956">    }</a>
+<a name="ln957"> </a>
+<a name="ln958">    if (crm_get_msec(interval) &gt; 0 &amp;&amp; compare_version(version, &quot;1.0.8&quot;) &gt; 0) {</a>
+<a name="ln959">        /* Re-instate the operation's timeout value */</a>
+<a name="ln960">        if (timeout != NULL) {</a>
+<a name="ln961">            crm_xml_add(param_set, key, timeout);</a>
+<a name="ln962">        }</a>
+<a name="ln963">    }</a>
+<a name="ln964"> </a>
+<a name="ln965">    free(interval);</a>
+<a name="ln966">    free(timeout);</a>
+<a name="ln967">    free(key);</a>
+<a name="ln968">}</a>
+<a name="ln969"> </a>
+<a name="ln970">extern bool crm_is_daemon;</a>
+<a name="ln971"> </a>
+<a name="ln972">/* coverity[+kill] */</a>
+<a name="ln973">void</a>
+<a name="ln974">crm_abort(const char *file, const char *function, int line,</a>
+<a name="ln975">          const char *assert_condition, gboolean do_core, gboolean do_fork)</a>
+<a name="ln976">{</a>
+<a name="ln977">    int rc = 0;</a>
+<a name="ln978">    int pid = 0;</a>
+<a name="ln979">    int status = 0;</a>
+<a name="ln980"> </a>
+<a name="ln981">    /* Implied by the parent's error logging below */</a>
+<a name="ln982">    /* crm_write_blackbox(0); */</a>
+<a name="ln983"> </a>
+<a name="ln984">    if(crm_is_daemon == FALSE) {</a>
+<a name="ln985">        /* This is a command line tool - do not fork */</a>
+<a name="ln986"> </a>
+<a name="ln987">        /* crm_add_logfile(NULL);   * Record it to a file? */</a>
+<a name="ln988">        crm_enable_stderr(TRUE); /* Make sure stderr is enabled so we can tell the caller */</a>
+<a name="ln989">        do_fork = FALSE;         /* Just crash if needed */</a>
+<a name="ln990">    }</a>
+<a name="ln991"> </a>
+<a name="ln992">    if (do_core == FALSE) {</a>
+<a name="ln993">        crm_err(&quot;%s: Triggered assert at %s:%d : %s&quot;, function, file, line, assert_condition);</a>
+<a name="ln994">        return;</a>
+<a name="ln995"> </a>
+<a name="ln996">    } else if (do_fork) {</a>
+<a name="ln997">        pid = fork();</a>
+<a name="ln998"> </a>
+<a name="ln999">    } else {</a>
+<a name="ln1000">        crm_err(&quot;%s: Triggered fatal assert at %s:%d : %s&quot;, function, file, line, assert_condition);</a>
+<a name="ln1001">    }</a>
+<a name="ln1002"> </a>
+<a name="ln1003">    if (pid == -1) {</a>
+<a name="ln1004">        crm_crit(&quot;%s: Cannot create core for non-fatal assert at %s:%d : %s&quot;,</a>
+<a name="ln1005">                 function, file, line, assert_condition);</a>
+<a name="ln1006">        return;</a>
+<a name="ln1007"> </a>
+<a name="ln1008">    } else if(pid == 0) {</a>
+<a name="ln1009">        /* Child process */</a>
+<a name="ln1010">        abort();</a>
+<a name="ln1011">        return;</a>
+<a name="ln1012">    }</a>
+<a name="ln1013"> </a>
+<a name="ln1014">    /* Parent process */</a>
+<a name="ln1015">    crm_err(&quot;%s: Forked child %d to record non-fatal assert at %s:%d : %s&quot;,</a>
+<a name="ln1016">            function, pid, file, line, assert_condition);</a>
+<a name="ln1017">    crm_write_blackbox(SIGTRAP, NULL);</a>
+<a name="ln1018"> </a>
+<a name="ln1019">    do {</a>
+<a name="ln1020">        rc = waitpid(pid, &amp;status, 0);</a>
+<a name="ln1021">        if(rc == pid) {</a>
+<a name="ln1022">            return; /* Job done */</a>
+<a name="ln1023">        }</a>
+<a name="ln1024"> </a>
+<a name="ln1025">    } while(errno == EINTR);</a>
+<a name="ln1026"> </a>
+<a name="ln1027">    if (errno == ECHILD) {</a>
+<a name="ln1028">        /* crm_mon does this */</a>
+<a name="ln1029">        crm_trace(&quot;Cannot wait on forked child %d - SIGCHLD is probably set to SIG_IGN&quot;, pid);</a>
+<a name="ln1030">        return;</a>
+<a name="ln1031">    }</a>
+<a name="ln1032">    crm_perror(LOG_ERR, &quot;Cannot wait on forked child %d&quot;, pid);</a>
+<a name="ln1033">}</a>
+<a name="ln1034"> </a>
+<a name="ln1035">int</a>
+<a name="ln1036">crm_pid_active(long pid, const char *daemon)</a>
+<a name="ln1037">{</a>
+<a name="ln1038">    static int have_proc_pid = 0;</a>
+<a name="ln1039"> </a>
+<a name="ln1040">    if(have_proc_pid == 0) {</a>
+<a name="ln1041">        char proc_path[PATH_MAX], exe_path[PATH_MAX];</a>
+<a name="ln1042"> </a>
+<a name="ln1043">        /* check to make sure pid hasn't been reused by another process */</a>
+<a name="ln1044">        snprintf(proc_path, sizeof(proc_path), &quot;/proc/%lu/exe&quot;, (long unsigned int)getpid());</a>
+<a name="ln1045"> </a>
+<a name="ln1046">        have_proc_pid = 1;</a>
+<a name="ln1047">        if(readlink(proc_path, exe_path, PATH_MAX - 1) &lt; 0) {</a>
+<a name="ln1048">            have_proc_pid = -1;</a>
+<a name="ln1049">        }</a>
+<a name="ln1050">    }</a>
+<a name="ln1051"> </a>
+<a name="ln1052">    if (pid &lt;= 0) {</a>
+<a name="ln1053">        return -1;</a>
+<a name="ln1054"> </a>
+<a name="ln1055">    } else if (kill(pid, 0) &lt; 0 &amp;&amp; errno == ESRCH) {</a>
+<a name="ln1056">        return 0;</a>
+<a name="ln1057"> </a>
+<a name="ln1058">    } else if(daemon == NULL || have_proc_pid == -1) {</a>
+<a name="ln1059">        return 1;</a>
+<a name="ln1060"> </a>
+<a name="ln1061">    } else {</a>
+<a name="ln1062">        int rc = 0;</a>
+<a name="ln1063">        char proc_path[PATH_MAX], exe_path[PATH_MAX], myexe_path[PATH_MAX];</a>
+<a name="ln1064"> </a>
+<a name="ln1065">        /* check to make sure pid hasn't been reused by another process */</a>
+<a name="ln1066">        snprintf(proc_path, sizeof(proc_path), &quot;/proc/%lu/exe&quot;, pid);</a>
+<a name="ln1067"> </a>
+<a name="ln1068">        rc = readlink(proc_path, exe_path, PATH_MAX - 1);</a>
+<a name="ln1069">        if (rc &lt; 0 &amp;&amp; errno == EACCES) {</a>
+<a name="ln1070">            crm_perror(LOG_INFO, &quot;Could not read from %s&quot;, proc_path);</a>
+<a name="ln1071">            return 1;</a>
+<a name="ln1072">        } else if (rc &lt; 0) {</a>
+<a name="ln1073">            crm_perror(LOG_ERR, &quot;Could not read from %s&quot;, proc_path);</a>
+<a name="ln1074">            return 0;</a>
+<a name="ln1075">        }</a>
+<a name="ln1076">        </a>
+<a name="ln1077"> </a>
+<a name="ln1078">        exe_path[rc] = 0;</a>
+<a name="ln1079"> </a>
+<a name="ln1080">        if(daemon[0] != '/') {</a>
+<a name="ln1081">            rc = snprintf(myexe_path, sizeof(proc_path), CRM_DAEMON_DIR&quot;/%s&quot;, daemon);</a>
+<a name="ln1082">            myexe_path[rc] = 0;</a>
+<a name="ln1083">        } else {</a>
+<a name="ln1084">            rc = snprintf(myexe_path, sizeof(proc_path), &quot;%s&quot;, daemon);</a>
+<a name="ln1085">            myexe_path[rc] = 0;</a>
+<a name="ln1086">        }</a>
+<a name="ln1087">        </a>
+<a name="ln1088">        if (strcmp(exe_path, myexe_path) == 0) {</a>
+<a name="ln1089">            return 1;</a>
+<a name="ln1090">        }</a>
+<a name="ln1091">    }</a>
+<a name="ln1092"> </a>
+<a name="ln1093">    return 0;</a>
+<a name="ln1094">}</a>
+<a name="ln1095"> </a>
+<a name="ln1096">#define	LOCKSTRLEN	11</a>
+<a name="ln1097"> </a>
+<a name="ln1098">long</a>
+<a name="ln1099">crm_read_pidfile(const char *filename)</a>
+<a name="ln1100">{</a>
+<a name="ln1101">    int fd;</a>
+<a name="ln1102">    struct stat sbuf;</a>
+<a name="ln1103">    long pid = -ENOENT;</a>
+<a name="ln1104">    char buf[LOCKSTRLEN + 1];</a>
+<a name="ln1105"> </a>
+<a name="ln1106">    if ((fd = open(filename, O_RDONLY)) &lt; 0) {</a>
+<a name="ln1107">        goto bail;</a>
+<a name="ln1108">    }</a>
+<a name="ln1109"> </a>
+<a name="ln1110">    if (fstat(fd, &amp;sbuf) &gt;= 0 &amp;&amp; sbuf.st_size &lt; LOCKSTRLEN) {</a>
+<a name="ln1111">        sleep(2);           /* if someone was about to create one,</a>
+<a name="ln1112">                             * give'm a sec to do so</a>
+<a name="ln1113">                             */</a>
+<a name="ln1114">    }</a>
+<a name="ln1115"> </a>
+<a name="ln1116">    if (read(fd, buf, sizeof(buf)) &lt; 1) {</a>
+<a name="ln1117">        goto bail;</a>
+<a name="ln1118">    }</a>
+<a name="ln1119"> </a>
+<a name="ln1120">    if (sscanf(buf, &quot;%lu&quot;, &amp;pid) &gt; 0) {</a>
+<a name="ln1121">        if (pid &lt;= 0) {</a>
+<a name="ln1122">            pid = -ESRCH;</a>
+<a name="ln1123">        } else {</a>
+<a name="ln1124">            crm_trace(&quot;Got pid %lu from %s\n&quot;, pid, filename);</a>
+<a name="ln1125">        }</a>
+<a name="ln1126">    }</a>
+<a name="ln1127"> </a>
+<a name="ln1128">  bail:</a>
+<a name="ln1129">    if (fd &gt;= 0) {</a>
+<a name="ln1130">        close(fd);</a>
+<a name="ln1131">    }</a>
+<a name="ln1132">    return pid;</a>
+<a name="ln1133">}</a>
+<a name="ln1134"> </a>
+<a name="ln1135">long</a>
+<a name="ln1136">crm_pidfile_inuse(const char *filename, long mypid, const char *daemon)</a>
+<a name="ln1137">{</a>
+<a name="ln1138">    long pid = crm_read_pidfile(filename);</a>
+<a name="ln1139"> </a>
+<a name="ln1140">    if (pid &lt; 2) {</a>
+<a name="ln1141">        /* Invalid pid */</a>
+<a name="ln1142">        pid = -ENOENT;</a>
+<a name="ln1143">        unlink(filename);</a>
+<a name="ln1144"> </a>
+<a name="ln1145">    } else if (mypid &amp;&amp; pid == mypid) {</a>
+<a name="ln1146">        /* In use by us */</a>
+<a name="ln1147">        pid = pcmk_ok;</a>
+<a name="ln1148"> </a>
+<a name="ln1149">    } else if (crm_pid_active(pid, daemon) == FALSE) {</a>
+<a name="ln1150">        /* Contains a stale value */</a>
+<a name="ln1151">        unlink(filename);</a>
+<a name="ln1152">        pid = -ENOENT;</a>
+<a name="ln1153"> </a>
+<a name="ln1154">    } else if (mypid &amp;&amp; pid != mypid) {</a>
+<a name="ln1155">        /* locked by existing process - give up */</a>
+<a name="ln1156">        pid = -EEXIST;</a>
+<a name="ln1157">    }</a>
+<a name="ln1158"> </a>
+<a name="ln1159">    return pid;</a>
+<a name="ln1160">}</a>
+<a name="ln1161"> </a>
+<a name="ln1162">static int</a>
+<a name="ln1163">crm_lock_pidfile(const char *filename, const char *name)</a>
+<a name="ln1164">{</a>
+<a name="ln1165">    long mypid = 0;</a>
+<a name="ln1166">    int fd = 0, rc = 0;</a>
+<a name="ln1167">    char buf[LOCKSTRLEN + 1];</a>
+<a name="ln1168"> </a>
+<a name="ln1169">    mypid = (unsigned long)getpid();</a>
+<a name="ln1170"> </a>
+<a name="ln1171">    rc = crm_pidfile_inuse(filename, 0, name);</a>
+<a name="ln1172">    if (rc == -ENOENT) {</a>
+<a name="ln1173">        /* exists but the process is not active */</a>
+<a name="ln1174"> </a>
+<a name="ln1175">    } else if (rc != pcmk_ok) {</a>
+<a name="ln1176">        /* locked by existing process - give up */</a>
+<a name="ln1177">        return rc;</a>
+<a name="ln1178">    }</a>
+<a name="ln1179"> </a>
+<a name="ln1180">    if ((fd = open(filename, O_CREAT | O_WRONLY | O_EXCL, 0644)) &lt; 0) {</a>
+<a name="ln1181">        /* Hmmh, why did we fail? Anyway, nothing we can do about it */</a>
+<a name="ln1182">        return -errno;</a>
+<a name="ln1183">    }</a>
+<a name="ln1184"> </a>
+<a name="ln1185">    snprintf(buf, sizeof(buf), &quot;%*lu\n&quot;, LOCKSTRLEN - 1, mypid);</a>
+<a name="ln1186">    rc = write(fd, buf, LOCKSTRLEN);</a>
+<a name="ln1187">    close(fd);</a>
+<a name="ln1188"> </a>
+<a name="ln1189">    if (rc != LOCKSTRLEN) {</a>
+<a name="ln1190">        crm_perror(LOG_ERR, &quot;Incomplete write to %s&quot;, filename);</a>
+<a name="ln1191">        return -errno;</a>
+<a name="ln1192">    }</a>
+<a name="ln1193"> </a>
+<a name="ln1194">    return crm_pidfile_inuse(filename, mypid, name);</a>
+<a name="ln1195">}</a>
+<a name="ln1196"> </a>
+<a name="ln1197">void</a>
+<a name="ln1198">crm_make_daemon(const char *name, gboolean daemonize, const char *pidfile)</a>
+<a name="ln1199">{</a>
+<a name="ln1200">    int rc;</a>
+<a name="ln1201">    long pid;</a>
+<a name="ln1202">    const char *devnull = &quot;/dev/null&quot;;</a>
+<a name="ln1203"> </a>
+<a name="ln1204">    if (daemonize == FALSE) {</a>
+<a name="ln1205">        return;</a>
+<a name="ln1206">    }</a>
+<a name="ln1207"> </a>
+<a name="ln1208">    /* Check before we even try... */</a>
+<a name="ln1209">    rc = crm_pidfile_inuse(pidfile, 1, name);</a>
+<a name="ln1210">    if(rc &lt; pcmk_ok &amp;&amp; rc != -ENOENT) {</a>
+<a name="ln1211">        pid = crm_read_pidfile(pidfile);</a>
+<a name="ln1212">        crm_err(&quot;%s: already running [pid %ld in %s]&quot;, name, pid, pidfile);</a>
+<a name="ln1213">        printf(&quot;%s: already running [pid %ld in %s]\n&quot;, name, pid, pidfile);</a>
+<a name="ln1214">        crm_exit(rc);</a>
+<a name="ln1215">    }</a>
+<a name="ln1216"> </a>
+<a name="ln1217">    pid = fork();</a>
+<a name="ln1218">    if (pid &lt; 0) {</a>
+<a name="ln1219">        fprintf(stderr, &quot;%s: could not start daemon\n&quot;, name);</a>
+<a name="ln1220">        crm_perror(LOG_ERR, &quot;fork&quot;);</a>
+<a name="ln1221">        crm_exit(EINVAL);</a>
+<a name="ln1222"> </a>
+<a name="ln1223">    } else if (pid &gt; 0) {</a>
+<a name="ln1224">        crm_exit(pcmk_ok);</a>
+<a name="ln1225">    }</a>
+<a name="ln1226"> </a>
+<a name="ln1227">    rc = crm_lock_pidfile(pidfile, name);</a>
+<a name="ln1228">    if(rc &lt; pcmk_ok) {</a>
+<a name="ln1229">        crm_err(&quot;Could not lock '%s' for %s: %s (%d)&quot;, pidfile, name, pcmk_strerror(rc), rc);</a>
+<a name="ln1230">        printf(&quot;Could not lock '%s' for %s: %s (%d)\n&quot;, pidfile, name, pcmk_strerror(rc), rc);</a>
+<a name="ln1231">        crm_exit(rc);</a>
+<a name="ln1232">    }</a>
+<a name="ln1233"> </a>
+<a name="ln1234">    umask(S_IWGRP | S_IWOTH | S_IROTH);</a>
+<a name="ln1235"> </a>
+<a name="ln1236">    close(STDIN_FILENO);</a>
+<a name="ln1237">    (void)open(devnull, O_RDONLY);      /* Stdin:  fd 0 */</a>
+<a name="ln1238">    close(STDOUT_FILENO);</a>
+<a name="ln1239">    (void)open(devnull, O_WRONLY);      /* Stdout: fd 1 */</a>
+<a name="ln1240">    close(STDERR_FILENO);</a>
+<a name="ln1241">    (void)open(devnull, O_WRONLY);      /* Stderr: fd 2 */</a>
+<a name="ln1242">}</a>
+<a name="ln1243"> </a>
+<a name="ln1244">char *</a>
+<a name="ln1245">crm_meta_name(const char *field)</a>
+<a name="ln1246">{</a>
+<a name="ln1247">    int lpc = 0;</a>
+<a name="ln1248">    int max = 0;</a>
+<a name="ln1249">    char *crm_name = NULL;</a>
+<a name="ln1250"> </a>
+<a name="ln1251">    CRM_CHECK(field != NULL, return NULL);</a>
+<a name="ln1252">    crm_name = crm_concat(CRM_META, field, '_');</a>
+<a name="ln1253"> </a>
+<a name="ln1254">    /* Massage the names so they can be used as shell variables */</a>
+<a name="ln1255">    max = strlen(crm_name);</a>
+<a name="ln1256">    for (; lpc &lt; max; lpc++) {</a>
+<a name="ln1257">        switch (crm_name[lpc]) {</a>
+<a name="ln1258">            case '-':</a>
+<a name="ln1259">                crm_name[lpc] = '_';</a>
+<a name="ln1260">                break;</a>
+<a name="ln1261">        }</a>
+<a name="ln1262">    }</a>
+<a name="ln1263">    return crm_name;</a>
+<a name="ln1264">}</a>
+<a name="ln1265"> </a>
+<a name="ln1266">const char *</a>
+<a name="ln1267">crm_meta_value(GHashTable * hash, const char *field)</a>
+<a name="ln1268">{</a>
+<a name="ln1269">    char *key = NULL;</a>
+<a name="ln1270">    const char *value = NULL;</a>
+<a name="ln1271"> </a>
+<a name="ln1272">    key = crm_meta_name(field);</a>
+<a name="ln1273">    if (key) {</a>
+<a name="ln1274">        value = g_hash_table_lookup(hash, key);</a>
+<a name="ln1275">        free(key);</a>
+<a name="ln1276">    }</a>
+<a name="ln1277"> </a>
+<a name="ln1278">    return value;</a>
+<a name="ln1279">}</a>
+<a name="ln1280"> </a>
+<a name="ln1281">static struct option *</a>
+<a name="ln1282">crm_create_long_opts(struct crm_option *long_options)</a>
+<a name="ln1283">{</a>
+<a name="ln1284">    struct option *long_opts = NULL;</a>
+<a name="ln1285"> </a>
+<a name="ln1286">#ifdef HAVE_GETOPT_H</a>
+<a name="ln1287">    int index = 0, lpc = 0;</a>
+<a name="ln1288"> </a>
+<a name="ln1289">    /*</a>
+<a name="ln1290">     * A previous, possibly poor, choice of '?' as the short form of --help</a>
+<a name="ln1291">     * means that getopt_long() returns '?' for both --help and for &quot;unknown option&quot;</a>
+<a name="ln1292">     *</a>
+<a name="ln1293">     * This dummy entry allows us to differentiate between the two in crm_get_option()</a>
+<a name="ln1294">     * and exit with the correct error code</a>
+<a name="ln1295">     */</a>
+<a name="ln1296">    long_opts = realloc_safe(long_opts, (index + 1) * sizeof(struct option));</a>
+<a name="ln1297">    long_opts[index].name = &quot;__dummmy__&quot;;</a>
+<a name="ln1298">    long_opts[index].has_arg = 0;</a>
+<a name="ln1299">    long_opts[index].flag = 0;</a>
+<a name="ln1300">    long_opts[index].val = '_';</a>
+<a name="ln1301">    index++;</a>
+<a name="ln1302"> </a>
+<a name="ln1303">    for (lpc = 0; long_options[lpc].name != NULL; lpc++) {</a>
+<a name="ln1304">        if (long_options[lpc].name[0] == '-') {</a>
+<a name="ln1305">            continue;</a>
+<a name="ln1306">        }</a>
+<a name="ln1307"> </a>
+<a name="ln1308">        long_opts = realloc_safe(long_opts, (index + 1) * sizeof(struct option));</a>
+<a name="ln1309">        /*fprintf(stderr, &quot;Creating %d %s = %c\n&quot;, index,</a>
+<a name="ln1310">         * long_options[lpc].name, long_options[lpc].val);      */</a>
+<a name="ln1311">        long_opts[index].name = long_options[lpc].name;</a>
+<a name="ln1312">        long_opts[index].has_arg = long_options[lpc].has_arg;</a>
+<a name="ln1313">        long_opts[index].flag = long_options[lpc].flag;</a>
+<a name="ln1314">        long_opts[index].val = long_options[lpc].val;</a>
+<a name="ln1315">        index++;</a>
+<a name="ln1316">    }</a>
+<a name="ln1317"> </a>
+<a name="ln1318">    /* Now create the list terminator */</a>
+<a name="ln1319">    long_opts = realloc_safe(long_opts, (index + 1) * sizeof(struct option));</a>
+<a name="ln1320">    long_opts[index].name = NULL;</a>
+<a name="ln1321">    long_opts[index].has_arg = 0;</a>
+<a name="ln1322">    long_opts[index].flag = 0;</a>
+<a name="ln1323">    long_opts[index].val = 0;</a>
+<a name="ln1324">#endif</a>
+<a name="ln1325"> </a>
+<a name="ln1326">    return long_opts;</a>
+<a name="ln1327">}</a>
+<a name="ln1328"> </a>
+<a name="ln1329">void</a>
+<a name="ln1330">crm_set_options(const char *short_options, const char *app_usage, struct crm_option *long_options,</a>
+<a name="ln1331">                const char *app_desc)</a>
+<a name="ln1332">{</a>
+<a name="ln1333">    if (short_options) {</a>
+<a name="ln1334">        crm_short_options = strdup(short_options);</a>
+<a name="ln1335"> </a>
+<a name="ln1336">    } else if (long_options) {</a>
+<a name="ln1337">        int lpc = 0;</a>
+<a name="ln1338">        int opt_string_len = 0;</a>
+<a name="ln1339">        char *local_short_options = NULL;</a>
+<a name="ln1340"> </a>
+<a name="ln1341">        for (lpc = 0; long_options[lpc].name != NULL; lpc++) {</a>
+<a name="ln1342">            if (long_options[lpc].val &amp;&amp; long_options[lpc].val != '-' &amp;&amp; long_options[lpc].val &lt; UCHAR_MAX) {</a>
+<a name="ln1343">                local_short_options = realloc_safe(local_short_options, opt_string_len + 4);</a>
+<a name="ln1344">                local_short_options[opt_string_len++] = long_options[lpc].val;</a>
+<a name="ln1345">                /* getopt(3) says: Two colons mean an option takes an optional arg; */</a>
+<a name="ln1346">                if (long_options[lpc].has_arg == optional_argument) {</a>
+<a name="ln1347">                    local_short_options[opt_string_len++] = ':';</a>
+<a name="ln1348">                }</a>
+<a name="ln1349">                if (long_options[lpc].has_arg &gt;= required_argument) {</a>
+<a name="ln1350">                    local_short_options[opt_string_len++] = ':';</a>
+<a name="ln1351">                }</a>
+<a name="ln1352">                local_short_options[opt_string_len] = 0;</a>
+<a name="ln1353">            }</a>
+<a name="ln1354">        }</a>
+<a name="ln1355">        crm_short_options = local_short_options;</a>
+<a name="ln1356">        crm_trace(&quot;Generated short option string: '%s'&quot;, local_short_options);</a>
+<a name="ln1357">    }</a>
+<a name="ln1358"> </a>
+<a name="ln1359">    if (long_options) {</a>
+<a name="ln1360">        crm_long_options = long_options;</a>
+<a name="ln1361">    }</a>
+<a name="ln1362">    if (app_desc) {</a>
+<a name="ln1363">        crm_app_description = app_desc;</a>
+<a name="ln1364">    }</a>
+<a name="ln1365">    if (app_usage) {</a>
+<a name="ln1366">        crm_app_usage = app_usage;</a>
+<a name="ln1367">    }</a>
+<a name="ln1368">}</a>
+<a name="ln1369"> </a>
+<a name="ln1370">int</a>
+<a name="ln1371">crm_get_option(int argc, char **argv, int *index)</a>
+<a name="ln1372">{</a>
+<a name="ln1373">    return crm_get_option_long(argc, argv, index, NULL);</a>
+<a name="ln1374">}</a>
+<a name="ln1375"> </a>
+<a name="ln1376">int</a>
+<a name="ln1377">crm_get_option_long(int argc, char **argv, int *index, const char **longname)</a>
+<a name="ln1378">{</a>
+<a name="ln1379">#ifdef HAVE_GETOPT_H</a>
+<a name="ln1380">    static struct option *long_opts = NULL;</a>
+<a name="ln1381"> </a>
+<a name="ln1382">    if (long_opts == NULL &amp;&amp; crm_long_options) {</a>
+<a name="ln1383">        long_opts = crm_create_long_opts(crm_long_options);</a>
+<a name="ln1384">    }</a>
+<a name="ln1385"> </a>
+<a name="ln1386">    *index = 0;</a>
+<a name="ln1387">    if (long_opts) {</a>
+<a name="ln1388">        int flag = getopt_long(argc, argv, crm_short_options, long_opts, index);</a>
+<a name="ln1389"> </a>
+<a name="ln1390">        switch (flag) {</a>
+<a name="ln1391">            case 0:</a>
+<a name="ln1392">                if (long_opts[*index].val) {</a>
+<a name="ln1393">                    return long_opts[*index].val;</a>
+<a name="ln1394">                } else if (longname) {</a>
+<a name="ln1395">                    *longname = long_opts[*index].name;</a>
+<a name="ln1396">                } else {</a>
+<a name="ln1397">                    crm_notice(&quot;Unhandled option --%s&quot;, long_opts[*index].name);</a>
+<a name="ln1398">                    return flag;</a>
+<a name="ln1399">                }</a>
+<a name="ln1400">            case -1:           /* End of option processing */</a>
+<a name="ln1401">                break;</a>
+<a name="ln1402">            case ':':</a>
+<a name="ln1403">                crm_trace(&quot;Missing argument&quot;);</a>
+<a name="ln1404">                crm_help('?', 1);</a>
+<a name="ln1405">                break;</a>
+<a name="ln1406">            case '?':</a>
+<a name="ln1407">                crm_help('?', *index ? 0 : 1);</a>
+<a name="ln1408">                break;</a>
+<a name="ln1409">        }</a>
+<a name="ln1410">        return flag;</a>
+<a name="ln1411">    }</a>
+<a name="ln1412">#endif</a>
+<a name="ln1413"> </a>
+<a name="ln1414">    if (crm_short_options) {</a>
+<a name="ln1415">        return getopt(argc, argv, crm_short_options);</a>
+<a name="ln1416">    }</a>
+<a name="ln1417"> </a>
+<a name="ln1418">    return -1;</a>
+<a name="ln1419">}</a>
+<a name="ln1420"> </a>
+<a name="ln1421">int</a>
+<a name="ln1422">crm_help(char cmd, int exit_code)</a>
+<a name="ln1423">{</a>
+<a name="ln1424">    int i = 0;</a>
+<a name="ln1425">    FILE *stream = (exit_code ? stderr : stdout);</a>
+<a name="ln1426"> </a>
+<a name="ln1427">    if (cmd == 'v' || cmd == '$') {</a>
+<a name="ln1428">        fprintf(stream, &quot;Pacemaker %s\n&quot;, PACEMAKER_VERSION);</a>
+<a name="ln1429">        fprintf(stream, &quot;Written by Andrew Beekhof\n&quot;);</a>
+<a name="ln1430">        goto out;</a>
+<a name="ln1431">    }</a>
+<a name="ln1432"> </a>
+<a name="ln1433">    if (cmd == '!') {</a>
+<a name="ln1434">        fprintf(stream, &quot;Pacemaker %s (Build: %s): %s\n&quot;, PACEMAKER_VERSION, BUILD_VERSION, CRM_FEATURES);</a>
+<a name="ln1435">        goto out;</a>
+<a name="ln1436">    }</a>
+<a name="ln1437"> </a>
+<a name="ln1438">    fprintf(stream, &quot;%s - %s\n&quot;, crm_system_name, crm_app_description);</a>
+<a name="ln1439"> </a>
+<a name="ln1440">    if (crm_app_usage) {</a>
+<a name="ln1441">        fprintf(stream, &quot;Usage: %s %s\n&quot;, crm_system_name, crm_app_usage);</a>
+<a name="ln1442">    }</a>
+<a name="ln1443"> </a>
+<a name="ln1444">    if (crm_long_options) {</a>
+<a name="ln1445">        fprintf(stream, &quot;Options:\n&quot;);</a>
+<a name="ln1446">        for (i = 0; crm_long_options[i].name != NULL; i++) {</a>
+<a name="ln1447">            if (crm_long_options[i].flags &amp; pcmk_option_hidden) {</a>
+<a name="ln1448"> </a>
+<a name="ln1449">            } else if (crm_long_options[i].flags &amp; pcmk_option_paragraph) {</a>
+<a name="ln1450">                fprintf(stream, &quot;%s\n\n&quot;, crm_long_options[i].desc);</a>
+<a name="ln1451"> </a>
+<a name="ln1452">            } else if (crm_long_options[i].flags &amp; pcmk_option_example) {</a>
+<a name="ln1453">                fprintf(stream, &quot;\t#%s\n\n&quot;, crm_long_options[i].desc);</a>
+<a name="ln1454"> </a>
+<a name="ln1455">            } else if (crm_long_options[i].val == '-' &amp;&amp; crm_long_options[i].desc) {</a>
+<a name="ln1456">                fprintf(stream, &quot;%s\n&quot;, crm_long_options[i].desc);</a>
+<a name="ln1457"> </a>
+<a name="ln1458">            } else {</a>
+<a name="ln1459">                /* is val printable as char ? */</a>
+<a name="ln1460">                if (crm_long_options[i].val &amp;&amp; crm_long_options[i].val &lt;= UCHAR_MAX) {</a>
+<a name="ln1461">                    fprintf(stream, &quot; -%c,&quot;, crm_long_options[i].val);</a>
+<a name="ln1462">                } else {</a>
+<a name="ln1463">                    fputs(&quot;    &quot;, stream);</a>
+<a name="ln1464">                }</a>
+<a name="ln1465">                fprintf(stream, &quot; --%s%s\t%s\n&quot;, crm_long_options[i].name,</a>
+<a name="ln1466">                        crm_long_options[i].has_arg == optional_argument ? &quot;[=value]&quot; :</a>
+<a name="ln1467">                        crm_long_options[i].has_arg == required_argument ? &quot;=value&quot; : &quot;&quot;,</a>
+<a name="ln1468">                        crm_long_options[i].desc ? crm_long_options[i].desc : &quot;&quot;);</a>
+<a name="ln1469">            }</a>
+<a name="ln1470">        }</a>
+<a name="ln1471"> </a>
+<a name="ln1472">    } else if (crm_short_options) {</a>
+<a name="ln1473">        fprintf(stream, &quot;Usage: %s - %s\n&quot;, crm_system_name, crm_app_description);</a>
+<a name="ln1474">        for (i = 0; crm_short_options[i] != 0; i++) {</a>
+<a name="ln1475">            int has_arg = no_argument /* 0 */;</a>
+<a name="ln1476"> </a>
+<a name="ln1477">            if (crm_short_options[i + 1] == ':') {</a>
+<a name="ln1478">                if (crm_short_options[i + 2] == ':')</a>
+<a name="ln1479">                    has_arg = optional_argument /* 2 */;</a>
+<a name="ln1480">                else</a>
+<a name="ln1481">                    has_arg = required_argument /* 1 */;</a>
+<a name="ln1482">            }</a>
+<a name="ln1483"> </a>
+<a name="ln1484">            fprintf(stream, &quot; -%c %s\n&quot;, crm_short_options[i],</a>
+<a name="ln1485">                    has_arg == optional_argument ? &quot;[value]&quot; :</a>
+<a name="ln1486">                    has_arg == required_argument ? &quot;{value}&quot; : &quot;&quot;);</a>
+<a name="ln1487">            i += has_arg;</a>
+<a name="ln1488">        }</a>
+<a name="ln1489">    }</a>
+<a name="ln1490"> </a>
+<a name="ln1491">    fprintf(stream, &quot;\nReport bugs to %s\n&quot;, PACKAGE_BUGREPORT);</a>
+<a name="ln1492"> </a>
+<a name="ln1493">  out:</a>
+<a name="ln1494">    return crm_exit(exit_code);</a>
+<a name="ln1495">}</a>
+<a name="ln1496"> </a>
+<a name="ln1497">void cib_ipc_servers_init(qb_ipcs_service_t **ipcs_ro,</a>
+<a name="ln1498">        qb_ipcs_service_t **ipcs_rw,</a>
+<a name="ln1499">        qb_ipcs_service_t **ipcs_shm,</a>
+<a name="ln1500">        struct qb_ipcs_service_handlers *ro_cb,</a>
+<a name="ln1501">        struct qb_ipcs_service_handlers *rw_cb)</a>
+<a name="ln1502">{</a>
+<a name="ln1503">    *ipcs_ro = mainloop_add_ipc_server(cib_channel_ro, QB_IPC_NATIVE, ro_cb);</a>
+<a name="ln1504">    *ipcs_rw = mainloop_add_ipc_server(cib_channel_rw, QB_IPC_NATIVE, rw_cb);</a>
+<a name="ln1505">    *ipcs_shm = mainloop_add_ipc_server(cib_channel_shm, QB_IPC_SHM, rw_cb);</a>
+<a name="ln1506"> </a>
+<a name="ln1507">    if (*ipcs_ro == NULL || *ipcs_rw == NULL || *ipcs_shm == NULL) {</a>
+<a name="ln1508">        crm_err(&quot;Failed to create cib servers: exiting and inhibiting respawn.&quot;);</a>
+<a name="ln1509">        crm_warn(&quot;Verify pacemaker and pacemaker_remote are not both enabled.&quot;);</a>
+<a name="ln1510">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln1511">    }</a>
+<a name="ln1512">}</a>
+<a name="ln1513"> </a>
+<a name="ln1514">void cib_ipc_servers_destroy(qb_ipcs_service_t *ipcs_ro,</a>
+<a name="ln1515">        qb_ipcs_service_t *ipcs_rw,</a>
+<a name="ln1516">        qb_ipcs_service_t *ipcs_shm)</a>
+<a name="ln1517">{</a>
+<a name="ln1518">    qb_ipcs_destroy(ipcs_ro);</a>
+<a name="ln1519">    qb_ipcs_destroy(ipcs_rw);</a>
+<a name="ln1520">    qb_ipcs_destroy(ipcs_shm);</a>
+<a name="ln1521">}</a>
+<a name="ln1522"> </a>
+<a name="ln1523">qb_ipcs_service_t *</a>
+<a name="ln1524">crmd_ipc_server_init(struct qb_ipcs_service_handlers *cb)</a>
+<a name="ln1525">{</a>
+<a name="ln1526">    return mainloop_add_ipc_server(CRM_SYSTEM_CRMD, QB_IPC_NATIVE, cb);</a>
+<a name="ln1527">}</a>
+<a name="ln1528"> </a>
+<a name="ln1529">void</a>
+<a name="ln1530">attrd_ipc_server_init(qb_ipcs_service_t **ipcs, struct qb_ipcs_service_handlers *cb)</a>
+<a name="ln1531">{</a>
+<a name="ln1532">    *ipcs = mainloop_add_ipc_server(T_ATTRD, QB_IPC_NATIVE, cb);</a>
+<a name="ln1533"> </a>
+<a name="ln1534">    if (*ipcs == NULL) {</a>
+<a name="ln1535">        crm_err(&quot;Failed to create attrd servers: exiting and inhibiting respawn.&quot;);</a>
+<a name="ln1536">        crm_warn(&quot;Verify pacemaker and pacemaker_remote are not both enabled.&quot;);</a>
+<a name="ln1537">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln1538">    }</a>
+<a name="ln1539">}</a>
+<a name="ln1540"> </a>
+<a name="ln1541">void</a>
+<a name="ln1542">stonith_ipc_server_init(qb_ipcs_service_t **ipcs, struct qb_ipcs_service_handlers *cb)</a>
+<a name="ln1543">{</a>
+<a name="ln1544">    *ipcs = mainloop_add_ipc_server(&quot;stonith-ng&quot;, QB_IPC_NATIVE, cb);</a>
+<a name="ln1545"> </a>
+<a name="ln1546">    if (*ipcs == NULL) {</a>
+<a name="ln1547">        crm_err(&quot;Failed to create stonith-ng servers: exiting and inhibiting respawn.&quot;);</a>
+<a name="ln1548">        crm_warn(&quot;Verify pacemaker and pacemaker_remote are not both enabled.&quot;);</a>
+<a name="ln1549">        crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln1550">    }</a>
+<a name="ln1551">}</a>
+<a name="ln1552"> </a>
+<a name="ln1553">#define FAKE_TE_ID	&quot;xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx&quot;</a>
+<a name="ln1554">static void</a>
+<a name="ln1555">append_digest(lrmd_event_data_t * op, xmlNode * update, const char *version, const char *magic,</a>
+<a name="ln1556">              int level)</a>
+<a name="ln1557">{</a>
+<a name="ln1558">    /* this will enable us to later determine that the</a>
+<a name="ln1559">     *   resource's parameters have changed and we should force</a>
+<a name="ln1560">     *   a restart</a>
+<a name="ln1561">     */</a>
+<a name="ln1562">    char *digest = NULL;</a>
+<a name="ln1563">    xmlNode *args_xml = NULL;</a>
+<a name="ln1564"> </a>
+<a name="ln1565">    if (op-&gt;params == NULL) {</a>
+<a name="ln1566">        return;</a>
+<a name="ln1567">    }</a>
+<a name="ln1568"> </a>
+<a name="ln1569">    args_xml = create_xml_node(NULL, XML_TAG_PARAMS);</a>
+<a name="ln1570">    g_hash_table_foreach(op-&gt;params, hash2field, args_xml);</a>
+<a name="ln1571">    filter_action_parameters(args_xml, version);</a>
+<a name="ln1572">    digest = calculate_operation_digest(args_xml, version);</a>
+<a name="ln1573"> </a>
+<a name="ln1574">#if 0</a>
+<a name="ln1575">    if (level &lt; get_crm_log_level()</a>
+<a name="ln1576">        &amp;&amp; op-&gt;interval == 0 &amp;&amp; crm_str_eq(op-&gt;op_type, CRMD_ACTION_START, TRUE)) {</a>
+<a name="ln1577">        char *digest_source = dump_xml_unformatted(args_xml);</a>
+<a name="ln1578"> </a>
+<a name="ln1579">        do_crm_log(level, &quot;Calculated digest %s for %s (%s). Source: %s\n&quot;,</a>
+<a name="ln1580">                   digest, ID(update), magic, digest_source);</a>
+<a name="ln1581">        free(digest_source);</a>
+<a name="ln1582">    }</a>
+<a name="ln1583">#endif</a>
+<a name="ln1584">    crm_xml_add(update, XML_LRM_ATTR_OP_DIGEST, digest);</a>
+<a name="ln1585"> </a>
+<a name="ln1586">    free_xml(args_xml);</a>
+<a name="ln1587">    free(digest);</a>
+<a name="ln1588">}</a>
+<a name="ln1589"> </a>
+<a name="ln1590">int</a>
+<a name="ln1591">rsc_op_expected_rc(lrmd_event_data_t * op)</a>
+<a name="ln1592">{</a>
+<a name="ln1593">    int rc = 0;</a>
+<a name="ln1594"> </a>
+<a name="ln1595">    if (op &amp;&amp; op-&gt;user_data) {</a>
+<a name="ln1596">        int dummy = 0;</a>
+<a name="ln1597">        char *uuid = NULL;</a>
+<a name="ln1598"> </a>
+<a name="ln1599">        decode_transition_key(op-&gt;user_data, &amp;uuid, &amp;dummy, &amp;dummy, &amp;rc);</a>
+<a name="ln1600">        free(uuid);</a>
+<a name="ln1601">    }</a>
+<a name="ln1602">    return rc;</a>
+<a name="ln1603">}</a>
+<a name="ln1604"> </a>
+<a name="ln1605">gboolean</a>
+<a name="ln1606">did_rsc_op_fail(lrmd_event_data_t * op, int target_rc)</a>
+<a name="ln1607">{</a>
+<a name="ln1608">    switch (op-&gt;op_status) {</a>
+<a name="ln1609">        case PCMK_LRM_OP_CANCELLED:</a>
+<a name="ln1610">        case PCMK_LRM_OP_PENDING:</a>
+<a name="ln1611">            return FALSE;</a>
+<a name="ln1612">            break;</a>
+<a name="ln1613"> </a>
+<a name="ln1614">        case PCMK_LRM_OP_NOTSUPPORTED:</a>
+<a name="ln1615">        case PCMK_LRM_OP_TIMEOUT:</a>
+<a name="ln1616">        case PCMK_LRM_OP_ERROR:</a>
+<a name="ln1617">            return TRUE;</a>
+<a name="ln1618">            break;</a>
+<a name="ln1619"> </a>
+<a name="ln1620">        default:</a>
+<a name="ln1621">            if (target_rc != op-&gt;rc) {</a>
+<a name="ln1622">                return TRUE;</a>
+<a name="ln1623">            }</a>
+<a name="ln1624">    }</a>
+<a name="ln1625"> </a>
+<a name="ln1626">    return FALSE;</a>
+<a name="ln1627">}</a>
+<a name="ln1628"> </a>
+<a name="ln1629">xmlNode *</a>
+<a name="ln1630">create_operation_update(xmlNode * parent, lrmd_event_data_t * op, const char * caller_version,</a>
+<a name="ln1631">                        int target_rc, const char * node, const char * origin, int level)</a>
+<a name="ln1632">{</a>
+<a name="ln1633">    char *key = NULL;</a>
+<a name="ln1634">    char *magic = NULL;</a>
+<a name="ln1635">    char *op_id = NULL;</a>
+<a name="ln1636">    char *op_id_additional = NULL;</a>
+<a name="ln1637">    char *local_user_data = NULL;</a>
+<a name="ln1638">    const char *exit_reason = NULL;</a>
+<a name="ln1639"> </a>
+<a name="ln1640">    xmlNode *xml_op = NULL;</a>
+<a name="ln1641">    const char *task = NULL;</a>
+<a name="ln1642">    gboolean dc_munges_migrate_ops = (compare_version(caller_version, &quot;3.0.3&quot;) &lt; 0);</a>
+<a name="ln1643">    gboolean dc_needs_unique_ops = (compare_version(caller_version, &quot;3.0.6&quot;) &lt; 0);</a>
+<a name="ln1644"> </a>
+<a name="ln1645">    CRM_CHECK(op != NULL, return NULL);</a>
+<a name="ln1646">    do_crm_log(level, &quot;%s: Updating resource %s after %s op %s (interval=%d)&quot;,</a>
+<a name="ln1647">               origin, op-&gt;rsc_id, op-&gt;op_type, services_lrm_status_str(op-&gt;op_status),</a>
+<a name="ln1648">               op-&gt;interval);</a>
+<a name="ln1649"> </a>
+<a name="ln1650">    crm_trace(&quot;DC version: %s&quot;, caller_version);</a>
+<a name="ln1651"> </a>
+<a name="ln1652">    task = op-&gt;op_type;</a>
+<a name="ln1653">    /* remap the task name under various scenarios</a>
+<a name="ln1654">     * this makes life easier for the PE when trying determine the current state</a>
+<a name="ln1655">     */</a>
+<a name="ln1656">    if (crm_str_eq(task, &quot;reload&quot;, TRUE)) {</a>
+<a name="ln1657">        if (op-&gt;op_status == PCMK_LRM_OP_DONE) {</a>
+<a name="ln1658">            task = CRMD_ACTION_START;</a>
+<a name="ln1659">        } else {</a>
+<a name="ln1660">            task = CRMD_ACTION_STATUS;</a>
+<a name="ln1661">        }</a>
+<a name="ln1662"> </a>
+<a name="ln1663">    } else if (dc_munges_migrate_ops &amp;&amp; crm_str_eq(task, CRMD_ACTION_MIGRATE, TRUE)) {</a>
+<a name="ln1664">        /* if the migrate_from fails it will have enough info to do the right thing */</a>
+<a name="ln1665">        if (op-&gt;op_status == PCMK_LRM_OP_DONE) {</a>
+<a name="ln1666">            task = CRMD_ACTION_STOP;</a>
+<a name="ln1667">        } else {</a>
+<a name="ln1668">            task = CRMD_ACTION_STATUS;</a>
+<a name="ln1669">        }</a>
+<a name="ln1670"> </a>
+<a name="ln1671">    } else if (dc_munges_migrate_ops</a>
+<a name="ln1672">               &amp;&amp; op-&gt;op_status == PCMK_LRM_OP_DONE</a>
+<a name="ln1673">               &amp;&amp; crm_str_eq(task, CRMD_ACTION_MIGRATED, TRUE)) {</a>
+<a name="ln1674">        task = CRMD_ACTION_START;</a>
+<a name="ln1675">    }</a>
+<a name="ln1676"> </a>
+<a name="ln1677">    key = generate_op_key(op-&gt;rsc_id, task, op-&gt;interval);</a>
+<a name="ln1678">    if (dc_needs_unique_ops &amp;&amp; op-&gt;interval &gt; 0) {</a>
+<a name="ln1679">        op_id = strdup(key);</a>
+<a name="ln1680"> </a>
+<a name="ln1681">    } else if (crm_str_eq(task, CRMD_ACTION_NOTIFY, TRUE)) {</a>
+<a name="ln1682">        const char *n_type = crm_meta_value(op-&gt;params, &quot;notify_type&quot;);</a>
+<a name="ln1683">        const char *n_task = crm_meta_value(op-&gt;params, &quot;notify_operation&quot;);</a>
+<a name="ln1684"> </a>
+<a name="ln1685">        CRM_LOG_ASSERT(n_type != NULL);</a>
+<a name="ln1686">        CRM_LOG_ASSERT(n_task != NULL);</a>
+<a name="ln1687">        op_id = generate_notify_key(op-&gt;rsc_id, n_type, n_task);</a>
+<a name="ln1688"> </a>
+<a name="ln1689">        /* these are not yet allowed to fail */</a>
+<a name="ln1690">        op-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln1691">        op-&gt;rc = 0;</a>
+<a name="ln1692"> </a>
+<a name="ln1693">    } else if (did_rsc_op_fail(op, target_rc)) {</a>
+<a name="ln1694">        op_id = generate_op_key(op-&gt;rsc_id, &quot;last_failure&quot;, 0);</a>
+<a name="ln1695">        if (op-&gt;interval == 0) {</a>
+<a name="ln1696">            /* Ensure 'last' gets updated too in case recording-pending=&quot;true&quot; */</a>
+<a name="ln1697">            op_id_additional = generate_op_key(op-&gt;rsc_id, &quot;last&quot;, 0);</a>
+<a name="ln1698">        }</a>
+<a name="ln1699">        exit_reason = op-&gt;exit_reason;</a>
+<a name="ln1700"> </a>
+<a name="ln1701">    } else if (op-&gt;interval &gt; 0) {</a>
+<a name="ln1702">        op_id = strdup(key);</a>
+<a name="ln1703"> </a>
+<a name="ln1704">    } else {</a>
+<a name="ln1705">        op_id = generate_op_key(op-&gt;rsc_id, &quot;last&quot;, 0);</a>
+<a name="ln1706">    }</a>
+<a name="ln1707"> </a>
+<a name="ln1708">  again:</a>
+<a name="ln1709">    xml_op = find_entity(parent, XML_LRM_TAG_RSC_OP, op_id);</a>
+<a name="ln1710">    if (xml_op == NULL) {</a>
+<a name="ln1711">        xml_op = create_xml_node(parent, XML_LRM_TAG_RSC_OP);</a>
+<a name="ln1712">    }</a>
+<a name="ln1713"> </a>
+<a name="ln1714">    if (op-&gt;user_data == NULL) {</a>
+<a name="ln1715">        crm_debug(&quot;Generating fake transition key for:&quot;</a>
+<a name="ln1716">                  &quot; %s_%s_%d %d from %s&quot;,</a>
+<a name="ln1717">                  op-&gt;rsc_id, op-&gt;op_type, op-&gt;interval, op-&gt;call_id, origin);</a>
+<a name="ln1718">        local_user_data = generate_transition_key(-1, op-&gt;call_id, target_rc, FAKE_TE_ID);</a>
+<a name="ln1719">        op-&gt;user_data = local_user_data;</a>
+<a name="ln1720">    }</a>
+<a name="ln1721"> </a>
+<a name="ln1722">    if(magic == NULL) {</a>
+<a name="ln1723">        magic = generate_transition_magic(op-&gt;user_data, op-&gt;op_status, op-&gt;rc);</a>
+<a name="ln1724">    }</a>
+<a name="ln1725"> </a>
+<a name="ln1726">    crm_xml_add(xml_op, XML_ATTR_ID, op_id);</a>
+<a name="ln1727">    crm_xml_add(xml_op, XML_LRM_ATTR_TASK_KEY, key);</a>
+<a name="ln1728">    crm_xml_add(xml_op, XML_LRM_ATTR_TASK, task);</a>
+<a name="ln1729">    crm_xml_add(xml_op, XML_ATTR_ORIGIN, origin);</a>
+<a name="ln1730">    crm_xml_add(xml_op, XML_ATTR_CRM_VERSION, caller_version);</a>
+<a name="ln1731">    crm_xml_add(xml_op, XML_ATTR_TRANSITION_KEY, op-&gt;user_data);</a>
+<a name="ln1732">    crm_xml_add(xml_op, XML_ATTR_TRANSITION_MAGIC, magic);</a>
+<a name="ln1733">    crm_xml_add(xml_op, XML_LRM_ATTR_EXIT_REASON, exit_reason);</a>
+<a name="ln1734">    crm_xml_add(xml_op, XML_LRM_ATTR_TARGET, node); /* For context during triage */</a>
+<a name="ln1735"> </a>
+<a name="ln1736">    crm_xml_add_int(xml_op, XML_LRM_ATTR_CALLID, op-&gt;call_id);</a>
+<a name="ln1737">    crm_xml_add_int(xml_op, XML_LRM_ATTR_RC, op-&gt;rc);</a>
+<a name="ln1738">    crm_xml_add_int(xml_op, XML_LRM_ATTR_OPSTATUS, op-&gt;op_status);</a>
+<a name="ln1739">    crm_xml_add_int(xml_op, XML_LRM_ATTR_INTERVAL, op-&gt;interval);</a>
+<a name="ln1740"> </a>
+<a name="ln1741">    if (compare_version(&quot;2.1&quot;, caller_version) &lt;= 0) {</a>
+<a name="ln1742">        if (op-&gt;t_run || op-&gt;t_rcchange || op-&gt;exec_time || op-&gt;queue_time) {</a>
+<a name="ln1743">            crm_trace(&quot;Timing data (%s_%s_%d): last=%u change=%u exec=%u queue=%u&quot;,</a>
+<a name="ln1744">                      op-&gt;rsc_id, op-&gt;op_type, op-&gt;interval,</a>
+<a name="ln1745">                      op-&gt;t_run, op-&gt;t_rcchange, op-&gt;exec_time, op-&gt;queue_time);</a>
+<a name="ln1746"> </a>
+<a name="ln1747">            if (op-&gt;interval == 0) {</a>
+<a name="ln1748">                /* The values are the same for non-recurring ops */</a>
+<a name="ln1749">                crm_xml_add_int(xml_op, XML_RSC_OP_LAST_RUN, op-&gt;t_run);</a>
+<a name="ln1750">                crm_xml_add_int(xml_op, XML_RSC_OP_LAST_CHANGE, op-&gt;t_run);</a>
+<a name="ln1751"> </a>
+<a name="ln1752">            } else if(op-&gt;t_rcchange) {</a>
+<a name="ln1753">                /* last-run is not accurate for recurring ops */</a>
+<a name="ln1754">                crm_xml_add_int(xml_op, XML_RSC_OP_LAST_CHANGE, op-&gt;t_rcchange);</a>
+<a name="ln1755"> </a>
+<a name="ln1756">            } else {</a>
+<a name="ln1757">                /* ...but is better than nothing otherwise */</a>
+<a name="ln1758">                crm_xml_add_int(xml_op, XML_RSC_OP_LAST_CHANGE, op-&gt;t_run);</a>
+<a name="ln1759">            }</a>
+<a name="ln1760"> </a>
+<a name="ln1761">            crm_xml_add_int(xml_op, XML_RSC_OP_T_EXEC, op-&gt;exec_time);</a>
+<a name="ln1762">            crm_xml_add_int(xml_op, XML_RSC_OP_T_QUEUE, op-&gt;queue_time);</a>
+<a name="ln1763">        }</a>
+<a name="ln1764">    }</a>
+<a name="ln1765"> </a>
+<a name="ln1766">    if (crm_str_eq(op-&gt;op_type, CRMD_ACTION_MIGRATE, TRUE)</a>
+<a name="ln1767">        || crm_str_eq(op-&gt;op_type, CRMD_ACTION_MIGRATED, TRUE)) {</a>
+<a name="ln1768">        /*</a>
+<a name="ln1769">         * Record migrate_source and migrate_target always for migrate ops.</a>
+<a name="ln1770">         */</a>
+<a name="ln1771">        const char *name = XML_LRM_ATTR_MIGRATE_SOURCE;</a>
+<a name="ln1772"> </a>
+<a name="ln1773">        crm_xml_add(xml_op, name, crm_meta_value(op-&gt;params, name));</a>
+<a name="ln1774"> </a>
+<a name="ln1775">        name = XML_LRM_ATTR_MIGRATE_TARGET;</a>
+<a name="ln1776">        crm_xml_add(xml_op, name, crm_meta_value(op-&gt;params, name));</a>
+<a name="ln1777">    }</a>
+<a name="ln1778"> </a>
+<a name="ln1779">    append_digest(op, xml_op, caller_version, magic, LOG_DEBUG);</a>
+<a name="ln1780"> </a>
+<a name="ln1781">    if (op_id_additional) {</a>
+<a name="ln1782">        free(op_id);</a>
+<a name="ln1783">        op_id = op_id_additional;</a>
+<a name="ln1784">        op_id_additional = NULL;</a>
+<a name="ln1785">        goto again;</a>
+<a name="ln1786">    }</a>
+<a name="ln1787"> </a>
+<a name="ln1788">    if (local_user_data) {</a>
+<a name="ln1789">        free(local_user_data);</a>
+<a name="ln1790">        op-&gt;user_data = NULL;</a>
+<a name="ln1791">    }</a>
+<a name="ln1792">    free(magic);</a>
+<a name="ln1793">    free(op_id);</a>
+<a name="ln1794">    free(key);</a>
+<a name="ln1795">    return xml_op;</a>
+<a name="ln1796">}</a>
+<a name="ln1797"> </a>
+<a name="ln1798">bool</a>
+<a name="ln1799">pcmk_acl_required(const char *user) </a>
+<a name="ln1800">{</a>
+<a name="ln1801">#if ENABLE_ACL</a>
+<a name="ln1802">    if(user == NULL || strlen(user) == 0) {</a>
+<a name="ln1803">        crm_trace(&quot;no user set&quot;);</a>
+<a name="ln1804">        return FALSE;</a>
+<a name="ln1805"> </a>
+<a name="ln1806">    } else if (strcmp(user, CRM_DAEMON_USER) == 0) {</a>
+<a name="ln1807">        return FALSE;</a>
+<a name="ln1808"> </a>
+<a name="ln1809">    } else if (strcmp(user, &quot;root&quot;) == 0) {</a>
+<a name="ln1810">        return FALSE;</a>
+<a name="ln1811">    }</a>
+<a name="ln1812">    crm_trace(&quot;acls required for %s&quot;, user);</a>
+<a name="ln1813">    return TRUE;</a>
+<a name="ln1814">#else</a>
+<a name="ln1815">    crm_trace(&quot;acls not supported&quot;);</a>
+<a name="ln1816">    return FALSE;</a>
+<a name="ln1817">#endif</a>
+<a name="ln1818">}</a>
+<a name="ln1819"> </a>
+<a name="ln1820">#if ENABLE_ACL</a>
+<a name="ln1821">char *</a>
+<a name="ln1822">uid2username(uid_t uid)</a>
+<a name="ln1823">{</a>
+<a name="ln1824">    struct passwd *pwent = getpwuid(uid);</a>
+<a name="ln1825"> </a>
+<a name="ln1826">    if (pwent == NULL) {</a>
+<a name="ln1827">        crm_perror(LOG_ERR, &quot;Cannot get password entry of uid: %d&quot;, uid);</a>
+<a name="ln1828">        return NULL;</a>
+<a name="ln1829"> </a>
+<a name="ln1830">    } else {</a>
+<a name="ln1831">        return strdup(pwent-&gt;pw_name);</a>
+<a name="ln1832">    }</a>
+<a name="ln1833">}</a>
+<a name="ln1834"> </a>
+<a name="ln1835">const char *</a>
+<a name="ln1836">crm_acl_get_set_user(xmlNode * request, const char *field, const char *peer_user)</a>
+<a name="ln1837">{</a>
+<a name="ln1838">    /* field is only checked for backwards compatibility */</a>
+<a name="ln1839">    static const char *effective_user = NULL;</a>
+<a name="ln1840">    const char *requested_user = NULL;</a>
+<a name="ln1841">    const char *user = NULL;</a>
+<a name="ln1842"> </a>
+<a name="ln1843">    if(effective_user == NULL) {</a>
+<a name="ln1844">        effective_user = uid2username(geteuid());</a>
+<a name="ln1845">    }</a>
+<a name="ln1846"> </a>
+<a name="ln1847">    requested_user = crm_element_value(request, XML_ACL_TAG_USER);</a>
+<a name="ln1848">    if(requested_user == NULL) {</a>
+<a name="ln1849">        requested_user = crm_element_value(request, field);</a>
+<a name="ln1850">    }</a>
+<a name="ln1851"> </a>
+<a name="ln1852">    if (is_privileged(effective_user) == FALSE) {</a>
+<a name="ln1853">        /* We're not running as a privileged user, set or overwrite any existing value for $XML_ACL_TAG_USER */</a>
+<a name="ln1854">        user = effective_user;</a>
+<a name="ln1855"> </a>
+<a name="ln1856">    } else if(peer_user == NULL &amp;&amp; requested_user == NULL) {</a>
+<a name="ln1857">        /* No user known or requested, use 'effective_user' and make sure one is set for the request */</a>
+<a name="ln1858">        user = effective_user;</a>
+<a name="ln1859"> </a>
+<a name="ln1860">    } else if(peer_user == NULL) {</a>
+<a name="ln1861">        /* No user known, trusting 'requested_user' */</a>
+<a name="ln1862">        user = requested_user;</a>
+<a name="ln1863"> </a>
+<a name="ln1864">    } else if (is_privileged(peer_user) == FALSE) {</a>
+<a name="ln1865">        /* The peer is not a privileged user, set or overwrite any existing value for $XML_ACL_TAG_USER */</a>
+<a name="ln1866">        user = peer_user;</a>
+<a name="ln1867"> </a>
+<a name="ln1868">    } else if (requested_user == NULL) {</a>
+<a name="ln1869">        /* Even if we're privileged, make sure there is always a value set */</a>
+<a name="ln1870">        user = peer_user;</a>
+<a name="ln1871"> </a>
+<a name="ln1872">    } else {</a>
+<a name="ln1873">        /* Legal delegation to 'requested_user' */</a>
+<a name="ln1874">        user = requested_user;</a>
+<a name="ln1875">    }</a>
+<a name="ln1876"> </a>
+<a name="ln1877">    /* Yes, pointer comparision */</a>
+<a name="ln1878">    if(user != crm_element_value(request, XML_ACL_TAG_USER)) {</a>
+<a name="ln1879">        crm_xml_add(request, XML_ACL_TAG_USER, user);</a>
+<a name="ln1880">    }</a>
+<a name="ln1881"> </a>
+<a name="ln1882">    if(field != NULL &amp;&amp; user != crm_element_value(request, field)) {</a>
+<a name="ln1883">        crm_xml_add(request, field, user);</a>
+<a name="ln1884">    }</a>
+<a name="ln1885"> </a>
+<a name="ln1886">    return requested_user;</a>
+<a name="ln1887">}</a>
+<a name="ln1888"> </a>
+<a name="ln1889">void</a>
+<a name="ln1890">determine_request_user(const char *user, xmlNode * request, const char *field)</a>
+<a name="ln1891">{</a>
+<a name="ln1892">    /* Get our internal validation out of the way first */</a>
+<a name="ln1893">    CRM_CHECK(user != NULL &amp;&amp; request != NULL &amp;&amp; field != NULL, return);</a>
+<a name="ln1894"> </a>
+<a name="ln1895">    /* If our peer is a privileged user, we might be doing something on behalf of someone else */</a>
+<a name="ln1896">    if (is_privileged(user) == FALSE) {</a>
+<a name="ln1897">        /* We're not a privileged user, set or overwrite any existing value for $field */</a>
+<a name="ln1898">        crm_xml_replace(request, field, user);</a>
+<a name="ln1899"> </a>
+<a name="ln1900">    } else if (crm_element_value(request, field) == NULL) {</a>
+<a name="ln1901">        /* Even if we're privileged, make sure there is always a value set */</a>
+<a name="ln1902">        crm_xml_replace(request, field, user);</a>
+<a name="ln1903"> </a>
+<a name="ln1904">/*  } else { Legal delegation */</a>
+<a name="ln1905">    }</a>
+<a name="ln1906"> </a>
+<a name="ln1907">    crm_trace(&quot;Processing msg as user '%s'&quot;, crm_element_value(request, field));</a>
+<a name="ln1908">}</a>
+<a name="ln1909">#endif</a>
+<a name="ln1910"> </a>
+<a name="ln1911">void *</a>
+<a name="ln1912">find_library_function(void **handle, const char *lib, const char *fn, gboolean fatal)</a>
+<a name="ln1913">{</a>
+<a name="ln1914">    char *error;</a>
+<a name="ln1915">    void *a_function;</a>
+<a name="ln1916"> </a>
+<a name="ln1917">    if (*handle == NULL) {</a>
+<a name="ln1918">        *handle = dlopen(lib, RTLD_LAZY);</a>
+<a name="ln1919">    }</a>
+<a name="ln1920"> </a>
+<a name="ln1921">    if (!(*handle)) {</a>
+<a name="ln1922">        crm_err(&quot;%sCould not open %s: %s&quot;, fatal ? &quot;Fatal: &quot; : &quot;&quot;, lib, dlerror());</a>
+<a name="ln1923">        if (fatal) {</a>
+<a name="ln1924">            crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln1925">        }</a>
+<a name="ln1926">        return NULL;</a>
+<a name="ln1927">    }</a>
+<a name="ln1928"> </a>
+<a name="ln1929">    a_function = dlsym(*handle, fn);</a>
+<a name="ln1930">    if (a_function == NULL) {</a>
+<a name="ln1931">        error = dlerror();</a>
+<a name="ln1932">        crm_err(&quot;%sCould not find %s in %s: %s&quot;, fatal ? &quot;Fatal: &quot; : &quot;&quot;, fn, lib, error);</a>
+<a name="ln1933">        if (fatal) {</a>
+<a name="ln1934">            crm_exit(DAEMON_RESPAWN_STOP);</a>
+<a name="ln1935">        }</a>
+<a name="ln1936">    }</a>
+<a name="ln1937"> </a>
+<a name="ln1938">    return a_function;</a>
+<a name="ln1939">}</a>
+<a name="ln1940"> </a>
+<a name="ln1941">void *</a>
+<a name="ln1942">convert_const_pointer(const void *ptr)</a>
+<a name="ln1943">{</a>
+<a name="ln1944">    /* Worst function ever */</a>
+<a name="ln1945">    return (void *)ptr;</a>
+<a name="ln1946">}</a>
+<a name="ln1947"> </a>
+<a name="ln1948">#ifdef HAVE_UUID_UUID_H</a>
+<a name="ln1949">#  include &lt;uuid/uuid.h&gt;</a>
+<a name="ln1950">#endif</a>
+<a name="ln1951"> </a>
+<a name="ln1952">char *</a>
+<a name="ln1953">crm_generate_uuid(void)</a>
+<a name="ln1954">{</a>
+<a name="ln1955">    unsigned char uuid[16];</a>
+<a name="ln1956">    char *buffer = malloc(37);  /* Including NUL byte */</a>
+<a name="ln1957"> </a>
+<a name="ln1958">    uuid_generate(uuid);</a>
+<a name="ln1959">    uuid_unparse(uuid, buffer);</a>
+<a name="ln1960">    return buffer;</a>
+<a name="ln1961">}</a>
+<a name="ln1962"> </a>
+<a name="ln1963">#include &lt;md5.h&gt;</a>
+<a name="ln1964"> </a>
+<a name="ln1965">char *</a>
+<a name="ln1966">crm_md5sum(const char *buffer)</a>
+<a name="ln1967">{</a>
+<a name="ln1968">    int lpc = 0, len = 0;</a>
+<a name="ln1969">    char *digest = NULL;</a>
+<a name="ln1970">    unsigned char raw_digest[MD5_DIGEST_SIZE];</a>
+<a name="ln1971"> </a>
+<a name="ln1972">    if (buffer == NULL) {</a>
+<a name="ln1973">        buffer = &quot;&quot;;</a>
+<a name="ln1974">    }</a>
+<a name="ln1975">    len = strlen(buffer);</a>
+<a name="ln1976"> </a>
+<a name="ln1977">    crm_trace(&quot;Beginning digest of %d bytes&quot;, len);</a>
+<a name="ln1978">    digest = malloc(2 * MD5_DIGEST_SIZE + 1);</a>
+<a name="ln1979">    if(digest) {</a>
+<a name="ln1980">        md5_buffer(buffer, len, raw_digest);</a>
+<a name="ln1981">        for (lpc = 0; lpc &lt; MD5_DIGEST_SIZE; lpc++) {</a>
+<a name="ln1982">            sprintf(digest + (2 * lpc), &quot;%02x&quot;, raw_digest[lpc]);</a>
+<a name="ln1983">        }</a>
+<a name="ln1984">        digest[(2 * MD5_DIGEST_SIZE)] = 0;</a>
+<a name="ln1985">        crm_trace(&quot;Digest %s.&quot;, digest);</a>
+<a name="ln1986"> </a>
+<a name="ln1987">    } else {</a>
+<a name="ln1988">        crm_err(&quot;Could not create digest&quot;);</a>
+<a name="ln1989">    }</a>
+<a name="ln1990">    return digest;</a>
+<a name="ln1991">}</a>
+<a name="ln1992"> </a>
+<a name="ln1993">#ifdef HAVE_GNUTLS_GNUTLS_H</a>
+<a name="ln1994">void</a>
+<a name="ln1995">crm_gnutls_global_init(void)</a>
+<a name="ln1996">{</a>
+<a name="ln1997">    signal(SIGPIPE, SIG_IGN);</a>
+<a name="ln1998">    gnutls_global_init();</a>
+<a name="ln1999">}</a>
+<a name="ln2000">#endif</a>
+<a name="ln2001"> </a>
+<a name="ln2002">char *</a>
+<a name="ln2003">crm_generate_ra_key(const char *class, const char *provider, const char *type)</a>
+<a name="ln2004">{</a>
+<a name="ln2005">    if (!class &amp;&amp; !provider &amp;&amp; !type) {</a>
+<a name="ln2006">        return NULL;</a>
+<a name="ln2007">    }</a>
+<a name="ln2008"> </a>
+<a name="ln2009">    return crm_strdup_printf(&quot;%s:%s:%s&quot;, class ? class : &quot;&quot;, provider ? provider : &quot;&quot;, type ? type : &quot;&quot;);</a>
+<a name="ln2010">}</a>
+
+</code></pre>
+<div class="balloon" rel="317"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 317, 317.</p></div>
+<div class="balloon" rel="332"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 332, 332.</p></div>
+<div class="balloon" rel="339"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 339, 339.</p></div>
+<div class="balloon" rel="433"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'getpwnam_r' function. Inspect the third argument. Check lines: 433, 432.</p></div>
+<div class="balloon" rel="547"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'rc > 0' is always true.</p></div>
+<div class="balloon" rel="660"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (interval >= 0) == (0).</p></div>
+<div class="balloon" rel="685"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (ch >= 0) == (0).</p></div>
+<div class="balloon" rel="698"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mutable_key'. Check lines: 698, 697.</p></div>
+<div class="balloon" rel="805"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fifth actual argument of the 'sscanf' function. It's dangerous to use string specifier without width specification. Buffer overflow is possible.</p></div>
+<div class="balloon" rel="812"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V764/" target="_blank">V764</a> Possible incorrect order of arguments passed to 'decode_transition_key' function: 'transition_id' and 'action_id'.</p></div>
+<div class="balloon" rel="940"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'param_set' is always true.</p></div>
+<div class="balloon" rel="1120"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. A pointer to the unsigned long type is expected.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

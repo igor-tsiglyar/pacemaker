@@ -1,0 +1,284 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln26">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln27">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln28">#include &lt;unpack.h&gt;</a>
+<a name="ln29">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#define VARIANT_GROUP 1</a>
+<a name="ln32">#include &quot;./variant.h&quot;</a>
+<a name="ln33"> </a>
+<a name="ln34">gboolean</a>
+<a name="ln35">group_unpack(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln36">{</a>
+<a name="ln37">    xmlNode *xml_obj = rsc-&gt;xml;</a>
+<a name="ln38">    xmlNode *xml_native_rsc = NULL;</a>
+<a name="ln39">    group_variant_data_t *group_data = NULL;</a>
+<a name="ln40">    const char *group_ordered = g_hash_table_lookup(rsc-&gt;meta, XML_RSC_ATTR_ORDERED);</a>
+<a name="ln41">    const char *group_colocated = g_hash_table_lookup(rsc-&gt;meta, &quot;collocated&quot;);</a>
+<a name="ln42">    const char *clone_id = NULL;</a>
+<a name="ln43"> </a>
+<a name="ln44">    pe_rsc_trace(rsc, &quot;Processing resource %s...&quot;, rsc-&gt;id);</a>
+<a name="ln45"> </a>
+<a name="ln46">    group_data = calloc(1, sizeof(group_variant_data_t));</a>
+<a name="ln47">    group_data-&gt;num_children = 0;</a>
+<a name="ln48">    group_data-&gt;first_child = NULL;</a>
+<a name="ln49">    group_data-&gt;last_child = NULL;</a>
+<a name="ln50">    rsc-&gt;variant_opaque = group_data;</a>
+<a name="ln51"> </a>
+<a name="ln52">    group_data-&gt;ordered = TRUE;</a>
+<a name="ln53">    group_data-&gt;colocated = TRUE;</a>
+<a name="ln54"> </a>
+<a name="ln55">    if (group_ordered != NULL) {</a>
+<a name="ln56">        crm_str_to_boolean(group_ordered, &amp;(group_data-&gt;ordered));</a>
+<a name="ln57">    }</a>
+<a name="ln58">    if (group_colocated != NULL) {</a>
+<a name="ln59">        crm_str_to_boolean(group_colocated, &amp;(group_data-&gt;colocated));</a>
+<a name="ln60">    }</a>
+<a name="ln61"> </a>
+<a name="ln62">    clone_id = crm_element_value(rsc-&gt;xml, XML_RSC_ATTR_INCARNATION);</a>
+<a name="ln63"> </a>
+<a name="ln64">    for (xml_native_rsc = __xml_first_child(xml_obj); xml_native_rsc != NULL;</a>
+<a name="ln65">         xml_native_rsc = __xml_next_element(xml_native_rsc)) {</a>
+<a name="ln66">        if (crm_str_eq((const char *)xml_native_rsc-&gt;name, XML_CIB_TAG_RESOURCE, TRUE)) {</a>
+<a name="ln67">            resource_t *new_rsc = NULL;</a>
+<a name="ln68"> </a>
+<a name="ln69">            crm_xml_add(xml_native_rsc, XML_RSC_ATTR_INCARNATION, clone_id);</a>
+<a name="ln70">            if (common_unpack(xml_native_rsc, &amp;new_rsc, rsc, data_set) == FALSE) {</a>
+<a name="ln71">                pe_err(&quot;Failed unpacking resource %s&quot;, crm_element_value(xml_obj, XML_ATTR_ID));</a>
+<a name="ln72">                if (new_rsc != NULL &amp;&amp; new_rsc-&gt;fns != NULL) {</a>
+<a name="ln73">                    new_rsc-&gt;fns-&gt;free(new_rsc);</a>
+<a name="ln74">                }</a>
+<a name="ln75">            }</a>
+<a name="ln76"> </a>
+<a name="ln77">            group_data-&gt;num_children++;</a>
+<a name="ln78">            rsc-&gt;children = g_list_append(rsc-&gt;children, new_rsc);</a>
+<a name="ln79"> </a>
+<a name="ln80">            if (group_data-&gt;first_child == NULL) {</a>
+<a name="ln81">                group_data-&gt;first_child = new_rsc;</a>
+<a name="ln82">            }</a>
+<a name="ln83">            group_data-&gt;last_child = new_rsc;</a>
+<a name="ln84">            print_resource(LOG_DEBUG_3, &quot;Added &quot;, new_rsc, FALSE);</a>
+<a name="ln85">        }</a>
+<a name="ln86">    }</a>
+<a name="ln87"> </a>
+<a name="ln88">    if (group_data-&gt;num_children == 0) {</a>
+<a name="ln89">#if 0</a>
+<a name="ln90">        /* Bug #1287 */</a>
+<a name="ln91">        crm_config_err(&quot;Group %s did not have any children&quot;, rsc-&gt;id);</a>
+<a name="ln92">        return FALSE;</a>
+<a name="ln93">#else</a>
+<a name="ln94">        crm_config_warn(&quot;Group %s did not have any children&quot;, rsc-&gt;id);</a>
+<a name="ln95">        return TRUE;</a>
+<a name="ln96">#endif</a>
+<a name="ln97">    }</a>
+<a name="ln98"> </a>
+<a name="ln99">    pe_rsc_trace(rsc, &quot;Added %d children to resource %s...&quot;, group_data-&gt;num_children, rsc-&gt;id);</a>
+<a name="ln100"> </a>
+<a name="ln101">    return TRUE;</a>
+<a name="ln102">}</a>
+<a name="ln103"> </a>
+<a name="ln104">gboolean</a>
+<a name="ln105">group_active(resource_t * rsc, gboolean all)</a>
+<a name="ln106">{</a>
+<a name="ln107">    gboolean c_all = TRUE;</a>
+<a name="ln108">    gboolean c_any = FALSE;</a>
+<a name="ln109">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln110"> </a>
+<a name="ln111">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln112">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln113"> </a>
+<a name="ln114">        if (child_rsc-&gt;fns-&gt;active(child_rsc, all)) {</a>
+<a name="ln115">            c_any = TRUE;</a>
+<a name="ln116">        } else {</a>
+<a name="ln117">            c_all = FALSE;</a>
+<a name="ln118">        }</a>
+<a name="ln119">    }</a>
+<a name="ln120"> </a>
+<a name="ln121">    if (c_any == FALSE) {</a>
+<a name="ln122">        return FALSE;</a>
+<a name="ln123">    } else if (all &amp;&amp; c_all == FALSE) {</a>
+<a name="ln124">        return FALSE;</a>
+<a name="ln125">    }</a>
+<a name="ln126">    return TRUE;</a>
+<a name="ln127">}</a>
+<a name="ln128"> </a>
+<a name="ln129">static void</a>
+<a name="ln130">group_print_xml(resource_t * rsc, const char *pre_text, long options, void *print_data)</a>
+<a name="ln131">{</a>
+<a name="ln132">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln133">    char *child_text = crm_concat(pre_text, &quot;    &quot;, ' ');</a>
+<a name="ln134"> </a>
+<a name="ln135">    status_print(&quot;%s&lt;group id=\&quot;%s\&quot; &quot;, pre_text, rsc-&gt;id);</a>
+<a name="ln136">    status_print(&quot;number_resources=\&quot;%d\&quot; &quot;, g_list_length(rsc-&gt;children));</a>
+<a name="ln137">    status_print(&quot;&gt;\n&quot;);</a>
+<a name="ln138"> </a>
+<a name="ln139">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln140">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln141"> </a>
+<a name="ln142">        child_rsc-&gt;fns-&gt;print(child_rsc, child_text, options, print_data);</a>
+<a name="ln143">    }</a>
+<a name="ln144"> </a>
+<a name="ln145">    status_print(&quot;%s&lt;/group&gt;\n&quot;, pre_text);</a>
+<a name="ln146">    free(child_text);</a>
+<a name="ln147">}</a>
+<a name="ln148"> </a>
+<a name="ln149">void</a>
+<a name="ln150">group_print(resource_t * rsc, const char *pre_text, long options, void *print_data)</a>
+<a name="ln151">{</a>
+<a name="ln152">    char *child_text = NULL;</a>
+<a name="ln153">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln154"> </a>
+<a name="ln155">    if (pre_text == NULL) {</a>
+<a name="ln156">        pre_text = &quot; &quot;;</a>
+<a name="ln157">    }</a>
+<a name="ln158"> </a>
+<a name="ln159">    if (options &amp; pe_print_xml) {</a>
+<a name="ln160">        group_print_xml(rsc, pre_text, options, print_data);</a>
+<a name="ln161">        return;</a>
+<a name="ln162">    }</a>
+<a name="ln163"> </a>
+<a name="ln164">    child_text = crm_concat(pre_text, &quot;   &quot;, ' ');</a>
+<a name="ln165"> </a>
+<a name="ln166">    status_print(&quot;%sResource Group: %s&quot;, pre_text ? pre_text : &quot;&quot;, rsc-&gt;id);</a>
+<a name="ln167"> </a>
+<a name="ln168">    if (options &amp; pe_print_html) {</a>
+<a name="ln169">        status_print(&quot;\n&lt;ul&gt;\n&quot;);</a>
+<a name="ln170"> </a>
+<a name="ln171">    } else if ((options &amp; pe_print_log) == 0) {</a>
+<a name="ln172">        status_print(&quot;\n&quot;);</a>
+<a name="ln173">    }</a>
+<a name="ln174"> </a>
+<a name="ln175">    if (options &amp; pe_print_brief) {</a>
+<a name="ln176">        print_rscs_brief(rsc-&gt;children, child_text, options, print_data, TRUE);</a>
+<a name="ln177"> </a>
+<a name="ln178">    } else {</a>
+<a name="ln179">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln180">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln181"> </a>
+<a name="ln182">            if (options &amp; pe_print_html) {</a>
+<a name="ln183">                status_print(&quot;&lt;li&gt;\n&quot;);</a>
+<a name="ln184">            }</a>
+<a name="ln185">            child_rsc-&gt;fns-&gt;print(child_rsc, child_text, options, print_data);</a>
+<a name="ln186">            if (options &amp; pe_print_html) {</a>
+<a name="ln187">                status_print(&quot;&lt;/li&gt;\n&quot;);</a>
+<a name="ln188">            }</a>
+<a name="ln189">        }</a>
+<a name="ln190">    }</a>
+<a name="ln191"> </a>
+<a name="ln192">    if (options &amp; pe_print_html) {</a>
+<a name="ln193">        status_print(&quot;&lt;/ul&gt;\n&quot;);</a>
+<a name="ln194">    }</a>
+<a name="ln195">    free(child_text);</a>
+<a name="ln196">}</a>
+<a name="ln197"> </a>
+<a name="ln198">void</a>
+<a name="ln199">group_free(resource_t * rsc)</a>
+<a name="ln200">{</a>
+<a name="ln201">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln202"> </a>
+<a name="ln203">    CRM_CHECK(rsc != NULL, return);</a>
+<a name="ln204"> </a>
+<a name="ln205">    pe_rsc_trace(rsc, &quot;Freeing %s&quot;, rsc-&gt;id);</a>
+<a name="ln206"> </a>
+<a name="ln207">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln208">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln209"> </a>
+<a name="ln210">        CRM_ASSERT(child_rsc);</a>
+<a name="ln211">        pe_rsc_trace(child_rsc, &quot;Freeing child %s&quot;, child_rsc-&gt;id);</a>
+<a name="ln212">        child_rsc-&gt;fns-&gt;free(child_rsc);</a>
+<a name="ln213">    }</a>
+<a name="ln214"> </a>
+<a name="ln215">    pe_rsc_trace(rsc, &quot;Freeing child list&quot;);</a>
+<a name="ln216">    g_list_free(rsc-&gt;children);</a>
+<a name="ln217"> </a>
+<a name="ln218">    common_free(rsc);</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">enum rsc_role_e</a>
+<a name="ln222">group_resource_state(const resource_t * rsc, gboolean current)</a>
+<a name="ln223">{</a>
+<a name="ln224">    enum rsc_role_e group_role = RSC_ROLE_UNKNOWN;</a>
+<a name="ln225">    GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln226"> </a>
+<a name="ln227">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln228">        resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln229">        enum rsc_role_e role = child_rsc-&gt;fns-&gt;state(child_rsc, current);</a>
+<a name="ln230"> </a>
+<a name="ln231">        if (role &gt; group_role) {</a>
+<a name="ln232">            group_role = role;</a>
+<a name="ln233">        }</a>
+<a name="ln234">    }</a>
+<a name="ln235"> </a>
+<a name="ln236">    pe_rsc_trace(rsc, &quot;%s role: %s&quot;, rsc-&gt;id, role2text(group_role));</a>
+<a name="ln237">    return group_role;</a>
+<a name="ln238">}</a>
+
+</code></pre>
+<div class="balloon" rel="47"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'group_data'. Check lines: 47, 46.</p></div>
+<div class="balloon" rel="166"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'pre_text' is always true.</p></div>
+<div class="balloon" rel="169"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 168.</p></div>
+<div class="balloon" rel="183"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 182.</p></div>
+<div class="balloon" rel="187"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 186.</p></div>
+<div class="balloon" rel="193"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 192.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

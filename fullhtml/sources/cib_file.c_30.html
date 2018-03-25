@@ -1,0 +1,916 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2004 International Business Machines</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;unistd.h&gt;</a>
+<a name="ln25">#include &lt;limits.h&gt;</a>
+<a name="ln26">#include &lt;stdlib.h&gt;</a>
+<a name="ln27">#include &lt;stdio.h&gt;</a>
+<a name="ln28">#include &lt;stdarg.h&gt;</a>
+<a name="ln29">#include &lt;string.h&gt;</a>
+<a name="ln30">#include &lt;pwd.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">#include &lt;sys/stat.h&gt;</a>
+<a name="ln33">#include &lt;sys/types.h&gt;</a>
+<a name="ln34">#include &lt;glib.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">#define cib_flag_dirty 0x00001</a>
+<a name="ln43">#define cib_flag_live  0x00002</a>
+<a name="ln44"> </a>
+<a name="ln45">typedef struct cib_file_opaque_s {</a>
+<a name="ln46">    int flags;</a>
+<a name="ln47">    char *filename;</a>
+<a name="ln48"> </a>
+<a name="ln49">} cib_file_opaque_t;</a>
+<a name="ln50"> </a>
+<a name="ln51">int cib_file_perform_op(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln52">                        xmlNode * data, xmlNode ** output_data, int call_options);</a>
+<a name="ln53"> </a>
+<a name="ln54">int cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln55">                                 xmlNode * data, xmlNode ** output_data, int call_options,</a>
+<a name="ln56">                                 const char *user_name);</a>
+<a name="ln57"> </a>
+<a name="ln58">int cib_file_signon(cib_t * cib, const char *name, enum cib_conn_type type);</a>
+<a name="ln59">int cib_file_signoff(cib_t * cib);</a>
+<a name="ln60">int cib_file_free(cib_t * cib);</a>
+<a name="ln61"> </a>
+<a name="ln62">static int</a>
+<a name="ln63">cib_file_inputfd(cib_t * cib)</a>
+<a name="ln64">{</a>
+<a name="ln65">    return -EPROTONOSUPPORT;</a>
+<a name="ln66">}</a>
+<a name="ln67"> </a>
+<a name="ln68">static int</a>
+<a name="ln69">cib_file_set_connection_dnotify(cib_t * cib, void (*dnotify) (gpointer user_data))</a>
+<a name="ln70">{</a>
+<a name="ln71">    return -EPROTONOSUPPORT;</a>
+<a name="ln72">}</a>
+<a name="ln73"> </a>
+<a name="ln74">static int</a>
+<a name="ln75">cib_file_register_notification(cib_t * cib, const char *callback, int enabled)</a>
+<a name="ln76">{</a>
+<a name="ln77">    return -EPROTONOSUPPORT;</a>
+<a name="ln78">}</a>
+<a name="ln79"> </a>
+<a name="ln80">/*!</a>
+<a name="ln81"> * \internal</a>
+<a name="ln82"> * \brief Compare the calculated digest of an XML tree against a signature file</a>
+<a name="ln83"> *</a>
+<a name="ln84"> * \param[in] root Root of XML tree to compare</a>
+<a name="ln85"> * \param[in] sigfile Name of signature file containing digest to compare</a>
+<a name="ln86"> *</a>
+<a name="ln87"> * \return TRUE if digests match or signature file does not exist, else FALSE</a>
+<a name="ln88"> */</a>
+<a name="ln89">static gboolean</a>
+<a name="ln90">cib_file_verify_digest(xmlNode *root, const char *sigfile)</a>
+<a name="ln91">{</a>
+<a name="ln92">    gboolean passed = FALSE;</a>
+<a name="ln93">    char *expected = crm_read_contents(sigfile);</a>
+<a name="ln94"> </a>
+<a name="ln95">    if (expected == NULL) {</a>
+<a name="ln96">        switch (errno) {</a>
+<a name="ln97">            case 0:</a>
+<a name="ln98">                crm_err(&quot;On-disk digest at %s is empty&quot;, sigfile);</a>
+<a name="ln99">                return FALSE;</a>
+<a name="ln100">            case ENOENT:</a>
+<a name="ln101">                crm_warn(&quot;No on-disk digest present at %s&quot;, sigfile);</a>
+<a name="ln102">                return TRUE;</a>
+<a name="ln103">            default:</a>
+<a name="ln104">                crm_perror(LOG_ERR, &quot;Could not read on-disk digest from %s&quot;, sigfile);</a>
+<a name="ln105">                return FALSE;</a>
+<a name="ln106">        }</a>
+<a name="ln107">    }</a>
+<a name="ln108">    passed = crm_digest_verify(root, expected);</a>
+<a name="ln109">    free(expected);</a>
+<a name="ln110">    return passed;</a>
+<a name="ln111">}</a>
+<a name="ln112"> </a>
+<a name="ln113">/*!</a>
+<a name="ln114"> * \internal</a>
+<a name="ln115"> * \brief Read an XML tree from a file and verify its digest</a>
+<a name="ln116"> *</a>
+<a name="ln117"> * \param[in] filename Name of XML file to read</a>
+<a name="ln118"> * \param[in] sigfile Name of signature file containing digest to compare</a>
+<a name="ln119"> * \param[in] root If non-NULL, will be set to pointer to parsed XML tree</a>
+<a name="ln120"> *</a>
+<a name="ln121"> * \return 0 if file was successfully read, parsed and verified, otherwise:</a>
+<a name="ln122"> *         -errno on stat() failure,</a>
+<a name="ln123"> *         -pcmk_err_cib_corrupt if file size is 0 or XML is not parseable, or</a>
+<a name="ln124"> *         -pcmk_err_cib_modified if digests do not match</a>
+<a name="ln125"> * \note If root is non-NULL, it is the caller's responsibility to free *root on</a>
+<a name="ln126"> *       successful return.</a>
+<a name="ln127"> */</a>
+<a name="ln128">int</a>
+<a name="ln129">cib_file_read_and_verify(const char *filename, const char *sigfile, xmlNode **root)</a>
+<a name="ln130">{</a>
+<a name="ln131">    int s_res;</a>
+<a name="ln132">    struct stat buf;</a>
+<a name="ln133">    char *local_sigfile = NULL;</a>
+<a name="ln134">    xmlNode *local_root = NULL;</a>
+<a name="ln135"> </a>
+<a name="ln136">    CRM_ASSERT(filename != NULL);</a>
+<a name="ln137">    if (root) {</a>
+<a name="ln138">        *root = NULL;</a>
+<a name="ln139">    }</a>
+<a name="ln140"> </a>
+<a name="ln141">    /* Verify that file exists and its size is nonzero */</a>
+<a name="ln142">    s_res = stat(filename, &amp;buf);</a>
+<a name="ln143">    if (s_res &lt; 0) {</a>
+<a name="ln144">        crm_perror(LOG_WARNING, &quot;Could not verify cluster configuration file %s&quot;, filename);</a>
+<a name="ln145">        return -errno;</a>
+<a name="ln146">    } else if (buf.st_size == 0) {</a>
+<a name="ln147">        crm_warn(&quot;Cluster configuration file %s is corrupt (size is zero)&quot;, filename);</a>
+<a name="ln148">        return -pcmk_err_cib_corrupt;</a>
+<a name="ln149">    }</a>
+<a name="ln150"> </a>
+<a name="ln151">    /* Parse XML */</a>
+<a name="ln152">    local_root = filename2xml(filename);</a>
+<a name="ln153">    if (local_root == NULL) {</a>
+<a name="ln154">        crm_warn(&quot;Cluster configuration file %s is corrupt (unparseable as XML)&quot;, filename);</a>
+<a name="ln155">        return -pcmk_err_cib_corrupt;</a>
+<a name="ln156">    }</a>
+<a name="ln157"> </a>
+<a name="ln158">    /* If sigfile is not specified, use original file name plus .sig */</a>
+<a name="ln159">    if (sigfile == NULL) {</a>
+<a name="ln160">        sigfile = local_sigfile = crm_concat(filename, &quot;sig&quot;, '.');</a>
+<a name="ln161">    }</a>
+<a name="ln162"> </a>
+<a name="ln163">    /* Verify that digests match */</a>
+<a name="ln164">    if (cib_file_verify_digest(local_root, sigfile) == FALSE) {</a>
+<a name="ln165">        free(local_sigfile);</a>
+<a name="ln166">        free_xml(local_root);</a>
+<a name="ln167">        return -pcmk_err_cib_modified;</a>
+<a name="ln168">    }</a>
+<a name="ln169"> </a>
+<a name="ln170">    free(local_sigfile);</a>
+<a name="ln171">    if (root) {</a>
+<a name="ln172">        *root = local_root;</a>
+<a name="ln173">    } else {</a>
+<a name="ln174">        free_xml(local_root);</a>
+<a name="ln175">    }</a>
+<a name="ln176">    return pcmk_ok;</a>
+<a name="ln177">}</a>
+<a name="ln178"> </a>
+<a name="ln179">#define CIB_SERIES &quot;cib&quot;</a>
+<a name="ln180">#define CIB_SERIES_MAX 100</a>
+<a name="ln181">#define CIB_SERIES_BZIP FALSE /* Must be false because archived copies are</a>
+<a name="ln182">                                 created with hard links</a>
+<a name="ln183">                               */</a>
+<a name="ln184"> </a>
+<a name="ln185">#define CIB_LIVE_NAME CIB_SERIES &quot;.xml&quot;</a>
+<a name="ln186"> </a>
+<a name="ln187">/*!</a>
+<a name="ln188"> * \internal</a>
+<a name="ln189"> * \brief Check whether a file is the live CIB</a>
+<a name="ln190"> *</a>
+<a name="ln191"> * \param[in] filename Name of file to check</a>
+<a name="ln192"> *</a>
+<a name="ln193"> * \return TRUE if file exists and has one of the possible live CIB filenames</a>
+<a name="ln194"> */</a>
+<a name="ln195">static gboolean</a>
+<a name="ln196">cib_file_is_live(const char *filename)</a>
+<a name="ln197">{</a>
+<a name="ln198">    if (filename != NULL) {</a>
+<a name="ln199">        /* Canonicalize all file names for true comparison */</a>
+<a name="ln200">        char *real_filename = crm_compat_realpath(filename);</a>
+<a name="ln201"> </a>
+<a name="ln202">        if (real_filename != NULL) {</a>
+<a name="ln203">            const char *livenames[] = {</a>
+<a name="ln204">                CRM_CONFIG_DIR &quot;/&quot; CIB_LIVE_NAME,</a>
+<a name="ln205">                CRM_LEGACY_CONFIG_DIR &quot;/&quot; CIB_LIVE_NAME</a>
+<a name="ln206">            };</a>
+<a name="ln207">            char *real_livename;</a>
+<a name="ln208">            int i;</a>
+<a name="ln209"> </a>
+<a name="ln210">            /* Compare against each possible live CIB name */</a>
+<a name="ln211">            for (i = 0; i &lt; DIMOF(livenames); ++i) {</a>
+<a name="ln212">                real_livename = crm_compat_realpath(livenames[i]);</a>
+<a name="ln213">                if (real_livename &amp;&amp; !strcmp(real_filename, real_livename)) {</a>
+<a name="ln214">                    free(real_livename);</a>
+<a name="ln215">                    return TRUE;</a>
+<a name="ln216">                }</a>
+<a name="ln217">                free(real_livename);</a>
+<a name="ln218">            }</a>
+<a name="ln219">            free(real_filename);</a>
+<a name="ln220">        }</a>
+<a name="ln221">    }</a>
+<a name="ln222">    return FALSE;</a>
+<a name="ln223">}</a>
+<a name="ln224"> </a>
+<a name="ln225">/* cib_file_backup() and cib_file_write_with_digest() need to chown the</a>
+<a name="ln226"> * written files only in limited circumstances, so these variables allow</a>
+<a name="ln227"> * that to be indicated without affecting external callers</a>
+<a name="ln228"> */</a>
+<a name="ln229">static uid_t cib_file_owner = 0;</a>
+<a name="ln230">static uid_t cib_file_group = 0;</a>
+<a name="ln231">static gboolean cib_do_chown = FALSE;</a>
+<a name="ln232"> </a>
+<a name="ln233">/*!</a>
+<a name="ln234"> * \internal</a>
+<a name="ln235"> * \brief Back up a CIB</a>
+<a name="ln236"> *</a>
+<a name="ln237"> * \param[in] cib_dirname Directory containing CIB file and backups</a>
+<a name="ln238"> * \param[in] cib_filename Name (relative to cib_dirname) of CIB file to back up</a>
+<a name="ln239"> *</a>
+<a name="ln240"> * \return 0 on success, -1 on error</a>
+<a name="ln241"> */</a>
+<a name="ln242">static int</a>
+<a name="ln243">cib_file_backup(const char *cib_dirname, const char *cib_filename)</a>
+<a name="ln244">{</a>
+<a name="ln245">    int rc = 0;</a>
+<a name="ln246">    char *cib_path = crm_concat(cib_dirname, cib_filename, '/');</a>
+<a name="ln247">    char *cib_digest = crm_concat(cib_path, &quot;sig&quot;, '.');</a>
+<a name="ln248"> </a>
+<a name="ln249">    /* Figure out what backup file sequence number to use */</a>
+<a name="ln250">    int seq = get_last_sequence(cib_dirname, CIB_SERIES);</a>
+<a name="ln251">    char *backup_path = generate_series_filename(cib_dirname, CIB_SERIES, seq,</a>
+<a name="ln252">                                                 CIB_SERIES_BZIP);</a>
+<a name="ln253">    char *backup_digest = crm_concat(backup_path, &quot;sig&quot;, '.');</a>
+<a name="ln254"> </a>
+<a name="ln255">    CRM_ASSERT((cib_path != NULL) &amp;&amp; (cib_digest != NULL)</a>
+<a name="ln256">               &amp;&amp; (backup_path != NULL) &amp;&amp; (backup_digest != NULL));</a>
+<a name="ln257"> </a>
+<a name="ln258">    /* Remove the old backups if they exist */</a>
+<a name="ln259">    unlink(backup_path);</a>
+<a name="ln260">    unlink(backup_digest);</a>
+<a name="ln261"> </a>
+<a name="ln262">    /* Back up the CIB, by hard-linking it to the backup name */</a>
+<a name="ln263">    if ((link(cib_path, backup_path) &lt; 0) &amp;&amp; (errno != ENOENT)) {</a>
+<a name="ln264">        crm_perror(LOG_ERR, &quot;Could not archive %s by linking to %s&quot;,</a>
+<a name="ln265">                   cib_path, backup_path);</a>
+<a name="ln266">        rc = -1;</a>
+<a name="ln267"> </a>
+<a name="ln268">    /* Back up the CIB signature similarly */</a>
+<a name="ln269">    } else if ((link(cib_digest, backup_digest) &lt; 0) &amp;&amp; (errno != ENOENT)) {</a>
+<a name="ln270">        crm_perror(LOG_ERR, &quot;Could not archive %s by linking to %s&quot;,</a>
+<a name="ln271">                   cib_digest, backup_digest);</a>
+<a name="ln272">        rc = -1;</a>
+<a name="ln273"> </a>
+<a name="ln274">    /* Update the last counter and ensure everything is sync'd to media */</a>
+<a name="ln275">    } else {</a>
+<a name="ln276">        write_last_sequence(cib_dirname, CIB_SERIES, seq + 1, CIB_SERIES_MAX);</a>
+<a name="ln277">        if (cib_do_chown) {</a>
+<a name="ln278">            if ((chown(backup_path, cib_file_owner, cib_file_group) &lt; 0)</a>
+<a name="ln279">                    &amp;&amp; (errno != ENOENT)) {</a>
+<a name="ln280">                crm_perror(LOG_ERR, &quot;Could not set owner of %s&quot;, backup_path);</a>
+<a name="ln281">                rc = -1;</a>
+<a name="ln282">            }</a>
+<a name="ln283">            if ((chown(backup_digest, cib_file_owner, cib_file_group) &lt; 0)</a>
+<a name="ln284">                    &amp;&amp; (errno != ENOENT)) {</a>
+<a name="ln285">                crm_perror(LOG_ERR, &quot;Could not set owner of %s&quot;, backup_digest);</a>
+<a name="ln286">                rc = -1;</a>
+<a name="ln287">            }</a>
+<a name="ln288">            if (crm_chown_last_sequence(cib_dirname, CIB_SERIES, cib_file_owner,</a>
+<a name="ln289">                                        cib_file_group) &lt; 0) {</a>
+<a name="ln290">                crm_perror(LOG_ERR,</a>
+<a name="ln291">                           &quot;Could not set owner of %s last sequence file&quot;,</a>
+<a name="ln292">                           cib_dirname);</a>
+<a name="ln293">                rc = -1;</a>
+<a name="ln294">            }</a>
+<a name="ln295">        }</a>
+<a name="ln296">        crm_sync_directory(cib_dirname);</a>
+<a name="ln297">        crm_info(&quot;Archived previous version as %s&quot;, backup_path);</a>
+<a name="ln298">    }</a>
+<a name="ln299"> </a>
+<a name="ln300">    free(cib_path);</a>
+<a name="ln301">    free(cib_digest);</a>
+<a name="ln302">    free(backup_path);</a>
+<a name="ln303">    free(backup_digest);</a>
+<a name="ln304">    return rc;</a>
+<a name="ln305">}</a>
+<a name="ln306"> </a>
+<a name="ln307">/*!</a>
+<a name="ln308"> * \internal</a>
+<a name="ln309"> * \brief Prepare CIB XML to be written to disk</a>
+<a name="ln310"> *</a>
+<a name="ln311"> * Set num_updates to 0, set cib-last-written to the current timestamp,</a>
+<a name="ln312"> * and strip out the status section.</a>
+<a name="ln313"> *</a>
+<a name="ln314"> * \param[in] root Root of CIB XML tree</a>
+<a name="ln315"> *</a>
+<a name="ln316"> * \return void</a>
+<a name="ln317"> */</a>
+<a name="ln318">static void</a>
+<a name="ln319">cib_file_prepare_xml(xmlNode *root)</a>
+<a name="ln320">{</a>
+<a name="ln321">    xmlNode *cib_status_root = NULL;</a>
+<a name="ln322"> </a>
+<a name="ln323">    /* Always write out with num_updates=0 and current last-written timestamp */</a>
+<a name="ln324">    crm_xml_add(root, XML_ATTR_NUMUPDATES, &quot;0&quot;);</a>
+<a name="ln325">    crm_xml_add_last_written(root);</a>
+<a name="ln326"> </a>
+<a name="ln327">    /* Delete status section before writing to file, because</a>
+<a name="ln328">     * we discard it on startup anyway, and users get confused by it */</a>
+<a name="ln329">    cib_status_root = find_xml_node(root, XML_CIB_TAG_STATUS, TRUE);</a>
+<a name="ln330">    CRM_LOG_ASSERT(cib_status_root != NULL);</a>
+<a name="ln331">    if (cib_status_root != NULL) {</a>
+<a name="ln332">        free_xml(cib_status_root);</a>
+<a name="ln333">    }</a>
+<a name="ln334">}</a>
+<a name="ln335"> </a>
+<a name="ln336">/*!</a>
+<a name="ln337"> * \internal</a>
+<a name="ln338"> * \brief Write CIB to disk, along with a signature file containing its digest</a>
+<a name="ln339"> *</a>
+<a name="ln340"> * \param[in] cib_root Root of XML tree to write</a>
+<a name="ln341"> * \param[in] cib_dirname Directory containing CIB and signature files</a>
+<a name="ln342"> * \param[in] cib_filename Name (relative to cib_dirname) of file to write</a>
+<a name="ln343"> *</a>
+<a name="ln344"> * \return pcmk_ok on success,</a>
+<a name="ln345"> *         pcmk_err_cib_modified if existing cib_filename doesn't match digest,</a>
+<a name="ln346"> *         pcmk_err_cib_backup if existing cib_filename couldn't be backed up,</a>
+<a name="ln347"> *         or pcmk_err_cib_save if new cib_filename couldn't be saved</a>
+<a name="ln348"> */</a>
+<a name="ln349">int</a>
+<a name="ln350">cib_file_write_with_digest(xmlNode *cib_root, const char *cib_dirname,</a>
+<a name="ln351">                           const char *cib_filename)</a>
+<a name="ln352">{</a>
+<a name="ln353">    int exit_rc = pcmk_ok;</a>
+<a name="ln354">    int rc, fd;</a>
+<a name="ln355">    char *digest = NULL;</a>
+<a name="ln356"> </a>
+<a name="ln357">    /* Detect CIB version for diagnostic purposes */</a>
+<a name="ln358">    const char *epoch = crm_element_value(cib_root, XML_ATTR_GENERATION);</a>
+<a name="ln359">    const char *admin_epoch = crm_element_value(cib_root,</a>
+<a name="ln360">                                                XML_ATTR_GENERATION_ADMIN);</a>
+<a name="ln361"> </a>
+<a name="ln362">    /* Determine full CIB and signature pathnames */</a>
+<a name="ln363">    char *cib_path = crm_concat(cib_dirname, cib_filename, '/');</a>
+<a name="ln364">    char *digest_path = crm_concat(cib_path, &quot;sig&quot;, '.');</a>
+<a name="ln365"> </a>
+<a name="ln366">    /* Create temporary file name patterns for writing out CIB and signature */</a>
+<a name="ln367">    char *tmp_cib = crm_strdup_printf(&quot;%s/cib.XXXXXX&quot;, cib_dirname);</a>
+<a name="ln368">    char *tmp_digest = crm_strdup_printf(&quot;%s/cib.XXXXXX&quot;, cib_dirname);</a>
+<a name="ln369"> </a>
+<a name="ln370">    CRM_ASSERT((cib_path != NULL) &amp;&amp; (digest_path != NULL)</a>
+<a name="ln371">               &amp;&amp; (tmp_cib != NULL) &amp;&amp; (tmp_digest != NULL));</a>
+<a name="ln372"> </a>
+<a name="ln373">    /* Ensure the admin didn't modify the existing CIB underneath us */</a>
+<a name="ln374">    crm_trace(&quot;Reading cluster configuration file %s&quot;, cib_path);</a>
+<a name="ln375">    rc = cib_file_read_and_verify(cib_path, NULL, NULL);</a>
+<a name="ln376">    if ((rc != pcmk_ok) &amp;&amp; (rc != -ENOENT)) {</a>
+<a name="ln377">        crm_err(&quot;%s was manually modified while the cluster was active!&quot;,</a>
+<a name="ln378">                cib_path);</a>
+<a name="ln379">        exit_rc = pcmk_err_cib_modified;</a>
+<a name="ln380">        goto cleanup;</a>
+<a name="ln381">    }</a>
+<a name="ln382"> </a>
+<a name="ln383">    /* Back up the existing CIB */</a>
+<a name="ln384">    if (cib_file_backup(cib_dirname, cib_filename) &lt; 0) {</a>
+<a name="ln385">        exit_rc = pcmk_err_cib_backup;</a>
+<a name="ln386">        goto cleanup;</a>
+<a name="ln387">    }</a>
+<a name="ln388"> </a>
+<a name="ln389">    crm_debug(&quot;Writing CIB to disk&quot;);</a>
+<a name="ln390">    umask(S_IWGRP | S_IWOTH | S_IROTH);</a>
+<a name="ln391">    cib_file_prepare_xml(cib_root);</a>
+<a name="ln392"> </a>
+<a name="ln393">    /* Write the CIB to a temporary file, so we can deploy (near) atomically */</a>
+<a name="ln394">    fd = mkstemp(tmp_cib);</a>
+<a name="ln395">    if (fd &lt; 0) {</a>
+<a name="ln396">        crm_perror(LOG_ERR, &quot;Couldn't open temporary file %s for writing CIB&quot;,</a>
+<a name="ln397">                   tmp_cib);</a>
+<a name="ln398">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln399">        goto cleanup;</a>
+<a name="ln400">    }</a>
+<a name="ln401"> </a>
+<a name="ln402">    /* Protect the temporary file */</a>
+<a name="ln403">    if (fchmod(fd, S_IRUSR | S_IWUSR) &lt; 0) {</a>
+<a name="ln404">        crm_perror(LOG_ERR, &quot;Couldn't protect temporary file %s for writing CIB&quot;,</a>
+<a name="ln405">                   tmp_cib);</a>
+<a name="ln406">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln407">        goto cleanup;</a>
+<a name="ln408">    }</a>
+<a name="ln409">    if (cib_do_chown &amp;&amp; (fchown(fd, cib_file_owner, cib_file_group) &lt; 0)) {</a>
+<a name="ln410">        crm_perror(LOG_ERR, &quot;Couldn't protect temporary file %s for writing CIB&quot;,</a>
+<a name="ln411">                   tmp_cib);</a>
+<a name="ln412">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln413">        goto cleanup;</a>
+<a name="ln414">    }</a>
+<a name="ln415"> </a>
+<a name="ln416">    /* Write out the CIB */</a>
+<a name="ln417">    if (write_xml_fd(cib_root, tmp_cib, fd, FALSE) &lt;= 0) {</a>
+<a name="ln418">        crm_err(&quot;Changes couldn't be written to %s&quot;, tmp_cib);</a>
+<a name="ln419">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln420">        goto cleanup;</a>
+<a name="ln421">    }</a>
+<a name="ln422"> </a>
+<a name="ln423">    /* Calculate CIB digest */</a>
+<a name="ln424">    digest = calculate_on_disk_digest(cib_root);</a>
+<a name="ln425">    CRM_ASSERT(digest != NULL);</a>
+<a name="ln426">    crm_info(&quot;Wrote version %s.%s.0 of the CIB to disk (digest: %s)&quot;,</a>
+<a name="ln427">             (admin_epoch ? admin_epoch : &quot;0&quot;), (epoch ? epoch : &quot;0&quot;), digest);</a>
+<a name="ln428"> </a>
+<a name="ln429">    /* Write the CIB digest to a temporary file */</a>
+<a name="ln430">    fd = mkstemp(tmp_digest);</a>
+<a name="ln431">    if (fd &lt; 0) {</a>
+<a name="ln432">        crm_perror(LOG_ERR, &quot;Could not create temporary file for CIB digest&quot;);</a>
+<a name="ln433">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln434">        goto cleanup;</a>
+<a name="ln435">    }</a>
+<a name="ln436">    if (cib_do_chown &amp;&amp; (fchown(fd, cib_file_owner, cib_file_group) &lt; 0)) {</a>
+<a name="ln437">        crm_perror(LOG_ERR, &quot;Couldn't protect temporary file %s for writing CIB&quot;,</a>
+<a name="ln438">                   tmp_cib);</a>
+<a name="ln439">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln440">        close(fd);</a>
+<a name="ln441">        goto cleanup;</a>
+<a name="ln442">    }</a>
+<a name="ln443">    if (crm_write_sync(fd, digest) &lt; 0) {</a>
+<a name="ln444">        crm_perror(LOG_ERR, &quot;Could not write digest to file %s&quot;, tmp_digest);</a>
+<a name="ln445">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln446">        close(fd);</a>
+<a name="ln447">        goto cleanup;</a>
+<a name="ln448">    }</a>
+<a name="ln449">    close(fd);</a>
+<a name="ln450">    crm_debug(&quot;Wrote digest %s to disk&quot;, digest);</a>
+<a name="ln451"> </a>
+<a name="ln452">    /* Verify that what we wrote is sane */</a>
+<a name="ln453">    crm_info(&quot;Reading cluster configuration file %s (digest: %s)&quot;,</a>
+<a name="ln454">             tmp_cib, tmp_digest);</a>
+<a name="ln455">    rc = cib_file_read_and_verify(tmp_cib, tmp_digest, NULL);</a>
+<a name="ln456">    CRM_ASSERT(rc == 0);</a>
+<a name="ln457"> </a>
+<a name="ln458">    /* Rename temporary files to live, and sync directory changes to media */</a>
+<a name="ln459">    crm_debug(&quot;Activating %s&quot;, tmp_cib);</a>
+<a name="ln460">    if (rename(tmp_cib, cib_path) &lt; 0) {</a>
+<a name="ln461">        crm_perror(LOG_ERR, &quot;Couldn't rename %s as %s&quot;, tmp_cib, cib_path);</a>
+<a name="ln462">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln463">    }</a>
+<a name="ln464">    if (rename(tmp_digest, digest_path) &lt; 0) {</a>
+<a name="ln465">        crm_perror(LOG_ERR, &quot;Couldn't rename %s as %s&quot;, tmp_digest,</a>
+<a name="ln466">                   digest_path);</a>
+<a name="ln467">        exit_rc = pcmk_err_cib_save;</a>
+<a name="ln468">    }</a>
+<a name="ln469">    crm_sync_directory(cib_dirname);</a>
+<a name="ln470"> </a>
+<a name="ln471">  cleanup:</a>
+<a name="ln472">    free(cib_path);</a>
+<a name="ln473">    free(digest_path);</a>
+<a name="ln474">    free(digest);</a>
+<a name="ln475">    free(tmp_digest);</a>
+<a name="ln476">    free(tmp_cib);</a>
+<a name="ln477">    return exit_rc;</a>
+<a name="ln478">}</a>
+<a name="ln479"> </a>
+<a name="ln480">cib_t *</a>
+<a name="ln481">cib_file_new(const char *cib_location)</a>
+<a name="ln482">{</a>
+<a name="ln483">    cib_file_opaque_t *private = NULL;</a>
+<a name="ln484">    cib_t *cib = cib_new_variant();</a>
+<a name="ln485"> </a>
+<a name="ln486">    private = calloc(1, sizeof(cib_file_opaque_t));</a>
+<a name="ln487">    CRM_ASSERT((cib != NULL) &amp;&amp; (private != NULL));</a>
+<a name="ln488"> </a>
+<a name="ln489">    cib-&gt;variant = cib_file;</a>
+<a name="ln490">    cib-&gt;variant_opaque = private;</a>
+<a name="ln491"> </a>
+<a name="ln492">    if (cib_location == NULL) {</a>
+<a name="ln493">        cib_location = getenv(&quot;CIB_file&quot;);</a>
+<a name="ln494">    }</a>
+<a name="ln495">    private-&gt;flags = 0;</a>
+<a name="ln496">    if (cib_file_is_live(cib_location)) {</a>
+<a name="ln497">        set_bit(private-&gt;flags, cib_flag_live);</a>
+<a name="ln498">        crm_trace(&quot;File %s detected as live CIB&quot;, cib_location);</a>
+<a name="ln499">    }</a>
+<a name="ln500">    private-&gt;filename = strdup(cib_location);</a>
+<a name="ln501"> </a>
+<a name="ln502">    /* assign variant specific ops */</a>
+<a name="ln503">    cib-&gt;delegate_fn = cib_file_perform_op_delegate;</a>
+<a name="ln504">    cib-&gt;cmds-&gt;signon = cib_file_signon;</a>
+<a name="ln505">    cib-&gt;cmds-&gt;signoff = cib_file_signoff;</a>
+<a name="ln506">    cib-&gt;cmds-&gt;free = cib_file_free;</a>
+<a name="ln507">    cib-&gt;cmds-&gt;inputfd = cib_file_inputfd;</a>
+<a name="ln508"> </a>
+<a name="ln509">    cib-&gt;cmds-&gt;register_notification = cib_file_register_notification;</a>
+<a name="ln510">    cib-&gt;cmds-&gt;set_connection_dnotify = cib_file_set_connection_dnotify;</a>
+<a name="ln511"> </a>
+<a name="ln512">    return cib;</a>
+<a name="ln513">}</a>
+<a name="ln514"> </a>
+<a name="ln515">static xmlNode *in_mem_cib = NULL;</a>
+<a name="ln516"> </a>
+<a name="ln517">/*!</a>
+<a name="ln518"> * \internal</a>
+<a name="ln519"> * \brief Read CIB from disk and validate it against XML DTD</a>
+<a name="ln520"> *</a>
+<a name="ln521"> * \param[in] filename Name of file to read CIB from</a>
+<a name="ln522"> *</a>
+<a name="ln523"> * \return pcmk_ok on success,</a>
+<a name="ln524"> *         -ENXIO if file does not exist (or stat() otherwise fails), or</a>
+<a name="ln525"> *         -pcmk_err_schema_validation if XML doesn't parse or validate</a>
+<a name="ln526"> * \note If filename is the live CIB, this will *not* verify its digest,</a>
+<a name="ln527"> *       though that functionality would be trivial to add here.</a>
+<a name="ln528"> *       Also, this will *not* verify that the file is writeable,</a>
+<a name="ln529"> *       because some callers might not need to write.</a>
+<a name="ln530"> */</a>
+<a name="ln531">static int</a>
+<a name="ln532">load_file_cib(const char *filename)</a>
+<a name="ln533">{</a>
+<a name="ln534">    struct stat buf;</a>
+<a name="ln535">    xmlNode *root = NULL;</a>
+<a name="ln536">    const char *ignore_dtd = NULL;</a>
+<a name="ln537"> </a>
+<a name="ln538">    /* Ensure file is readable */</a>
+<a name="ln539">    if (stat(filename, &amp;buf) &lt; 0) {</a>
+<a name="ln540">        return -ENXIO;</a>
+<a name="ln541">    }</a>
+<a name="ln542"> </a>
+<a name="ln543">    /* Parse XML from file */</a>
+<a name="ln544">    root = filename2xml(filename);</a>
+<a name="ln545">    if (root == NULL) {</a>
+<a name="ln546">        return -pcmk_err_schema_validation;</a>
+<a name="ln547">    }</a>
+<a name="ln548"> </a>
+<a name="ln549">    /* Add a status section if not already present */</a>
+<a name="ln550">    if (find_xml_node(root, XML_CIB_TAG_STATUS, FALSE) == NULL) {</a>
+<a name="ln551">        create_xml_node(root, XML_CIB_TAG_STATUS);</a>
+<a name="ln552">    }</a>
+<a name="ln553"> </a>
+<a name="ln554">    /* Validate XML against its specified DTD */</a>
+<a name="ln555">    ignore_dtd = crm_element_value(root, XML_ATTR_VALIDATION);</a>
+<a name="ln556">    if (validate_xml(root, NULL, TRUE) == FALSE) {</a>
+<a name="ln557">        crm_err(&quot;CIB does not validate against %s&quot;, ignore_dtd);</a>
+<a name="ln558">        free_xml(root);</a>
+<a name="ln559">        return -pcmk_err_schema_validation;</a>
+<a name="ln560">    }</a>
+<a name="ln561"> </a>
+<a name="ln562">    /* Remember the parsed XML for later use */</a>
+<a name="ln563">    in_mem_cib = root;</a>
+<a name="ln564">    return pcmk_ok;</a>
+<a name="ln565">}</a>
+<a name="ln566"> </a>
+<a name="ln567">int</a>
+<a name="ln568">cib_file_signon(cib_t * cib, const char *name, enum cib_conn_type type)</a>
+<a name="ln569">{</a>
+<a name="ln570">    int rc = pcmk_ok;</a>
+<a name="ln571">    cib_file_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln572"> </a>
+<a name="ln573">    if (private-&gt;filename == NULL) {</a>
+<a name="ln574">        rc = -EINVAL;</a>
+<a name="ln575">    } else {</a>
+<a name="ln576">        rc = load_file_cib(private-&gt;filename);</a>
+<a name="ln577">    }</a>
+<a name="ln578"> </a>
+<a name="ln579">    if (rc == pcmk_ok) {</a>
+<a name="ln580">        crm_debug(&quot;%s: Opened connection to local file '%s'&quot;, name, private-&gt;filename);</a>
+<a name="ln581">        cib-&gt;state = cib_connected_command;</a>
+<a name="ln582">        cib-&gt;type = cib_command;</a>
+<a name="ln583"> </a>
+<a name="ln584">    } else {</a>
+<a name="ln585">        fprintf(stderr, &quot;%s: Connection to local file '%s' failed: %s\n&quot;,</a>
+<a name="ln586">                name, private-&gt;filename, pcmk_strerror(rc));</a>
+<a name="ln587">    }</a>
+<a name="ln588"> </a>
+<a name="ln589">    return rc;</a>
+<a name="ln590">}</a>
+<a name="ln591"> </a>
+<a name="ln592">/*!</a>
+<a name="ln593"> * \internal</a>
+<a name="ln594"> * \brief Write out the in-memory CIB to a live CIB file</a>
+<a name="ln595"> *</a>
+<a name="ln596"> * param[in] path Full path to file to write</a>
+<a name="ln597"> *</a>
+<a name="ln598"> * \return 0 on success, -1 on failure</a>
+<a name="ln599"> */</a>
+<a name="ln600">static int</a>
+<a name="ln601">cib_file_write_live(char *path)</a>
+<a name="ln602">{</a>
+<a name="ln603">    uid_t uid = geteuid();</a>
+<a name="ln604">    struct passwd *daemon_pwent;</a>
+<a name="ln605">    char *sep = strrchr(path, '/');</a>
+<a name="ln606">    const char *cib_dirname, *cib_filename;</a>
+<a name="ln607">    int rc = 0;</a>
+<a name="ln608"> </a>
+<a name="ln609">    /* Get the desired uid/gid */</a>
+<a name="ln610">    errno = 0;</a>
+<a name="ln611">    daemon_pwent = getpwnam(CRM_DAEMON_USER);</a>
+<a name="ln612">    if (daemon_pwent == NULL) {</a>
+<a name="ln613">        crm_perror(LOG_ERR, &quot;Could not find %s user&quot;, CRM_DAEMON_USER);</a>
+<a name="ln614">        return -1;</a>
+<a name="ln615">    }</a>
+<a name="ln616"> </a>
+<a name="ln617">    /* If we're root, we can change the ownership;</a>
+<a name="ln618">     * if we're daemon, anything we create will be OK;</a>
+<a name="ln619">     * otherwise, block access so we don't create wrong owner</a>
+<a name="ln620">     */</a>
+<a name="ln621">    if ((uid != 0) &amp;&amp; (uid != daemon_pwent-&gt;pw_uid)) {</a>
+<a name="ln622">        crm_perror(LOG_ERR, &quot;Must be root or %s to modify live CIB&quot;,</a>
+<a name="ln623">                   CRM_DAEMON_USER);</a>
+<a name="ln624">        return 0;</a>
+<a name="ln625">    }</a>
+<a name="ln626"> </a>
+<a name="ln627">    /* fancy footwork to separate dirname from filename</a>
+<a name="ln628">     * (we know the canonical name maps to the live CIB,</a>
+<a name="ln629">     * but the given name might be relative, or symlinked)</a>
+<a name="ln630">     */</a>
+<a name="ln631">    if (sep == NULL) { /* no directory component specified */</a>
+<a name="ln632">        cib_dirname = &quot;./&quot;;</a>
+<a name="ln633">        cib_filename = path;</a>
+<a name="ln634">    } else if (sep == path) { /* given name is in / */</a>
+<a name="ln635">        cib_dirname = &quot;/&quot;;</a>
+<a name="ln636">        cib_filename = path + 1;</a>
+<a name="ln637">    } else { /* typical case; split given name into parts */</a>
+<a name="ln638">        *sep = '\0';</a>
+<a name="ln639">        cib_dirname = path;</a>
+<a name="ln640">        cib_filename = sep + 1;</a>
+<a name="ln641">    }</a>
+<a name="ln642"> </a>
+<a name="ln643">    /* if we're root, we want to update the file ownership */</a>
+<a name="ln644">    if (uid == 0) {</a>
+<a name="ln645">        cib_file_owner = daemon_pwent-&gt;pw_uid;</a>
+<a name="ln646">        cib_file_group = daemon_pwent-&gt;pw_gid;</a>
+<a name="ln647">        cib_do_chown = TRUE;</a>
+<a name="ln648">    }</a>
+<a name="ln649"> </a>
+<a name="ln650">    /* write the file */</a>
+<a name="ln651">    if (cib_file_write_with_digest(in_mem_cib, cib_dirname,</a>
+<a name="ln652">                                   cib_filename) != pcmk_ok) {</a>
+<a name="ln653">        rc = -1;</a>
+<a name="ln654">    }</a>
+<a name="ln655"> </a>
+<a name="ln656">    /* turn off file ownership changes, for other callers */</a>
+<a name="ln657">    if (uid == 0) {</a>
+<a name="ln658">        cib_do_chown = FALSE;</a>
+<a name="ln659">    }</a>
+<a name="ln660"> </a>
+<a name="ln661">    /* undo fancy stuff */</a>
+<a name="ln662">    if ((sep != NULL) &amp;&amp; (*sep == '\0')) {</a>
+<a name="ln663">        *sep = '/';</a>
+<a name="ln664">    }</a>
+<a name="ln665"> </a>
+<a name="ln666">    return rc;</a>
+<a name="ln667">}</a>
+<a name="ln668"> </a>
+<a name="ln669">/*!</a>
+<a name="ln670"> * \internal</a>
+<a name="ln671"> * \brief Sign-off method for CIB file variants</a>
+<a name="ln672"> *</a>
+<a name="ln673"> * This will write the file to disk if needed, and free the in-memory CIB. If</a>
+<a name="ln674"> * the file is the live CIB, it will compute and write a signature as well.</a>
+<a name="ln675"> *</a>
+<a name="ln676"> * \param[in] cib CIB object to sign off</a>
+<a name="ln677"> *</a>
+<a name="ln678"> * \return pcmk_ok on success, pcmk_err_generic on failure</a>
+<a name="ln679"> * \todo This method should refuse to write the live CIB if the CIB daemon is</a>
+<a name="ln680"> *       running.</a>
+<a name="ln681"> */</a>
+<a name="ln682">int</a>
+<a name="ln683">cib_file_signoff(cib_t * cib)</a>
+<a name="ln684">{</a>
+<a name="ln685">    int rc = pcmk_ok;</a>
+<a name="ln686">    cib_file_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln687"> </a>
+<a name="ln688">    crm_debug(&quot;Signing out of the CIB Service&quot;);</a>
+<a name="ln689">    cib-&gt;state = cib_disconnected;</a>
+<a name="ln690">    cib-&gt;type = cib_no_connection;</a>
+<a name="ln691"> </a>
+<a name="ln692">    /* If the in-memory CIB has been changed, write it to disk */</a>
+<a name="ln693">    if (is_set(private-&gt;flags, cib_flag_dirty)) {</a>
+<a name="ln694"> </a>
+<a name="ln695">        /* If this is the live CIB, write it out with a digest */</a>
+<a name="ln696">        if (is_set(private-&gt;flags, cib_flag_live)) {</a>
+<a name="ln697">            if (cib_file_write_live(private-&gt;filename) &lt; 0) {</a>
+<a name="ln698">                rc = pcmk_err_generic;</a>
+<a name="ln699">            }</a>
+<a name="ln700"> </a>
+<a name="ln701">        /* Otherwise, it's a simple write */</a>
+<a name="ln702">        } else {</a>
+<a name="ln703">            gboolean do_bzip = crm_ends_with(private-&gt;filename, &quot;.bz2&quot;);</a>
+<a name="ln704"> </a>
+<a name="ln705">            if (write_xml_file(in_mem_cib, private-&gt;filename, do_bzip) &lt;= 0) {</a>
+<a name="ln706">                rc = pcmk_err_generic;</a>
+<a name="ln707">            }</a>
+<a name="ln708">        }</a>
+<a name="ln709"> </a>
+<a name="ln710">        if (rc == pcmk_ok) {</a>
+<a name="ln711">            crm_info(&quot;Wrote CIB to %s&quot;, private-&gt;filename);</a>
+<a name="ln712">            clear_bit(private-&gt;flags, cib_flag_dirty);</a>
+<a name="ln713">        } else {</a>
+<a name="ln714">            crm_err(&quot;Could not write CIB to %s&quot;, private-&gt;filename);</a>
+<a name="ln715">        }</a>
+<a name="ln716">    }</a>
+<a name="ln717"> </a>
+<a name="ln718">    /* Free the in-memory CIB */</a>
+<a name="ln719">    free_xml(in_mem_cib);</a>
+<a name="ln720">    in_mem_cib = NULL;</a>
+<a name="ln721">    return rc;</a>
+<a name="ln722">}</a>
+<a name="ln723"> </a>
+<a name="ln724">int</a>
+<a name="ln725">cib_file_free(cib_t * cib)</a>
+<a name="ln726">{</a>
+<a name="ln727">    int rc = pcmk_ok;</a>
+<a name="ln728"> </a>
+<a name="ln729">    if (cib-&gt;state != cib_disconnected) {</a>
+<a name="ln730">        rc = cib_file_signoff(cib);</a>
+<a name="ln731">    }</a>
+<a name="ln732"> </a>
+<a name="ln733">    if (rc == pcmk_ok) {</a>
+<a name="ln734">        cib_file_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln735"> </a>
+<a name="ln736">        free(private-&gt;filename);</a>
+<a name="ln737">        free(cib-&gt;cmds);</a>
+<a name="ln738">        free(private);</a>
+<a name="ln739">        free(cib);</a>
+<a name="ln740"> </a>
+<a name="ln741">    } else {</a>
+<a name="ln742">        fprintf(stderr, &quot;Couldn't sign off: %d\n&quot;, rc);</a>
+<a name="ln743">    }</a>
+<a name="ln744"> </a>
+<a name="ln745">    return rc;</a>
+<a name="ln746">}</a>
+<a name="ln747"> </a>
+<a name="ln748">struct cib_func_entry {</a>
+<a name="ln749">    const char *op;</a>
+<a name="ln750">    gboolean read_only;</a>
+<a name="ln751">    cib_op_t fn;</a>
+<a name="ln752">};</a>
+<a name="ln753"> </a>
+<a name="ln754">/* *INDENT-OFF* */</a>
+<a name="ln755">static struct cib_func_entry cib_file_ops[] = {</a>
+<a name="ln756">    {CIB_OP_QUERY,      TRUE,  cib_process_query},</a>
+<a name="ln757">    {CIB_OP_MODIFY,     FALSE, cib_process_modify},</a>
+<a name="ln758">    {CIB_OP_APPLY_DIFF, FALSE, cib_process_diff},</a>
+<a name="ln759">    {CIB_OP_BUMP,       FALSE, cib_process_bump},</a>
+<a name="ln760">    {CIB_OP_REPLACE,    FALSE, cib_process_replace},</a>
+<a name="ln761">    {CIB_OP_CREATE,     FALSE, cib_process_create},</a>
+<a name="ln762">    {CIB_OP_DELETE,     FALSE, cib_process_delete},</a>
+<a name="ln763">    {CIB_OP_ERASE,      FALSE, cib_process_erase},</a>
+<a name="ln764">    {CIB_OP_UPGRADE,    FALSE, cib_process_upgrade},</a>
+<a name="ln765">};</a>
+<a name="ln766">/* *INDENT-ON* */</a>
+<a name="ln767"> </a>
+<a name="ln768">int</a>
+<a name="ln769">cib_file_perform_op(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln770">                    xmlNode * data, xmlNode ** output_data, int call_options)</a>
+<a name="ln771">{</a>
+<a name="ln772">    return cib_file_perform_op_delegate(cib, op, host, section, data, output_data, call_options,</a>
+<a name="ln773">                                        NULL);</a>
+<a name="ln774">}</a>
+<a name="ln775"> </a>
+<a name="ln776">int</a>
+<a name="ln777">cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, const char *section,</a>
+<a name="ln778">                             xmlNode * data, xmlNode ** output_data, int call_options,</a>
+<a name="ln779">                             const char *user_name)</a>
+<a name="ln780">{</a>
+<a name="ln781">    int rc = pcmk_ok;</a>
+<a name="ln782">    char *effective_user = NULL;</a>
+<a name="ln783">    gboolean query = FALSE;</a>
+<a name="ln784">    gboolean changed = FALSE;</a>
+<a name="ln785">    xmlNode *request = NULL;</a>
+<a name="ln786">    xmlNode *output = NULL;</a>
+<a name="ln787">    xmlNode *cib_diff = NULL;</a>
+<a name="ln788">    xmlNode *result_cib = NULL;</a>
+<a name="ln789">    cib_op_t *fn = NULL;</a>
+<a name="ln790">    int lpc = 0;</a>
+<a name="ln791">    static int max_msg_types = DIMOF(cib_file_ops);</a>
+<a name="ln792">    cib_file_opaque_t *private = cib-&gt;variant_opaque;</a>
+<a name="ln793"> </a>
+<a name="ln794">    crm_info(&quot;%s on %s&quot;, op, section);</a>
+<a name="ln795">    call_options |= (cib_no_mtime | cib_inhibit_bcast | cib_scope_local);</a>
+<a name="ln796"> </a>
+<a name="ln797">    if (cib-&gt;state == cib_disconnected) {</a>
+<a name="ln798">        return -ENOTCONN;</a>
+<a name="ln799">    }</a>
+<a name="ln800"> </a>
+<a name="ln801">    if (output_data != NULL) {</a>
+<a name="ln802">        *output_data = NULL;</a>
+<a name="ln803">    }</a>
+<a name="ln804"> </a>
+<a name="ln805">    if (op == NULL) {</a>
+<a name="ln806">        return -EINVAL;</a>
+<a name="ln807">    }</a>
+<a name="ln808"> </a>
+<a name="ln809">    for (lpc = 0; lpc &lt; max_msg_types; lpc++) {</a>
+<a name="ln810">        if (safe_str_eq(op, cib_file_ops[lpc].op)) {</a>
+<a name="ln811">            fn = &amp;(cib_file_ops[lpc].fn);</a>
+<a name="ln812">            query = cib_file_ops[lpc].read_only;</a>
+<a name="ln813">            break;</a>
+<a name="ln814">        }</a>
+<a name="ln815">    }</a>
+<a name="ln816"> </a>
+<a name="ln817">    if (fn == NULL) {</a>
+<a name="ln818">        return -EPROTONOSUPPORT;</a>
+<a name="ln819">    }</a>
+<a name="ln820"> </a>
+<a name="ln821">    cib-&gt;call_id++;</a>
+<a name="ln822">    request = cib_create_op(cib-&gt;call_id, &quot;dummy-token&quot;, op, host, section, data, call_options, user_name);</a>
+<a name="ln823">#if ENABLE_ACL</a>
+<a name="ln824">    if(user_name) {</a>
+<a name="ln825">        crm_xml_add(request, XML_ACL_TAG_USER, user_name);</a>
+<a name="ln826">    }</a>
+<a name="ln827">    crm_trace(&quot;Performing %s operation as %s&quot;, op, user_name);</a>
+<a name="ln828">#endif</a>
+<a name="ln829"> </a>
+<a name="ln830">    /* Mirror the logic in cib_prepare_common() */</a>
+<a name="ln831">    if (section != NULL &amp;&amp; data != NULL &amp;&amp; crm_str_eq(crm_element_name(data), XML_TAG_CIB, TRUE)) {</a>
+<a name="ln832">        data = get_object_root(section, data);</a>
+<a name="ln833">    }</a>
+<a name="ln834"> </a>
+<a name="ln835">    rc = cib_perform_op(op, call_options, fn, query,</a>
+<a name="ln836">                        section, request, data, TRUE, &amp;changed, in_mem_cib, &amp;result_cib, &amp;cib_diff,</a>
+<a name="ln837">                        &amp;output);</a>
+<a name="ln838"> </a>
+<a name="ln839">    free_xml(request);</a>
+<a name="ln840">    if (rc == -pcmk_err_schema_validation) {</a>
+<a name="ln841">        validate_xml_verbose(result_cib);</a>
+<a name="ln842">    }</a>
+<a name="ln843"> </a>
+<a name="ln844">    if (rc != pcmk_ok) {</a>
+<a name="ln845">        free_xml(result_cib);</a>
+<a name="ln846"> </a>
+<a name="ln847">    } else if (query == FALSE) {</a>
+<a name="ln848">        xml_log_patchset(LOG_DEBUG, &quot;cib:diff&quot;, cib_diff);</a>
+<a name="ln849">        free_xml(in_mem_cib);</a>
+<a name="ln850">        in_mem_cib = result_cib;</a>
+<a name="ln851">        set_bit(private-&gt;flags, cib_flag_dirty);</a>
+<a name="ln852">    }</a>
+<a name="ln853"> </a>
+<a name="ln854">    free_xml(cib_diff);</a>
+<a name="ln855"> </a>
+<a name="ln856">    if (cib-&gt;op_callback != NULL) {</a>
+<a name="ln857">        cib-&gt;op_callback(NULL, cib-&gt;call_id, rc, output);</a>
+<a name="ln858">    }</a>
+<a name="ln859"> </a>
+<a name="ln860">    if (output_data &amp;&amp; output) {</a>
+<a name="ln861">        if(output == in_mem_cib) {</a>
+<a name="ln862">            *output_data = copy_xml(output);</a>
+<a name="ln863">        } else {</a>
+<a name="ln864">            *output_data = output;</a>
+<a name="ln865">        }</a>
+<a name="ln866"> </a>
+<a name="ln867">    } else if(output != in_mem_cib) {</a>
+<a name="ln868">        free_xml(output);</a>
+<a name="ln869">    }</a>
+<a name="ln870"> </a>
+<a name="ln871">    free(effective_user);</a>
+<a name="ln872">    return rc;</a>
+<a name="ln873">}</a>
+
+</code></pre>
+<div class="balloon" rel="456"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (rc == 0) == (0).</p></div>
+<div class="balloon" rel="495"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'private'. Check lines: 495, 486.</p></div>
+<div class="balloon" rel="871"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'free' function. Inspect the first argument.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

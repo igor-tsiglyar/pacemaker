@@ -1,0 +1,2960 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;sys/types.h&gt;</a>
+<a name="ln27">#include &lt;regex.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;crm/crm.h&gt;</a>
+<a name="ln30">#include &lt;crm/cib.h&gt;</a>
+<a name="ln31">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln32">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;glib.h&gt;</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln37">#include &lt;pengine.h&gt;</a>
+<a name="ln38">#include &lt;allocate.h&gt;</a>
+<a name="ln39">#include &lt;utils.h&gt;</a>
+<a name="ln40">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">enum pe_order_kind {</a>
+<a name="ln43">    pe_order_kind_optional,</a>
+<a name="ln44">    pe_order_kind_mandatory,</a>
+<a name="ln45">    pe_order_kind_serialize,</a>
+<a name="ln46">};</a>
+<a name="ln47"> </a>
+<a name="ln48">#define EXPAND_CONSTRAINT_IDREF(__set, __rsc, __name) do {				\</a>
+<a name="ln49">	__rsc = pe_find_constraint_resource(data_set-&gt;resources, __name);		\</a>
+<a name="ln50">	if(__rsc == NULL) {						\</a>
+<a name="ln51">	    crm_config_err(&quot;%s: No resource found for %s&quot;, __set, __name); \</a>
+<a name="ln52">	    return FALSE;						\</a>
+<a name="ln53">	}								\</a>
+<a name="ln54">    } while(0)</a>
+<a name="ln55"> </a>
+<a name="ln56">enum pe_ordering get_flags(const char *id, enum pe_order_kind kind,</a>
+<a name="ln57">                           const char *action_first, const char *action_then, gboolean invert);</a>
+<a name="ln58">enum pe_ordering get_asymmetrical_flags(enum pe_order_kind kind);</a>
+<a name="ln59">static rsc_to_node_t *generate_location_rule(resource_t * rsc, xmlNode * rule_xml,</a>
+<a name="ln60">                                             const char *discovery, pe_working_set_t * data_set,</a>
+<a name="ln61">                                             pe_match_data_t * match_data);</a>
+<a name="ln62"> </a>
+<a name="ln63">gboolean</a>
+<a name="ln64">unpack_constraints(xmlNode * xml_constraints, pe_working_set_t * data_set)</a>
+<a name="ln65">{</a>
+<a name="ln66">    xmlNode *xml_obj = NULL;</a>
+<a name="ln67">    xmlNode *lifetime = NULL;</a>
+<a name="ln68"> </a>
+<a name="ln69">    for (xml_obj = __xml_first_child(xml_constraints); xml_obj != NULL;</a>
+<a name="ln70">         xml_obj = __xml_next_element(xml_obj)) {</a>
+<a name="ln71">        const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln72">        const char *tag = crm_element_name(xml_obj);</a>
+<a name="ln73"> </a>
+<a name="ln74">        if (id == NULL) {</a>
+<a name="ln75">            crm_config_err(&quot;Constraint &lt;%s...&gt; must have an id&quot;, tag);</a>
+<a name="ln76">            continue;</a>
+<a name="ln77">        }</a>
+<a name="ln78"> </a>
+<a name="ln79">        crm_trace(&quot;Processing constraint %s %s&quot;, tag, id);</a>
+<a name="ln80"> </a>
+<a name="ln81">        lifetime = first_named_child(xml_obj, &quot;lifetime&quot;);</a>
+<a name="ln82">        if (lifetime) {</a>
+<a name="ln83">            crm_config_warn(&quot;Support for the lifetime tag, used by %s, is deprecated.&quot;</a>
+<a name="ln84">                            &quot; The rules it contains should instead be direct descendents of the constraint object&quot;,</a>
+<a name="ln85">                            id);</a>
+<a name="ln86">        }</a>
+<a name="ln87"> </a>
+<a name="ln88">        if (test_ruleset(lifetime, NULL, data_set-&gt;now) == FALSE) {</a>
+<a name="ln89">            crm_info(&quot;Constraint %s %s is not active&quot;, tag, id);</a>
+<a name="ln90"> </a>
+<a name="ln91">        } else if (safe_str_eq(XML_CONS_TAG_RSC_ORDER, tag)) {</a>
+<a name="ln92">            unpack_rsc_order(xml_obj, data_set);</a>
+<a name="ln93"> </a>
+<a name="ln94">        } else if (safe_str_eq(XML_CONS_TAG_RSC_DEPEND, tag)) {</a>
+<a name="ln95">            unpack_rsc_colocation(xml_obj, data_set);</a>
+<a name="ln96"> </a>
+<a name="ln97">        } else if (safe_str_eq(XML_CONS_TAG_RSC_LOCATION, tag)) {</a>
+<a name="ln98">            unpack_location(xml_obj, data_set);</a>
+<a name="ln99"> </a>
+<a name="ln100">        } else if (safe_str_eq(XML_CONS_TAG_RSC_TICKET, tag)) {</a>
+<a name="ln101">            unpack_rsc_ticket(xml_obj, data_set);</a>
+<a name="ln102"> </a>
+<a name="ln103">        } else {</a>
+<a name="ln104">            pe_err(&quot;Unsupported constraint type: %s&quot;, tag);</a>
+<a name="ln105">        }</a>
+<a name="ln106">    }</a>
+<a name="ln107"> </a>
+<a name="ln108">    return TRUE;</a>
+<a name="ln109">}</a>
+<a name="ln110"> </a>
+<a name="ln111">static const char *</a>
+<a name="ln112">invert_action(const char *action)</a>
+<a name="ln113">{</a>
+<a name="ln114">    if (safe_str_eq(action, RSC_START)) {</a>
+<a name="ln115">        return RSC_STOP;</a>
+<a name="ln116"> </a>
+<a name="ln117">    } else if (safe_str_eq(action, RSC_STOP)) {</a>
+<a name="ln118">        return RSC_START;</a>
+<a name="ln119"> </a>
+<a name="ln120">    } else if (safe_str_eq(action, RSC_PROMOTE)) {</a>
+<a name="ln121">        return RSC_DEMOTE;</a>
+<a name="ln122"> </a>
+<a name="ln123">    } else if (safe_str_eq(action, RSC_DEMOTE)) {</a>
+<a name="ln124">        return RSC_PROMOTE;</a>
+<a name="ln125"> </a>
+<a name="ln126">    } else if (safe_str_eq(action, RSC_PROMOTED)) {</a>
+<a name="ln127">        return RSC_DEMOTED;</a>
+<a name="ln128"> </a>
+<a name="ln129">    } else if (safe_str_eq(action, RSC_DEMOTED)) {</a>
+<a name="ln130">        return RSC_PROMOTED;</a>
+<a name="ln131"> </a>
+<a name="ln132">    } else if (safe_str_eq(action, RSC_STARTED)) {</a>
+<a name="ln133">        return RSC_STOPPED;</a>
+<a name="ln134"> </a>
+<a name="ln135">    } else if (safe_str_eq(action, RSC_STOPPED)) {</a>
+<a name="ln136">        return RSC_STARTED;</a>
+<a name="ln137">    }</a>
+<a name="ln138">    crm_config_warn(&quot;Unknown action: %s&quot;, action);</a>
+<a name="ln139">    return NULL;</a>
+<a name="ln140">}</a>
+<a name="ln141"> </a>
+<a name="ln142">static enum pe_order_kind</a>
+<a name="ln143">get_ordering_type(xmlNode * xml_obj)</a>
+<a name="ln144">{</a>
+<a name="ln145">    enum pe_order_kind kind_e = pe_order_kind_mandatory;</a>
+<a name="ln146">    const char *kind = crm_element_value(xml_obj, XML_ORDER_ATTR_KIND);</a>
+<a name="ln147"> </a>
+<a name="ln148">    if (kind == NULL) {</a>
+<a name="ln149">        const char *score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);</a>
+<a name="ln150"> </a>
+<a name="ln151">        kind_e = pe_order_kind_mandatory;</a>
+<a name="ln152"> </a>
+<a name="ln153">        if (score) {</a>
+<a name="ln154">            int score_i = char2score(score);</a>
+<a name="ln155"> </a>
+<a name="ln156">            if (score_i == 0) {</a>
+<a name="ln157">                kind_e = pe_order_kind_optional;</a>
+<a name="ln158">            }</a>
+<a name="ln159"> </a>
+<a name="ln160">            /* } else if(rsc_then-&gt;variant == pe_native &amp;&amp; rsc_first-&gt;variant &gt;= pe_clone) { */</a>
+<a name="ln161">            /*     kind_e = pe_order_kind_optional; */</a>
+<a name="ln162">        }</a>
+<a name="ln163"> </a>
+<a name="ln164">    } else if (safe_str_eq(kind, &quot;Mandatory&quot;)) {</a>
+<a name="ln165">        kind_e = pe_order_kind_mandatory;</a>
+<a name="ln166"> </a>
+<a name="ln167">    } else if (safe_str_eq(kind, &quot;Optional&quot;)) {</a>
+<a name="ln168">        kind_e = pe_order_kind_optional;</a>
+<a name="ln169"> </a>
+<a name="ln170">    } else if (safe_str_eq(kind, &quot;Serialize&quot;)) {</a>
+<a name="ln171">        kind_e = pe_order_kind_serialize;</a>
+<a name="ln172"> </a>
+<a name="ln173">    } else {</a>
+<a name="ln174">        const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln175"> </a>
+<a name="ln176">        crm_config_err(&quot;Constraint %s: Unknown type '%s'&quot;, id, kind);</a>
+<a name="ln177">    }</a>
+<a name="ln178">    return kind_e;</a>
+<a name="ln179">}</a>
+<a name="ln180"> </a>
+<a name="ln181">static resource_t *</a>
+<a name="ln182">pe_find_constraint_resource(GListPtr rsc_list, const char *id)</a>
+<a name="ln183">{</a>
+<a name="ln184">    GListPtr rIter = NULL;</a>
+<a name="ln185"> </a>
+<a name="ln186">    for (rIter = rsc_list; id &amp;&amp; rIter; rIter = rIter-&gt;next) {</a>
+<a name="ln187">        resource_t *parent = rIter-&gt;data;</a>
+<a name="ln188"> </a>
+<a name="ln189">        resource_t *match =</a>
+<a name="ln190">            parent-&gt;fns-&gt;find_rsc(parent, id, NULL, pe_find_renamed | pe_find_current);</a>
+<a name="ln191"> </a>
+<a name="ln192">        if (match != NULL) {</a>
+<a name="ln193">            if(safe_str_neq(match-&gt;id, id)) {</a>
+<a name="ln194">                /* We found an instance of a clone instead */</a>
+<a name="ln195">                match = uber_parent(match);</a>
+<a name="ln196">                crm_debug(&quot;Found %s for %s&quot;, match-&gt;id, id);</a>
+<a name="ln197">            }</a>
+<a name="ln198">            return match;</a>
+<a name="ln199">        }</a>
+<a name="ln200">    }</a>
+<a name="ln201">    crm_trace(&quot;No match for %s&quot;, id);</a>
+<a name="ln202">    return NULL;</a>
+<a name="ln203">}</a>
+<a name="ln204"> </a>
+<a name="ln205">static gboolean</a>
+<a name="ln206">pe_find_constraint_tag(pe_working_set_t * data_set, const char * id, tag_t ** tag)</a>
+<a name="ln207">{</a>
+<a name="ln208">    gboolean rc = FALSE;</a>
+<a name="ln209"> </a>
+<a name="ln210">    *tag = NULL;</a>
+<a name="ln211">    rc = g_hash_table_lookup_extended(data_set-&gt;template_rsc_sets, id,</a>
+<a name="ln212">                                       NULL, (gpointer*) tag);</a>
+<a name="ln213"> </a>
+<a name="ln214">    if (rc == FALSE) {</a>
+<a name="ln215">        rc = g_hash_table_lookup_extended(data_set-&gt;tags, id,</a>
+<a name="ln216">                                          NULL, (gpointer*) tag);</a>
+<a name="ln217"> </a>
+<a name="ln218">        if (rc == FALSE) {</a>
+<a name="ln219">            crm_config_warn(&quot;No template/tag named '%s'&quot;, id);</a>
+<a name="ln220">            return FALSE;</a>
+<a name="ln221"> </a>
+<a name="ln222">        } else if (*tag == NULL) {</a>
+<a name="ln223">            crm_config_warn(&quot;No resource is tagged with '%s'&quot;, id);</a>
+<a name="ln224">            return FALSE;</a>
+<a name="ln225">        }</a>
+<a name="ln226"> </a>
+<a name="ln227">    } else if (*tag == NULL) {</a>
+<a name="ln228">        crm_config_warn(&quot;No resource is derived from template '%s'&quot;, id);</a>
+<a name="ln229">        return FALSE;</a>
+<a name="ln230">    }</a>
+<a name="ln231"> </a>
+<a name="ln232">    return rc;</a>
+<a name="ln233">}</a>
+<a name="ln234"> </a>
+<a name="ln235">static gboolean</a>
+<a name="ln236">valid_resource_or_tag(pe_working_set_t * data_set, const char * id,</a>
+<a name="ln237">                      resource_t ** rsc, tag_t ** tag)</a>
+<a name="ln238">{</a>
+<a name="ln239">    gboolean rc = FALSE;</a>
+<a name="ln240"> </a>
+<a name="ln241">    if (rsc) {</a>
+<a name="ln242">        *rsc = NULL;</a>
+<a name="ln243">        *rsc = pe_find_constraint_resource(data_set-&gt;resources, id);</a>
+<a name="ln244">        if (*rsc) {</a>
+<a name="ln245">            return TRUE;</a>
+<a name="ln246">        }</a>
+<a name="ln247">    }</a>
+<a name="ln248"> </a>
+<a name="ln249">    if (tag) {</a>
+<a name="ln250">        *tag = NULL;</a>
+<a name="ln251">        rc = pe_find_constraint_tag(data_set, id, tag);</a>
+<a name="ln252">    }</a>
+<a name="ln253"> </a>
+<a name="ln254">    return rc;</a>
+<a name="ln255">}</a>
+<a name="ln256"> </a>
+<a name="ln257">static gboolean</a>
+<a name="ln258">unpack_simple_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln259">{</a>
+<a name="ln260">    int order_id = 0;</a>
+<a name="ln261">    resource_t *rsc_then = NULL;</a>
+<a name="ln262">    resource_t *rsc_first = NULL;</a>
+<a name="ln263">    gboolean invert_bool = TRUE;</a>
+<a name="ln264">    int min_required_before = 0;</a>
+<a name="ln265">    enum pe_order_kind kind = pe_order_kind_mandatory;</a>
+<a name="ln266">    enum pe_ordering cons_weight = pe_order_optional;</a>
+<a name="ln267"> </a>
+<a name="ln268">    const char *id_first = NULL;</a>
+<a name="ln269">    const char *id_then = NULL;</a>
+<a name="ln270">    const char *action_then = NULL;</a>
+<a name="ln271">    const char *action_first = NULL;</a>
+<a name="ln272">    const char *instance_then = NULL;</a>
+<a name="ln273">    const char *instance_first = NULL;</a>
+<a name="ln274">    const char *require_all_s = NULL;</a>
+<a name="ln275"> </a>
+<a name="ln276">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln277">    const char *invert = crm_element_value(xml_obj, XML_CONS_ATTR_SYMMETRICAL);</a>
+<a name="ln278"> </a>
+<a name="ln279">    crm_str_to_boolean(invert, &amp;invert_bool);</a>
+<a name="ln280"> </a>
+<a name="ln281">    if (xml_obj == NULL) {</a>
+<a name="ln282">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln283">        return FALSE;</a>
+<a name="ln284"> </a>
+<a name="ln285">    } else if (id == NULL) {</a>
+<a name="ln286">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln287">        return FALSE;</a>
+<a name="ln288">    }</a>
+<a name="ln289"> </a>
+<a name="ln290">    id_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN);</a>
+<a name="ln291">    id_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST);</a>
+<a name="ln292"> </a>
+<a name="ln293">    action_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN_ACTION);</a>
+<a name="ln294">    action_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST_ACTION);</a>
+<a name="ln295"> </a>
+<a name="ln296">    instance_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN_INSTANCE);</a>
+<a name="ln297">    instance_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST_INSTANCE);</a>
+<a name="ln298"> </a>
+<a name="ln299">    if (action_first == NULL) {</a>
+<a name="ln300">        action_first = RSC_START;</a>
+<a name="ln301">    }</a>
+<a name="ln302">    if (action_then == NULL) {</a>
+<a name="ln303">        action_then = action_first;</a>
+<a name="ln304">    }</a>
+<a name="ln305"> </a>
+<a name="ln306">    if (id_then == NULL || id_first == NULL) {</a>
+<a name="ln307">        crm_config_err(&quot;Constraint %s needs two sides lh: %s rh: %s&quot;,</a>
+<a name="ln308">                       id, crm_str(id_then), crm_str(id_first));</a>
+<a name="ln309">        return FALSE;</a>
+<a name="ln310">    }</a>
+<a name="ln311"> </a>
+<a name="ln312">    rsc_then = pe_find_constraint_resource(data_set-&gt;resources, id_then);</a>
+<a name="ln313">    rsc_first = pe_find_constraint_resource(data_set-&gt;resources, id_first);</a>
+<a name="ln314"> </a>
+<a name="ln315">    if (rsc_then == NULL) {</a>
+<a name="ln316">        crm_config_err(&quot;Constraint %s: no resource found for name '%s'&quot;, id, id_then);</a>
+<a name="ln317">        return FALSE;</a>
+<a name="ln318"> </a>
+<a name="ln319">    } else if (rsc_first == NULL) {</a>
+<a name="ln320">        crm_config_err(&quot;Constraint %s: no resource found for name '%s'&quot;, id, id_first);</a>
+<a name="ln321">        return FALSE;</a>
+<a name="ln322"> </a>
+<a name="ln323">    } else if (instance_then &amp;&amp; pe_rsc_is_clone(rsc_then) == FALSE) {</a>
+<a name="ln324">        crm_config_err(&quot;Invalid constraint '%s':&quot;</a>
+<a name="ln325">                       &quot; Resource '%s' is not a clone but instance %s was requested&quot;,</a>
+<a name="ln326">                       id, id_then, instance_then);</a>
+<a name="ln327">        return FALSE;</a>
+<a name="ln328"> </a>
+<a name="ln329">    } else if (instance_first &amp;&amp; pe_rsc_is_clone(rsc_first) == FALSE) {</a>
+<a name="ln330">        crm_config_err(&quot;Invalid constraint '%s':&quot;</a>
+<a name="ln331">                       &quot; Resource '%s' is not a clone but instance %s was requested&quot;,</a>
+<a name="ln332">                       id, id_first, instance_first);</a>
+<a name="ln333">        return FALSE;</a>
+<a name="ln334">    }</a>
+<a name="ln335"> </a>
+<a name="ln336">    if (instance_then) {</a>
+<a name="ln337">        rsc_then = find_clone_instance(rsc_then, instance_then, data_set);</a>
+<a name="ln338">        if (rsc_then == NULL) {</a>
+<a name="ln339">            crm_config_warn(&quot;Invalid constraint '%s': No instance '%s' of '%s'&quot;, id, instance_then,</a>
+<a name="ln340">                            id_then);</a>
+<a name="ln341">            return FALSE;</a>
+<a name="ln342">        }</a>
+<a name="ln343">    }</a>
+<a name="ln344"> </a>
+<a name="ln345">    if (instance_first) {</a>
+<a name="ln346">        rsc_first = find_clone_instance(rsc_first, instance_first, data_set);</a>
+<a name="ln347">        if (rsc_first == NULL) {</a>
+<a name="ln348">            crm_config_warn(&quot;Invalid constraint '%s': No instance '%s' of '%s'&quot;, id, instance_first,</a>
+<a name="ln349">                            id_first);</a>
+<a name="ln350">            return FALSE;</a>
+<a name="ln351">        }</a>
+<a name="ln352">    }</a>
+<a name="ln353"> </a>
+<a name="ln354">    require_all_s = crm_element_value(xml_obj, &quot;require-all&quot;);</a>
+<a name="ln355">    if (require_all_s</a>
+<a name="ln356">        &amp;&amp; crm_is_true(require_all_s) == FALSE</a>
+<a name="ln357">        &amp;&amp; pe_rsc_is_clone(rsc_first)) {</a>
+<a name="ln358"> </a>
+<a name="ln359">        /* require-all=false means only one instance of the clone is required */</a>
+<a name="ln360">        min_required_before = 1;</a>
+<a name="ln361">    } else if (pe_rsc_is_clone(rsc_first)) {</a>
+<a name="ln362">        const char *min_clones_s = g_hash_table_lookup(rsc_first-&gt;meta, XML_RSC_ATTR_INCARNATION_MIN);</a>
+<a name="ln363">        if (min_clones_s) {</a>
+<a name="ln364">            /* if clone min is set, we require at a minimum X number of instances</a>
+<a name="ln365">             * to be runnable before allowing dependencies to be runnable. */</a>
+<a name="ln366">            min_required_before = crm_parse_int(min_clones_s, &quot;0&quot;);</a>
+<a name="ln367">        }</a>
+<a name="ln368">    }</a>
+<a name="ln369"> </a>
+<a name="ln370">    cons_weight = pe_order_optional;</a>
+<a name="ln371">    kind = get_ordering_type(xml_obj);</a>
+<a name="ln372"> </a>
+<a name="ln373">    if (kind == pe_order_kind_optional &amp;&amp; rsc_then-&gt;restart_type == pe_restart_restart) {</a>
+<a name="ln374">        crm_trace(&quot;Upgrade : recovery - implies right&quot;);</a>
+<a name="ln375">        cons_weight |= pe_order_implies_then;</a>
+<a name="ln376">    }</a>
+<a name="ln377"> </a>
+<a name="ln378">    if (invert_bool == FALSE) {</a>
+<a name="ln379">        cons_weight |= get_asymmetrical_flags(kind);</a>
+<a name="ln380">    } else {</a>
+<a name="ln381">        cons_weight |= get_flags(id, kind, action_first, action_then, FALSE);</a>
+<a name="ln382">    }</a>
+<a name="ln383"> </a>
+<a name="ln384">    /* If there is a minimum number of instances that must be runnable before</a>
+<a name="ln385">     * the 'then' action is runnable, we use a pseudo action as an intermediate step</a>
+<a name="ln386">     * start min number of clones -&gt; pseudo action is runnable -&gt; dependency runnable. */</a>
+<a name="ln387">    if (min_required_before) {</a>
+<a name="ln388">        GListPtr rIter = NULL;</a>
+<a name="ln389">        char *task = crm_concat(CRM_OP_RELAXED_CLONE, id, ':');</a>
+<a name="ln390">        action_t *unordered_action = get_pseudo_op(task, data_set);</a>
+<a name="ln391">        free(task);</a>
+<a name="ln392"> </a>
+<a name="ln393">        /* require the pseudo action to have &quot;min_required_before&quot; number of</a>
+<a name="ln394">         * actions to be considered runnable before allowing the pseudo action</a>
+<a name="ln395">         * to be runnable. */ </a>
+<a name="ln396">        unordered_action-&gt;required_runnable_before = min_required_before;</a>
+<a name="ln397">        update_action_flags(unordered_action, pe_action_requires_any, __FUNCTION__, __LINE__);</a>
+<a name="ln398"> </a>
+<a name="ln399">        for (rIter = rsc_first-&gt;children; id &amp;&amp; rIter; rIter = rIter-&gt;next) {</a>
+<a name="ln400">            resource_t *child = rIter-&gt;data;</a>
+<a name="ln401">            /* order each clone instance before the pseudo action */</a>
+<a name="ln402">            custom_action_order(child, generate_op_key(child-&gt;id, action_first, 0), NULL,</a>
+<a name="ln403">                                NULL, NULL, unordered_action,</a>
+<a name="ln404">                                pe_order_one_or_more | pe_order_implies_then_printed, data_set);</a>
+<a name="ln405">        }</a>
+<a name="ln406"> </a>
+<a name="ln407">        /* order the &quot;then&quot; dependency to occur after the pseudo action only if</a>
+<a name="ln408">         * the pseudo action is runnable */ </a>
+<a name="ln409">        order_id = custom_action_order(NULL, NULL, unordered_action,</a>
+<a name="ln410">                       rsc_then, generate_op_key(rsc_then-&gt;id, action_then, 0), NULL,</a>
+<a name="ln411">                       cons_weight | pe_order_runnable_left, data_set);</a>
+<a name="ln412">    } else {</a>
+<a name="ln413">        order_id = new_rsc_order(rsc_first, action_first, rsc_then, action_then, cons_weight, data_set);</a>
+<a name="ln414">    }</a>
+<a name="ln415"> </a>
+<a name="ln416">    pe_rsc_trace(rsc_first, &quot;order-%d (%s): %s_%s before %s_%s flags=0x%.6x&quot;,</a>
+<a name="ln417">                 order_id, id, rsc_first-&gt;id, action_first, rsc_then-&gt;id, action_then, cons_weight);</a>
+<a name="ln418"> </a>
+<a name="ln419">    if (invert_bool == FALSE) {</a>
+<a name="ln420">        return TRUE;</a>
+<a name="ln421"> </a>
+<a name="ln422">    } else if (invert &amp;&amp; kind == pe_order_kind_serialize) {</a>
+<a name="ln423">        crm_config_warn(&quot;Cannot invert serialized constraint set %s&quot;, id);</a>
+<a name="ln424">        return TRUE;</a>
+<a name="ln425"> </a>
+<a name="ln426">    } else if (kind == pe_order_kind_serialize) {</a>
+<a name="ln427">        return TRUE;</a>
+<a name="ln428">    }</a>
+<a name="ln429"> </a>
+<a name="ln430">    action_then = invert_action(action_then);</a>
+<a name="ln431">    action_first = invert_action(action_first);</a>
+<a name="ln432">    if (action_then == NULL || action_first == NULL) {</a>
+<a name="ln433">        crm_config_err(&quot;Cannot invert rsc_order constraint %s.&quot;</a>
+<a name="ln434">                       &quot; Please specify the inverse manually.&quot;, id);</a>
+<a name="ln435">        return TRUE;</a>
+<a name="ln436">    }</a>
+<a name="ln437"> </a>
+<a name="ln438">    cons_weight = pe_order_optional;</a>
+<a name="ln439">    if (kind == pe_order_kind_optional &amp;&amp; rsc_then-&gt;restart_type == pe_restart_restart) {</a>
+<a name="ln440">        crm_trace(&quot;Upgrade : recovery - implies left&quot;);</a>
+<a name="ln441">        cons_weight |= pe_order_implies_first;</a>
+<a name="ln442">    }</a>
+<a name="ln443"> </a>
+<a name="ln444">    cons_weight |= get_flags(id, kind, action_first, action_then, TRUE);</a>
+<a name="ln445"> </a>
+<a name="ln446">    order_id = new_rsc_order(rsc_then, action_then, rsc_first, action_first, cons_weight, data_set);</a>
+<a name="ln447"> </a>
+<a name="ln448">    pe_rsc_trace(rsc_then, &quot;order-%d (%s): %s_%s before %s_%s flags=0x%.6x&quot;,</a>
+<a name="ln449">                 order_id, id, rsc_then-&gt;id, action_then, rsc_first-&gt;id, action_first, cons_weight);</a>
+<a name="ln450"> </a>
+<a name="ln451">    return TRUE;</a>
+<a name="ln452">}</a>
+<a name="ln453"> </a>
+<a name="ln454">static gboolean</a>
+<a name="ln455">expand_tags_in_sets(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)</a>
+<a name="ln456">{</a>
+<a name="ln457">    xmlNode *new_xml = NULL;</a>
+<a name="ln458">    xmlNode *set = NULL;</a>
+<a name="ln459">    gboolean any_refs = FALSE;</a>
+<a name="ln460">    const char *cons_id = NULL;</a>
+<a name="ln461"> </a>
+<a name="ln462">    *expanded_xml = NULL;</a>
+<a name="ln463"> </a>
+<a name="ln464">    if (xml_obj == NULL) {</a>
+<a name="ln465">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln466">        return FALSE;</a>
+<a name="ln467">    }</a>
+<a name="ln468"> </a>
+<a name="ln469">    new_xml = copy_xml(xml_obj);</a>
+<a name="ln470">    cons_id = ID(new_xml);</a>
+<a name="ln471"> </a>
+<a name="ln472">    for (set = __xml_first_child(new_xml); set != NULL; set = __xml_next_element(set)) {</a>
+<a name="ln473">        xmlNode *xml_rsc = NULL;</a>
+<a name="ln474">        GListPtr tag_refs = NULL;</a>
+<a name="ln475">        GListPtr gIter = NULL;</a>
+<a name="ln476"> </a>
+<a name="ln477">        if (safe_str_neq((const char *)set-&gt;name, XML_CONS_TAG_RSC_SET)) {</a>
+<a name="ln478">            continue;</a>
+<a name="ln479">        }</a>
+<a name="ln480"> </a>
+<a name="ln481">        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln482">            resource_t *rsc = NULL;</a>
+<a name="ln483">            tag_t *tag = NULL;</a>
+<a name="ln484">            const char *id = ID(xml_rsc);</a>
+<a name="ln485"> </a>
+<a name="ln486">            if (safe_str_neq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF)) {</a>
+<a name="ln487">                continue;</a>
+<a name="ln488">            }</a>
+<a name="ln489"> </a>
+<a name="ln490">            if (valid_resource_or_tag(data_set, id, &amp;rsc, &amp;tag) == FALSE) {</a>
+<a name="ln491">                crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, cons_id, id);</a>
+<a name="ln492">                free_xml(new_xml);</a>
+<a name="ln493">                return FALSE;</a>
+<a name="ln494"> </a>
+<a name="ln495">            } else if (rsc) {</a>
+<a name="ln496">                continue;</a>
+<a name="ln497"> </a>
+<a name="ln498">            } else if (tag) {</a>
+<a name="ln499">                /* The resource_ref under the resource_set references a template/tag */</a>
+<a name="ln500">                xmlNode *last_ref = xml_rsc;</a>
+<a name="ln501"> </a>
+<a name="ln502">                /* A sample:</a>
+<a name="ln503"> </a>
+<a name="ln504">                   Original XML:</a>
+<a name="ln505"> </a>
+<a name="ln506">                   &lt;resource_set id=&quot;tag1-colocation-0&quot; sequential=&quot;true&quot;&gt;</a>
+<a name="ln507">                     &lt;resource_ref id=&quot;rsc1&quot;/&gt;</a>
+<a name="ln508">                     &lt;resource_ref id=&quot;tag1&quot;/&gt;</a>
+<a name="ln509">                     &lt;resource_ref id=&quot;rsc4&quot;/&gt;</a>
+<a name="ln510">                   &lt;/resource_set&gt;</a>
+<a name="ln511"> </a>
+<a name="ln512">                   Now we are appending rsc2 and rsc3 which are tagged with tag1 right after it:</a>
+<a name="ln513"> </a>
+<a name="ln514">                   &lt;resource_set id=&quot;tag1-colocation-0&quot; sequential=&quot;true&quot;&gt;</a>
+<a name="ln515">                     &lt;resource_ref id=&quot;rsc1&quot;/&gt;</a>
+<a name="ln516">                     &lt;resource_ref id=&quot;tag1&quot;/&gt;</a>
+<a name="ln517">                     &lt;resource_ref id=&quot;rsc2&quot;/&gt;</a>
+<a name="ln518">                     &lt;resource_ref id=&quot;rsc3&quot;/&gt;</a>
+<a name="ln519">                     &lt;resource_ref id=&quot;rsc4&quot;/&gt;</a>
+<a name="ln520">                   &lt;/resource_set&gt;</a>
+<a name="ln521"> </a>
+<a name="ln522">                 */</a>
+<a name="ln523"> </a>
+<a name="ln524">                for (gIter = tag-&gt;refs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln525">                    const char *obj_ref = (const char *) gIter-&gt;data;</a>
+<a name="ln526">                    xmlNode *new_rsc_ref = NULL;</a>
+<a name="ln527"> </a>
+<a name="ln528">                    new_rsc_ref = xmlNewDocRawNode(getDocPtr(set), NULL,</a>
+<a name="ln529">                                                   (const xmlChar *)XML_TAG_RESOURCE_REF, NULL);</a>
+<a name="ln530">                    crm_xml_add(new_rsc_ref, XML_ATTR_ID, obj_ref);</a>
+<a name="ln531">                    xmlAddNextSibling(last_ref, new_rsc_ref);</a>
+<a name="ln532"> </a>
+<a name="ln533">                    last_ref = new_rsc_ref;</a>
+<a name="ln534">                }</a>
+<a name="ln535"> </a>
+<a name="ln536">                any_refs = TRUE;</a>
+<a name="ln537"> </a>
+<a name="ln538">                /* Do not directly free '&lt;resource_ref id=&quot;tag1&quot;/&gt;'.</a>
+<a name="ln539">                   That would break the further __xml_next_element(xml_rsc)) and cause &quot;Invalid read&quot; seen by valgrind.</a>
+<a name="ln540">                   So just record it into a hash table for freeing it later.</a>
+<a name="ln541">                 */</a>
+<a name="ln542">                tag_refs = g_list_append(tag_refs, xml_rsc);</a>
+<a name="ln543">            }</a>
+<a name="ln544">        }</a>
+<a name="ln545"> </a>
+<a name="ln546">        /* Now free '&lt;resource_ref id=&quot;tag1&quot;/&gt;', and finally get:</a>
+<a name="ln547"> </a>
+<a name="ln548">           &lt;resource_set id=&quot;tag1-colocation-0&quot; sequential=&quot;true&quot;&gt;</a>
+<a name="ln549">             &lt;resource_ref id=&quot;rsc1&quot;/&gt;</a>
+<a name="ln550">             &lt;resource_ref id=&quot;rsc2&quot;/&gt;</a>
+<a name="ln551">             &lt;resource_ref id=&quot;rsc3&quot;/&gt;</a>
+<a name="ln552">             &lt;resource_ref id=&quot;rsc4&quot;/&gt;</a>
+<a name="ln553">           &lt;/resource_set&gt;</a>
+<a name="ln554"> </a>
+<a name="ln555">         */</a>
+<a name="ln556">        for (gIter = tag_refs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln557">            xmlNode *tag_ref = gIter-&gt;data;</a>
+<a name="ln558"> </a>
+<a name="ln559">            free_xml(tag_ref);</a>
+<a name="ln560">        }</a>
+<a name="ln561">        g_list_free(tag_refs);</a>
+<a name="ln562">    }</a>
+<a name="ln563"> </a>
+<a name="ln564">    if (any_refs) {</a>
+<a name="ln565">        *expanded_xml = new_xml;</a>
+<a name="ln566">    } else {</a>
+<a name="ln567">        free_xml(new_xml);</a>
+<a name="ln568">    }</a>
+<a name="ln569"> </a>
+<a name="ln570">    return TRUE;</a>
+<a name="ln571">}</a>
+<a name="ln572"> </a>
+<a name="ln573">static gboolean</a>
+<a name="ln574">tag_to_set(xmlNode * xml_obj, xmlNode ** rsc_set, const char * attr,</a>
+<a name="ln575">                gboolean convert_rsc, pe_working_set_t * data_set)</a>
+<a name="ln576">{</a>
+<a name="ln577">    const char *cons_id = NULL;</a>
+<a name="ln578">    const char *id = NULL;</a>
+<a name="ln579"> </a>
+<a name="ln580">    resource_t *rsc = NULL;</a>
+<a name="ln581">    tag_t *tag = NULL;</a>
+<a name="ln582"> </a>
+<a name="ln583">    *rsc_set = NULL;</a>
+<a name="ln584"> </a>
+<a name="ln585">    if (xml_obj == NULL) {</a>
+<a name="ln586">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln587">        return FALSE;</a>
+<a name="ln588">    }</a>
+<a name="ln589"> </a>
+<a name="ln590">    if (attr == NULL) {</a>
+<a name="ln591">        crm_config_err(&quot;No attribute name to process.&quot;);</a>
+<a name="ln592">        return FALSE;</a>
+<a name="ln593">    }</a>
+<a name="ln594"> </a>
+<a name="ln595">    cons_id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln596">    if (cons_id == NULL) {</a>
+<a name="ln597">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln598">        return FALSE;</a>
+<a name="ln599">    }</a>
+<a name="ln600"> </a>
+<a name="ln601">    id = crm_element_value(xml_obj, attr);</a>
+<a name="ln602">    if (id == NULL) {</a>
+<a name="ln603">        return TRUE;</a>
+<a name="ln604">    }</a>
+<a name="ln605"> </a>
+<a name="ln606">    if (valid_resource_or_tag(data_set, id, &amp;rsc, &amp;tag) == FALSE) {</a>
+<a name="ln607">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, cons_id, id);</a>
+<a name="ln608">        return FALSE;</a>
+<a name="ln609"> </a>
+<a name="ln610">    } else if (tag) {</a>
+<a name="ln611">        GListPtr gIter = NULL;</a>
+<a name="ln612"> </a>
+<a name="ln613">        /* A template/tag is referenced by the &quot;attr&quot; attribute (first, then, rsc or with-rsc).</a>
+<a name="ln614">           Add the template/tag's corresponding &quot;resource_set&quot; which contains the resources derived</a>
+<a name="ln615">           from it or tagged with it under the constraint. */</a>
+<a name="ln616">        *rsc_set = create_xml_node(xml_obj, XML_CONS_TAG_RSC_SET);</a>
+<a name="ln617">        crm_xml_add(*rsc_set, XML_ATTR_ID, id);</a>
+<a name="ln618"> </a>
+<a name="ln619">        for (gIter = tag-&gt;refs; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln620">            const char *obj_ref = (const char *) gIter-&gt;data;</a>
+<a name="ln621">            xmlNode *rsc_ref = NULL;</a>
+<a name="ln622"> </a>
+<a name="ln623">            rsc_ref = create_xml_node(*rsc_set, XML_TAG_RESOURCE_REF);</a>
+<a name="ln624">            crm_xml_add(rsc_ref, XML_ATTR_ID, obj_ref);</a>
+<a name="ln625">        }</a>
+<a name="ln626"> </a>
+<a name="ln627">        /* Set sequential=&quot;false&quot; for the resource_set */</a>
+<a name="ln628">        crm_xml_add(*rsc_set, &quot;sequential&quot;, XML_BOOLEAN_FALSE);</a>
+<a name="ln629"> </a>
+<a name="ln630">    } else if (rsc &amp;&amp; convert_rsc) {</a>
+<a name="ln631">        /* Even a regular resource is referenced by &quot;attr&quot;, convert it into a resource_set.</a>
+<a name="ln632">           Because the other side of the constraint could be a template/tag reference. */</a>
+<a name="ln633">        xmlNode *rsc_ref = NULL;</a>
+<a name="ln634"> </a>
+<a name="ln635">        *rsc_set = create_xml_node(xml_obj, XML_CONS_TAG_RSC_SET);</a>
+<a name="ln636">        crm_xml_add(*rsc_set, XML_ATTR_ID, id);</a>
+<a name="ln637"> </a>
+<a name="ln638">        rsc_ref = create_xml_node(*rsc_set, XML_TAG_RESOURCE_REF);</a>
+<a name="ln639">        crm_xml_add(rsc_ref, XML_ATTR_ID, id);</a>
+<a name="ln640"> </a>
+<a name="ln641">    } else {</a>
+<a name="ln642">        return TRUE;</a>
+<a name="ln643">    }</a>
+<a name="ln644"> </a>
+<a name="ln645">    /* Remove the &quot;attr&quot; attribute referencing the template/tag */</a>
+<a name="ln646">    if (*rsc_set) {</a>
+<a name="ln647">        xml_remove_prop(xml_obj, attr);</a>
+<a name="ln648">    }</a>
+<a name="ln649"> </a>
+<a name="ln650">    return TRUE;</a>
+<a name="ln651">}</a>
+<a name="ln652"> </a>
+<a name="ln653">static gboolean unpack_rsc_location(xmlNode * xml_obj, resource_t * rsc_lh, const char * role,</a>
+<a name="ln654">                             const char * score, pe_working_set_t * data_set, pe_match_data_t * match_data);</a>
+<a name="ln655"> </a>
+<a name="ln656">static gboolean</a>
+<a name="ln657">unpack_simple_location(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln658">{</a>
+<a name="ln659">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln660">    const char *value = crm_element_value(xml_obj, XML_LOC_ATTR_SOURCE);</a>
+<a name="ln661"> </a>
+<a name="ln662">    if(value) {</a>
+<a name="ln663">        resource_t *rsc_lh = pe_find_constraint_resource(data_set-&gt;resources, value);</a>
+<a name="ln664"> </a>
+<a name="ln665">        return unpack_rsc_location(xml_obj, rsc_lh, NULL, NULL, data_set, NULL);</a>
+<a name="ln666">    }</a>
+<a name="ln667"> </a>
+<a name="ln668">    value = crm_element_value(xml_obj, XML_LOC_ATTR_SOURCE_PATTERN);</a>
+<a name="ln669">    if(value) {</a>
+<a name="ln670">        regex_t *r_patt = calloc(1, sizeof(regex_t));</a>
+<a name="ln671">        bool invert = FALSE;</a>
+<a name="ln672">        GListPtr rIter = NULL;</a>
+<a name="ln673"> </a>
+<a name="ln674">        if(value[0] == '!') {</a>
+<a name="ln675">            value++;</a>
+<a name="ln676">            invert = TRUE;</a>
+<a name="ln677">        }</a>
+<a name="ln678"> </a>
+<a name="ln679">        if (regcomp(r_patt, value, REG_EXTENDED)) {</a>
+<a name="ln680">            crm_config_err(&quot;Bad regex '%s' for constraint '%s'&quot;, value, id);</a>
+<a name="ln681">            regfree(r_patt);</a>
+<a name="ln682">            free(r_patt);</a>
+<a name="ln683">            return FALSE;</a>
+<a name="ln684">        }</a>
+<a name="ln685"> </a>
+<a name="ln686">        for (rIter = data_set-&gt;resources; rIter; rIter = rIter-&gt;next) {</a>
+<a name="ln687">            resource_t *r = rIter-&gt;data;</a>
+<a name="ln688">            int nregs = 0;</a>
+<a name="ln689">            regmatch_t *pmatch = NULL;</a>
+<a name="ln690">            int status;</a>
+<a name="ln691"> </a>
+<a name="ln692">            if(r_patt-&gt;re_nsub &gt; 0) {</a>
+<a name="ln693">                nregs = r_patt-&gt;re_nsub + 1;</a>
+<a name="ln694">            } else {</a>
+<a name="ln695">                nregs = 1;</a>
+<a name="ln696">            }</a>
+<a name="ln697">            pmatch = calloc(nregs, sizeof(regmatch_t));</a>
+<a name="ln698"> </a>
+<a name="ln699">            status = regexec(r_patt, r-&gt;id, nregs, pmatch, 0);</a>
+<a name="ln700"> </a>
+<a name="ln701">            if(invert == FALSE &amp;&amp; status == 0) {</a>
+<a name="ln702">                pe_re_match_data_t re_match_data = {</a>
+<a name="ln703">                                                .string = r-&gt;id,</a>
+<a name="ln704">                                                .nregs = nregs,</a>
+<a name="ln705">                                                .pmatch = pmatch</a>
+<a name="ln706">                                               };</a>
+<a name="ln707">                pe_match_data_t match_data = {</a>
+<a name="ln708">                                                .re = &amp;re_match_data,</a>
+<a name="ln709">                                                .params = r-&gt;parameters,</a>
+<a name="ln710">                                                .meta = r-&gt;meta,</a>
+<a name="ln711">                                             };</a>
+<a name="ln712">                crm_debug(&quot;'%s' matched '%s' for %s&quot;, r-&gt;id, value, id);</a>
+<a name="ln713">                unpack_rsc_location(xml_obj, r, NULL, NULL, data_set, &amp;match_data);</a>
+<a name="ln714"> </a>
+<a name="ln715">            } if(invert &amp;&amp; status != 0) {</a>
+<a name="ln716">                crm_debug(&quot;'%s' is an inverted match of '%s' for %s&quot;, r-&gt;id, value, id);</a>
+<a name="ln717">                unpack_rsc_location(xml_obj, r, NULL, NULL, data_set, NULL);</a>
+<a name="ln718"> </a>
+<a name="ln719">            } else {</a>
+<a name="ln720">                crm_trace(&quot;'%s' does not match '%s' for %s&quot;, r-&gt;id, value, id);</a>
+<a name="ln721">            }</a>
+<a name="ln722"> </a>
+<a name="ln723">            free(pmatch);</a>
+<a name="ln724">        }</a>
+<a name="ln725"> </a>
+<a name="ln726">        regfree(r_patt);</a>
+<a name="ln727">        free(r_patt);</a>
+<a name="ln728">    }</a>
+<a name="ln729"> </a>
+<a name="ln730">    return FALSE;</a>
+<a name="ln731">}</a>
+<a name="ln732"> </a>
+<a name="ln733">static gboolean</a>
+<a name="ln734">unpack_rsc_location(xmlNode * xml_obj, resource_t * rsc_lh, const char * role,</a>
+<a name="ln735">                    const char * score, pe_working_set_t * data_set, pe_match_data_t * match_data)</a>
+<a name="ln736">{</a>
+<a name="ln737">    gboolean empty = TRUE;</a>
+<a name="ln738">    rsc_to_node_t *location = NULL;</a>
+<a name="ln739">    const char *id_lh = crm_element_value(xml_obj, XML_LOC_ATTR_SOURCE);</a>
+<a name="ln740">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln741">    const char *node = crm_element_value(xml_obj, XML_CIB_TAG_NODE);</a>
+<a name="ln742">    const char *discovery = crm_element_value(xml_obj, XML_LOCATION_ATTR_DISCOVERY);</a>
+<a name="ln743"> </a>
+<a name="ln744">    if (rsc_lh == NULL) {</a>
+<a name="ln745">        /* only a warn as BSC adds the constraint then the resource */</a>
+<a name="ln746">        crm_config_warn(&quot;No resource (con=%s, rsc=%s)&quot;, id, id_lh);</a>
+<a name="ln747">        return FALSE;</a>
+<a name="ln748">    }</a>
+<a name="ln749"> </a>
+<a name="ln750">    if (score == NULL) {</a>
+<a name="ln751">        score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);</a>
+<a name="ln752">    }</a>
+<a name="ln753"> </a>
+<a name="ln754">    if (node != NULL &amp;&amp; score != NULL) {</a>
+<a name="ln755">        int score_i = char2score(score);</a>
+<a name="ln756">        node_t *match = pe_find_node(data_set-&gt;nodes, node);</a>
+<a name="ln757"> </a>
+<a name="ln758">        if (!match) {</a>
+<a name="ln759">            return FALSE;</a>
+<a name="ln760">        }</a>
+<a name="ln761">        location = rsc2node_new(id, rsc_lh, score_i, discovery, match, data_set);</a>
+<a name="ln762"> </a>
+<a name="ln763">    } else {</a>
+<a name="ln764">        xmlNode *rule_xml = NULL;</a>
+<a name="ln765"> </a>
+<a name="ln766">        for (rule_xml = __xml_first_child(xml_obj); rule_xml != NULL;</a>
+<a name="ln767">             rule_xml = __xml_next_element(rule_xml)) {</a>
+<a name="ln768">            if (crm_str_eq((const char *)rule_xml-&gt;name, XML_TAG_RULE, TRUE)) {</a>
+<a name="ln769">                empty = FALSE;</a>
+<a name="ln770">                crm_trace(&quot;Unpacking %s/%s&quot;, id, ID(rule_xml));</a>
+<a name="ln771">                generate_location_rule(rsc_lh, rule_xml, discovery, data_set, match_data);</a>
+<a name="ln772">            }</a>
+<a name="ln773">        }</a>
+<a name="ln774"> </a>
+<a name="ln775">        if (empty) {</a>
+<a name="ln776">            crm_config_err(&quot;Invalid location constraint %s:&quot;</a>
+<a name="ln777">                           &quot; rsc_location must contain at least one rule&quot;, ID(xml_obj));</a>
+<a name="ln778">        }</a>
+<a name="ln779">    }</a>
+<a name="ln780"> </a>
+<a name="ln781">    if (role == NULL) {</a>
+<a name="ln782">        role = crm_element_value(xml_obj, XML_RULE_ATTR_ROLE);</a>
+<a name="ln783">    }</a>
+<a name="ln784"> </a>
+<a name="ln785">    if (location &amp;&amp; role) {</a>
+<a name="ln786">        if (text2role(role) == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln787">            pe_err(&quot;Invalid constraint %s: Bad role %s&quot;, id, role);</a>
+<a name="ln788">            return FALSE;</a>
+<a name="ln789"> </a>
+<a name="ln790">        } else {</a>
+<a name="ln791">            enum rsc_role_e r = text2role(role);</a>
+<a name="ln792">            switch(r) {</a>
+<a name="ln793">                case RSC_ROLE_UNKNOWN:</a>
+<a name="ln794">                case RSC_ROLE_STARTED:</a>
+<a name="ln795">                case RSC_ROLE_SLAVE:</a>
+<a name="ln796">                    /* Applies to all */</a>
+<a name="ln797">                    location-&gt;role_filter = RSC_ROLE_UNKNOWN;</a>
+<a name="ln798">                    break;</a>
+<a name="ln799">                default:</a>
+<a name="ln800">                    location-&gt;role_filter = r;</a>
+<a name="ln801">                    break;</a>
+<a name="ln802">            }</a>
+<a name="ln803">        }</a>
+<a name="ln804">    }</a>
+<a name="ln805"> </a>
+<a name="ln806">    return TRUE;</a>
+<a name="ln807">}</a>
+<a name="ln808"> </a>
+<a name="ln809">static gboolean</a>
+<a name="ln810">unpack_location_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)</a>
+<a name="ln811">{</a>
+<a name="ln812">    const char *id = NULL;</a>
+<a name="ln813">    const char *id_lh = NULL;</a>
+<a name="ln814">    const char *state_lh = NULL;</a>
+<a name="ln815"> </a>
+<a name="ln816">    resource_t *rsc_lh = NULL;</a>
+<a name="ln817"> </a>
+<a name="ln818">    tag_t *tag_lh = NULL;</a>
+<a name="ln819"> </a>
+<a name="ln820">    xmlNode *new_xml = NULL;</a>
+<a name="ln821">    xmlNode *rsc_set_lh = NULL;</a>
+<a name="ln822"> </a>
+<a name="ln823">    *expanded_xml = NULL;</a>
+<a name="ln824"> </a>
+<a name="ln825">    if (xml_obj == NULL) {</a>
+<a name="ln826">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln827">        return FALSE;</a>
+<a name="ln828">    }</a>
+<a name="ln829"> </a>
+<a name="ln830">    id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln831">    if (id == NULL) {</a>
+<a name="ln832">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln833">        return FALSE;</a>
+<a name="ln834">    }</a>
+<a name="ln835"> </a>
+<a name="ln836">    /* Attempt to expand any template/tag references in possible resource sets. */</a>
+<a name="ln837">    expand_tags_in_sets(xml_obj, &amp;new_xml, data_set);</a>
+<a name="ln838">    if (new_xml) {</a>
+<a name="ln839">        /* There are resource sets referencing templates. Return with the expanded XML. */</a>
+<a name="ln840">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_location...&quot;);</a>
+<a name="ln841">        *expanded_xml = new_xml;</a>
+<a name="ln842">        return TRUE;</a>
+<a name="ln843">    }</a>
+<a name="ln844"> </a>
+<a name="ln845">    id_lh = crm_element_value(xml_obj, XML_LOC_ATTR_SOURCE);</a>
+<a name="ln846">    if (id_lh == NULL) {</a>
+<a name="ln847">        return TRUE;</a>
+<a name="ln848">    }</a>
+<a name="ln849"> </a>
+<a name="ln850">    if (valid_resource_or_tag(data_set, id_lh, &amp;rsc_lh, &amp;tag_lh) == FALSE) {</a>
+<a name="ln851">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, id, id_lh);</a>
+<a name="ln852">        return FALSE;</a>
+<a name="ln853"> </a>
+<a name="ln854">    } else if (rsc_lh) {</a>
+<a name="ln855">        /* No template is referenced. */</a>
+<a name="ln856">        return TRUE;</a>
+<a name="ln857">    }</a>
+<a name="ln858"> </a>
+<a name="ln859">    state_lh = crm_element_value(xml_obj, XML_RULE_ATTR_ROLE);</a>
+<a name="ln860"> </a>
+<a name="ln861">    new_xml = copy_xml(xml_obj);</a>
+<a name="ln862"> </a>
+<a name="ln863">    /* Convert the template/tag reference in &quot;rsc&quot; into a resource_set under the rsc_location constraint. */</a>
+<a name="ln864">    if (tag_to_set(new_xml, &amp;rsc_set_lh, XML_LOC_ATTR_SOURCE, FALSE, data_set) == FALSE) {</a>
+<a name="ln865">        free_xml(new_xml);</a>
+<a name="ln866">        return FALSE;</a>
+<a name="ln867">    }</a>
+<a name="ln868"> </a>
+<a name="ln869">    if (rsc_set_lh) {</a>
+<a name="ln870">        if (state_lh) {</a>
+<a name="ln871">            /* A &quot;rsc-role&quot; is specified.</a>
+<a name="ln872">               Move it into the converted resource_set as a &quot;role&quot;&quot; attribute. */</a>
+<a name="ln873">            crm_xml_add(rsc_set_lh, &quot;role&quot;, state_lh);</a>
+<a name="ln874">            xml_remove_prop(new_xml, XML_RULE_ATTR_ROLE);</a>
+<a name="ln875">        }</a>
+<a name="ln876">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_location...&quot;);</a>
+<a name="ln877">        *expanded_xml = new_xml;</a>
+<a name="ln878"> </a>
+<a name="ln879">    } else {</a>
+<a name="ln880">        /* No sets */</a>
+<a name="ln881">        free_xml(new_xml);</a>
+<a name="ln882">    }</a>
+<a name="ln883"> </a>
+<a name="ln884">    return TRUE;</a>
+<a name="ln885">}</a>
+<a name="ln886"> </a>
+<a name="ln887">static gboolean</a>
+<a name="ln888">unpack_location_set(xmlNode * location, xmlNode * set, pe_working_set_t * data_set)</a>
+<a name="ln889">{</a>
+<a name="ln890">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln891">    resource_t *resource = NULL;</a>
+<a name="ln892">    const char *set_id;</a>
+<a name="ln893">    const char *role;</a>
+<a name="ln894">    const char *local_score;</a>
+<a name="ln895"> </a>
+<a name="ln896">    if (set == NULL) {</a>
+<a name="ln897">        crm_config_err(&quot;No resource_set object to process.&quot;);</a>
+<a name="ln898">        return FALSE;</a>
+<a name="ln899">    }</a>
+<a name="ln900"> </a>
+<a name="ln901">    set_id = ID(set);</a>
+<a name="ln902">    if (set_id == NULL) {</a>
+<a name="ln903">        crm_config_err(&quot;resource_set must have an id&quot;);</a>
+<a name="ln904">        return FALSE;</a>
+<a name="ln905">    }</a>
+<a name="ln906"> </a>
+<a name="ln907">    role = crm_element_value(set, &quot;role&quot;);</a>
+<a name="ln908">    local_score = crm_element_value(set, XML_RULE_ATTR_SCORE);</a>
+<a name="ln909"> </a>
+<a name="ln910">    for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln911">        if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln912">            EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));</a>
+<a name="ln913">            unpack_rsc_location(location, resource, role, local_score, data_set, NULL);</a>
+<a name="ln914">        }</a>
+<a name="ln915">    }</a>
+<a name="ln916"> </a>
+<a name="ln917">    return TRUE;</a>
+<a name="ln918">}</a>
+<a name="ln919"> </a>
+<a name="ln920">gboolean</a>
+<a name="ln921">unpack_location(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln922">{</a>
+<a name="ln923">    xmlNode *set = NULL;</a>
+<a name="ln924">    gboolean any_sets = FALSE;</a>
+<a name="ln925"> </a>
+<a name="ln926">    xmlNode *orig_xml = NULL;</a>
+<a name="ln927">    xmlNode *expanded_xml = NULL;</a>
+<a name="ln928"> </a>
+<a name="ln929">    if (unpack_location_tags(xml_obj, &amp;expanded_xml, data_set) == FALSE) {</a>
+<a name="ln930">        return FALSE;</a>
+<a name="ln931">    }</a>
+<a name="ln932"> </a>
+<a name="ln933">    if (expanded_xml) {</a>
+<a name="ln934">        orig_xml = xml_obj;</a>
+<a name="ln935">        xml_obj = expanded_xml;</a>
+<a name="ln936">    }</a>
+<a name="ln937"> </a>
+<a name="ln938">    for (set = __xml_first_child(xml_obj); set != NULL; set = __xml_next_element(set)) {</a>
+<a name="ln939">        if (crm_str_eq((const char *)set-&gt;name, XML_CONS_TAG_RSC_SET, TRUE)) {</a>
+<a name="ln940">            any_sets = TRUE;</a>
+<a name="ln941">            set = expand_idref(set, data_set-&gt;input);</a>
+<a name="ln942">            if (unpack_location_set(xml_obj, set, data_set) == FALSE) {</a>
+<a name="ln943">                if (expanded_xml) {</a>
+<a name="ln944">                    free_xml(expanded_xml);</a>
+<a name="ln945">                }</a>
+<a name="ln946">                return FALSE;</a>
+<a name="ln947">            }</a>
+<a name="ln948">        }</a>
+<a name="ln949">    }</a>
+<a name="ln950"> </a>
+<a name="ln951">    if (expanded_xml) {</a>
+<a name="ln952">        free_xml(expanded_xml);</a>
+<a name="ln953">        xml_obj = orig_xml;</a>
+<a name="ln954">    }</a>
+<a name="ln955"> </a>
+<a name="ln956">    if (any_sets == FALSE) {</a>
+<a name="ln957">        return unpack_simple_location(xml_obj, data_set);</a>
+<a name="ln958">    }</a>
+<a name="ln959"> </a>
+<a name="ln960">    return TRUE;</a>
+<a name="ln961">}</a>
+<a name="ln962"> </a>
+<a name="ln963">static int</a>
+<a name="ln964">get_node_score(const char *rule, const char *score, gboolean raw, node_t * node)</a>
+<a name="ln965">{</a>
+<a name="ln966">    int score_f = 0;</a>
+<a name="ln967"> </a>
+<a name="ln968">    if (score == NULL) {</a>
+<a name="ln969">        pe_err(&quot;Rule %s: no score specified.  Assuming 0.&quot;, rule);</a>
+<a name="ln970"> </a>
+<a name="ln971">    } else if (raw) {</a>
+<a name="ln972">        score_f = char2score(score);</a>
+<a name="ln973"> </a>
+<a name="ln974">    } else {</a>
+<a name="ln975">        const char *attr_score = g_hash_table_lookup(node-&gt;details-&gt;attrs, score);</a>
+<a name="ln976"> </a>
+<a name="ln977">        if (attr_score == NULL) {</a>
+<a name="ln978">            crm_debug(&quot;Rule %s: node %s did not have a value for %s&quot;,</a>
+<a name="ln979">                      rule, node-&gt;details-&gt;uname, score);</a>
+<a name="ln980">            score_f = -INFINITY;</a>
+<a name="ln981"> </a>
+<a name="ln982">        } else {</a>
+<a name="ln983">            crm_debug(&quot;Rule %s: node %s had value %s for %s&quot;,</a>
+<a name="ln984">                      rule, node-&gt;details-&gt;uname, attr_score, score);</a>
+<a name="ln985">            score_f = char2score(attr_score);</a>
+<a name="ln986">        }</a>
+<a name="ln987">    }</a>
+<a name="ln988">    return score_f;</a>
+<a name="ln989">}</a>
+<a name="ln990"> </a>
+<a name="ln991">static rsc_to_node_t *</a>
+<a name="ln992">generate_location_rule(resource_t * rsc, xmlNode * rule_xml, const char *discovery, pe_working_set_t * data_set,</a>
+<a name="ln993">                       pe_match_data_t * match_data)</a>
+<a name="ln994">{</a>
+<a name="ln995">    const char *rule_id = NULL;</a>
+<a name="ln996">    const char *score = NULL;</a>
+<a name="ln997">    const char *boolean = NULL;</a>
+<a name="ln998">    const char *role = NULL;</a>
+<a name="ln999"> </a>
+<a name="ln1000">    GListPtr gIter = NULL;</a>
+<a name="ln1001">    GListPtr match_L = NULL;</a>
+<a name="ln1002"> </a>
+<a name="ln1003">    gboolean do_and = TRUE;</a>
+<a name="ln1004">    gboolean accept = TRUE;</a>
+<a name="ln1005">    gboolean raw_score = TRUE;</a>
+<a name="ln1006">    gboolean score_allocated = FALSE;</a>
+<a name="ln1007"> </a>
+<a name="ln1008">    rsc_to_node_t *location_rule = NULL;</a>
+<a name="ln1009"> </a>
+<a name="ln1010">    rule_xml = expand_idref(rule_xml, data_set-&gt;input);</a>
+<a name="ln1011">    rule_id = crm_element_value(rule_xml, XML_ATTR_ID);</a>
+<a name="ln1012">    boolean = crm_element_value(rule_xml, XML_RULE_ATTR_BOOLEAN_OP);</a>
+<a name="ln1013">    role = crm_element_value(rule_xml, XML_RULE_ATTR_ROLE);</a>
+<a name="ln1014"> </a>
+<a name="ln1015">    crm_trace(&quot;Processing rule: %s&quot;, rule_id);</a>
+<a name="ln1016"> </a>
+<a name="ln1017">    if (role != NULL &amp;&amp; text2role(role) == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln1018">        pe_err(&quot;Bad role specified for %s: %s&quot;, rule_id, role);</a>
+<a name="ln1019">        return NULL;</a>
+<a name="ln1020">    }</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    score = crm_element_value(rule_xml, XML_RULE_ATTR_SCORE);</a>
+<a name="ln1023">    if (score == NULL) {</a>
+<a name="ln1024">        score = crm_element_value(rule_xml, XML_RULE_ATTR_SCORE_ATTRIBUTE);</a>
+<a name="ln1025">        if (score != NULL) {</a>
+<a name="ln1026">            raw_score = FALSE;</a>
+<a name="ln1027">        }</a>
+<a name="ln1028">    }</a>
+<a name="ln1029">    if (safe_str_eq(boolean, &quot;or&quot;)) {</a>
+<a name="ln1030">        do_and = FALSE;</a>
+<a name="ln1031">    }</a>
+<a name="ln1032"> </a>
+<a name="ln1033">    location_rule = rsc2node_new(rule_id, rsc, 0, discovery, NULL, data_set);</a>
+<a name="ln1034"> </a>
+<a name="ln1035">    if (location_rule == NULL) {</a>
+<a name="ln1036">        return NULL;</a>
+<a name="ln1037">    }</a>
+<a name="ln1038"> </a>
+<a name="ln1039">    if (match_data &amp;&amp; match_data-&gt;re &amp;&amp; match_data-&gt;re-&gt;nregs &gt; 0 &amp;&amp; match_data-&gt;re-&gt;pmatch[0].rm_so != -1) {</a>
+<a name="ln1040">        if (raw_score == FALSE) {</a>
+<a name="ln1041">            char *result = pe_expand_re_matches(score, match_data-&gt;re);</a>
+<a name="ln1042"> </a>
+<a name="ln1043">            if (result) {</a>
+<a name="ln1044">                score = (const char *) result;</a>
+<a name="ln1045">                score_allocated = TRUE;</a>
+<a name="ln1046">            }</a>
+<a name="ln1047">        }</a>
+<a name="ln1048">    }</a>
+<a name="ln1049"> </a>
+<a name="ln1050">    if (role != NULL) {</a>
+<a name="ln1051">        crm_trace(&quot;Setting role filter: %s&quot;, role);</a>
+<a name="ln1052">        location_rule-&gt;role_filter = text2role(role);</a>
+<a name="ln1053">        if (location_rule-&gt;role_filter == RSC_ROLE_SLAVE) {</a>
+<a name="ln1054">            /* Any master/slave cannot be promoted without being a slave first</a>
+<a name="ln1055">             * Ergo, any constraint for the slave role applies to every role</a>
+<a name="ln1056">             */</a>
+<a name="ln1057">            location_rule-&gt;role_filter = RSC_ROLE_UNKNOWN;</a>
+<a name="ln1058">        }</a>
+<a name="ln1059">    }</a>
+<a name="ln1060">    if (do_and) {</a>
+<a name="ln1061">        GListPtr gIter = NULL;</a>
+<a name="ln1062"> </a>
+<a name="ln1063">        match_L = node_list_dup(data_set-&gt;nodes, TRUE, FALSE);</a>
+<a name="ln1064">        for (gIter = match_L; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1065">            node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln1066"> </a>
+<a name="ln1067">            node-&gt;weight = get_node_score(rule_id, score, raw_score, node);</a>
+<a name="ln1068">        }</a>
+<a name="ln1069">    }</a>
+<a name="ln1070"> </a>
+<a name="ln1071">    for (gIter = data_set-&gt;nodes; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1072">        int score_f = 0;</a>
+<a name="ln1073">        node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln1074"> </a>
+<a name="ln1075">        accept = pe_test_rule_full(rule_xml, node-&gt;details-&gt;attrs, RSC_ROLE_UNKNOWN, data_set-&gt;now, match_data);</a>
+<a name="ln1076"> </a>
+<a name="ln1077">        crm_trace(&quot;Rule %s %s on %s&quot;, ID(rule_xml), accept ? &quot;passed&quot; : &quot;failed&quot;,</a>
+<a name="ln1078">                  node-&gt;details-&gt;uname);</a>
+<a name="ln1079"> </a>
+<a name="ln1080">        score_f = get_node_score(rule_id, score, raw_score, node);</a>
+<a name="ln1081">/* 			if(accept &amp;&amp; score_f == -INFINITY) { */</a>
+<a name="ln1082">/* 				accept = FALSE; */</a>
+<a name="ln1083">/* 			} */</a>
+<a name="ln1084"> </a>
+<a name="ln1085">        if (accept) {</a>
+<a name="ln1086">            node_t *local = pe_find_node_id(match_L, node-&gt;details-&gt;id);</a>
+<a name="ln1087"> </a>
+<a name="ln1088">            if (local == NULL &amp;&amp; do_and) {</a>
+<a name="ln1089">                continue;</a>
+<a name="ln1090"> </a>
+<a name="ln1091">            } else if (local == NULL) {</a>
+<a name="ln1092">                local = node_copy(node);</a>
+<a name="ln1093">                match_L = g_list_append(match_L, local);</a>
+<a name="ln1094">            }</a>
+<a name="ln1095"> </a>
+<a name="ln1096">            if (do_and == FALSE) {</a>
+<a name="ln1097">                local-&gt;weight = merge_weights(local-&gt;weight, score_f);</a>
+<a name="ln1098">            }</a>
+<a name="ln1099">            crm_trace(&quot;node %s now has weight %d&quot;, node-&gt;details-&gt;uname, local-&gt;weight);</a>
+<a name="ln1100"> </a>
+<a name="ln1101">        } else if (do_and &amp;&amp; !accept) {</a>
+<a name="ln1102">            /* remove it */</a>
+<a name="ln1103">            node_t *delete = pe_find_node_id(match_L, node-&gt;details-&gt;id);</a>
+<a name="ln1104"> </a>
+<a name="ln1105">            if (delete != NULL) {</a>
+<a name="ln1106">                match_L = g_list_remove(match_L, delete);</a>
+<a name="ln1107">                crm_trace(&quot;node %s did not match&quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln1108">            }</a>
+<a name="ln1109">            free(delete);</a>
+<a name="ln1110">        }</a>
+<a name="ln1111">    }</a>
+<a name="ln1112"> </a>
+<a name="ln1113">    if (score_allocated == TRUE) {</a>
+<a name="ln1114">        free((char *)score);</a>
+<a name="ln1115">    }</a>
+<a name="ln1116"> </a>
+<a name="ln1117">    location_rule-&gt;node_list_rh = match_L;</a>
+<a name="ln1118">    if (location_rule-&gt;node_list_rh == NULL) {</a>
+<a name="ln1119">        crm_trace(&quot;No matching nodes for rule %s&quot;, rule_id);</a>
+<a name="ln1120">        return NULL;</a>
+<a name="ln1121">    }</a>
+<a name="ln1122"> </a>
+<a name="ln1123">    crm_trace(&quot;%s: %d nodes matched&quot;, rule_id, g_list_length(location_rule-&gt;node_list_rh));</a>
+<a name="ln1124">    return location_rule;</a>
+<a name="ln1125">}</a>
+<a name="ln1126"> </a>
+<a name="ln1127">static gint</a>
+<a name="ln1128">sort_cons_priority_lh(gconstpointer a, gconstpointer b)</a>
+<a name="ln1129">{</a>
+<a name="ln1130">    const rsc_colocation_t *rsc_constraint1 = (const rsc_colocation_t *)a;</a>
+<a name="ln1131">    const rsc_colocation_t *rsc_constraint2 = (const rsc_colocation_t *)b;</a>
+<a name="ln1132"> </a>
+<a name="ln1133">    if (a == NULL) {</a>
+<a name="ln1134">        return 1;</a>
+<a name="ln1135">    }</a>
+<a name="ln1136">    if (b == NULL) {</a>
+<a name="ln1137">        return -1;</a>
+<a name="ln1138">    }</a>
+<a name="ln1139"> </a>
+<a name="ln1140">    CRM_ASSERT(rsc_constraint1-&gt;rsc_lh != NULL);</a>
+<a name="ln1141">    CRM_ASSERT(rsc_constraint1-&gt;rsc_rh != NULL);</a>
+<a name="ln1142"> </a>
+<a name="ln1143">    if (rsc_constraint1-&gt;rsc_lh-&gt;priority &gt; rsc_constraint2-&gt;rsc_lh-&gt;priority) {</a>
+<a name="ln1144">        return -1;</a>
+<a name="ln1145">    }</a>
+<a name="ln1146"> </a>
+<a name="ln1147">    if (rsc_constraint1-&gt;rsc_lh-&gt;priority &lt; rsc_constraint2-&gt;rsc_lh-&gt;priority) {</a>
+<a name="ln1148">        return 1;</a>
+<a name="ln1149">    }</a>
+<a name="ln1150"> </a>
+<a name="ln1151">    /* Process clones before primitives and groups */</a>
+<a name="ln1152">    if (rsc_constraint1-&gt;rsc_lh-&gt;variant &gt; rsc_constraint2-&gt;rsc_lh-&gt;variant) {</a>
+<a name="ln1153">        return -1;</a>
+<a name="ln1154">    } else if (rsc_constraint1-&gt;rsc_lh-&gt;variant &lt; rsc_constraint2-&gt;rsc_lh-&gt;variant) {</a>
+<a name="ln1155">        return 1;</a>
+<a name="ln1156">    }</a>
+<a name="ln1157"> </a>
+<a name="ln1158">    return strcmp(rsc_constraint1-&gt;rsc_lh-&gt;id, rsc_constraint2-&gt;rsc_lh-&gt;id);</a>
+<a name="ln1159">}</a>
+<a name="ln1160"> </a>
+<a name="ln1161">static gint</a>
+<a name="ln1162">sort_cons_priority_rh(gconstpointer a, gconstpointer b)</a>
+<a name="ln1163">{</a>
+<a name="ln1164">    const rsc_colocation_t *rsc_constraint1 = (const rsc_colocation_t *)a;</a>
+<a name="ln1165">    const rsc_colocation_t *rsc_constraint2 = (const rsc_colocation_t *)b;</a>
+<a name="ln1166"> </a>
+<a name="ln1167">    if (a == NULL) {</a>
+<a name="ln1168">        return 1;</a>
+<a name="ln1169">    }</a>
+<a name="ln1170">    if (b == NULL) {</a>
+<a name="ln1171">        return -1;</a>
+<a name="ln1172">    }</a>
+<a name="ln1173"> </a>
+<a name="ln1174">    CRM_ASSERT(rsc_constraint1-&gt;rsc_lh != NULL);</a>
+<a name="ln1175">    CRM_ASSERT(rsc_constraint1-&gt;rsc_rh != NULL);</a>
+<a name="ln1176"> </a>
+<a name="ln1177">    if (rsc_constraint1-&gt;rsc_rh-&gt;priority &gt; rsc_constraint2-&gt;rsc_rh-&gt;priority) {</a>
+<a name="ln1178">        return -1;</a>
+<a name="ln1179">    }</a>
+<a name="ln1180"> </a>
+<a name="ln1181">    if (rsc_constraint1-&gt;rsc_rh-&gt;priority &lt; rsc_constraint2-&gt;rsc_rh-&gt;priority) {</a>
+<a name="ln1182">        return 1;</a>
+<a name="ln1183">    }</a>
+<a name="ln1184"> </a>
+<a name="ln1185">    /* Process clones before primitives and groups */</a>
+<a name="ln1186">    if (rsc_constraint1-&gt;rsc_rh-&gt;variant &gt; rsc_constraint2-&gt;rsc_rh-&gt;variant) {</a>
+<a name="ln1187">        return -1;</a>
+<a name="ln1188">    } else if (rsc_constraint1-&gt;rsc_rh-&gt;variant &lt; rsc_constraint2-&gt;rsc_rh-&gt;variant) {</a>
+<a name="ln1189">        return 1;</a>
+<a name="ln1190">    }</a>
+<a name="ln1191"> </a>
+<a name="ln1192">    return strcmp(rsc_constraint1-&gt;rsc_rh-&gt;id, rsc_constraint2-&gt;rsc_rh-&gt;id);</a>
+<a name="ln1193">}</a>
+<a name="ln1194"> </a>
+<a name="ln1195">static void</a>
+<a name="ln1196">anti_colocation_order(resource_t * first_rsc, int first_role,</a>
+<a name="ln1197">                      resource_t * then_rsc, int then_role,</a>
+<a name="ln1198">                      pe_working_set_t * data_set)</a>
+<a name="ln1199">{</a>
+<a name="ln1200">    const char *first_tasks[] = { NULL, NULL };</a>
+<a name="ln1201">    const char *then_tasks[] = { NULL, NULL };</a>
+<a name="ln1202">    int first_lpc = 0;</a>
+<a name="ln1203">    int then_lpc = 0;</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    /* Actions to make first_rsc lose first_role */</a>
+<a name="ln1206">    if (first_role == RSC_ROLE_MASTER) {</a>
+<a name="ln1207">        first_tasks[0] = CRMD_ACTION_DEMOTE;</a>
+<a name="ln1208"> </a>
+<a name="ln1209">    } else {</a>
+<a name="ln1210">        first_tasks[0] = CRMD_ACTION_STOP;</a>
+<a name="ln1211"> </a>
+<a name="ln1212">        if (first_role == RSC_ROLE_SLAVE) {</a>
+<a name="ln1213">            first_tasks[1] = CRMD_ACTION_PROMOTE;</a>
+<a name="ln1214">        }</a>
+<a name="ln1215">    }</a>
+<a name="ln1216"> </a>
+<a name="ln1217">    /* Actions to make then_rsc gain then_role */</a>
+<a name="ln1218">    if (then_role == RSC_ROLE_MASTER) {</a>
+<a name="ln1219">        then_tasks[0] = CRMD_ACTION_PROMOTE;</a>
+<a name="ln1220"> </a>
+<a name="ln1221">    } else {</a>
+<a name="ln1222">        then_tasks[0] = CRMD_ACTION_START;</a>
+<a name="ln1223"> </a>
+<a name="ln1224">        if (then_role == RSC_ROLE_SLAVE) {</a>
+<a name="ln1225">            then_tasks[1] = CRMD_ACTION_DEMOTE;</a>
+<a name="ln1226">        }</a>
+<a name="ln1227">    }</a>
+<a name="ln1228"> </a>
+<a name="ln1229">    for (first_lpc = 0; first_lpc &lt;= 1 &amp;&amp; first_tasks[first_lpc] != NULL; first_lpc++) {</a>
+<a name="ln1230">        for (then_lpc = 0; then_lpc &lt;= 1 &amp;&amp; then_tasks[then_lpc] != NULL; then_lpc++) {</a>
+<a name="ln1231">            new_rsc_order(first_rsc, first_tasks[first_lpc], then_rsc, then_tasks[then_lpc],</a>
+<a name="ln1232">                          pe_order_anti_colocation, data_set);</a>
+<a name="ln1233">        }</a>
+<a name="ln1234">    }</a>
+<a name="ln1235">}</a>
+<a name="ln1236"> </a>
+<a name="ln1237">gboolean</a>
+<a name="ln1238">rsc_colocation_new(const char *id, const char *node_attr, int score,</a>
+<a name="ln1239">                   resource_t * rsc_lh, resource_t * rsc_rh,</a>
+<a name="ln1240">                   const char *state_lh, const char *state_rh, pe_working_set_t * data_set)</a>
+<a name="ln1241">{</a>
+<a name="ln1242">    rsc_colocation_t *new_con = NULL;</a>
+<a name="ln1243"> </a>
+<a name="ln1244">    if (rsc_lh == NULL) {</a>
+<a name="ln1245">        crm_config_err(&quot;No resource found for LHS %s&quot;, id);</a>
+<a name="ln1246">        return FALSE;</a>
+<a name="ln1247"> </a>
+<a name="ln1248">    } else if (rsc_rh == NULL) {</a>
+<a name="ln1249">        crm_config_err(&quot;No resource found for RHS of %s&quot;, id);</a>
+<a name="ln1250">        return FALSE;</a>
+<a name="ln1251">    }</a>
+<a name="ln1252"> </a>
+<a name="ln1253">    new_con = calloc(1, sizeof(rsc_colocation_t));</a>
+<a name="ln1254">    if (new_con == NULL) {</a>
+<a name="ln1255">        return FALSE;</a>
+<a name="ln1256">    }</a>
+<a name="ln1257"> </a>
+<a name="ln1258">    if (state_lh == NULL || safe_str_eq(state_lh, RSC_ROLE_STARTED_S)) {</a>
+<a name="ln1259">        state_lh = RSC_ROLE_UNKNOWN_S;</a>
+<a name="ln1260">    }</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    if (state_rh == NULL || safe_str_eq(state_rh, RSC_ROLE_STARTED_S)) {</a>
+<a name="ln1263">        state_rh = RSC_ROLE_UNKNOWN_S;</a>
+<a name="ln1264">    }</a>
+<a name="ln1265"> </a>
+<a name="ln1266">    new_con-&gt;id = id;</a>
+<a name="ln1267">    new_con-&gt;rsc_lh = rsc_lh;</a>
+<a name="ln1268">    new_con-&gt;rsc_rh = rsc_rh;</a>
+<a name="ln1269">    new_con-&gt;score = score;</a>
+<a name="ln1270">    new_con-&gt;role_lh = text2role(state_lh);</a>
+<a name="ln1271">    new_con-&gt;role_rh = text2role(state_rh);</a>
+<a name="ln1272">    new_con-&gt;node_attribute = node_attr;</a>
+<a name="ln1273"> </a>
+<a name="ln1274">    if (node_attr == NULL) {</a>
+<a name="ln1275">        node_attr = &quot;#&quot; XML_ATTR_UNAME;</a>
+<a name="ln1276">    }</a>
+<a name="ln1277"> </a>
+<a name="ln1278">    pe_rsc_trace(rsc_lh, &quot;%s ==&gt; %s (%s %d)&quot;, rsc_lh-&gt;id, rsc_rh-&gt;id, node_attr, score);</a>
+<a name="ln1279"> </a>
+<a name="ln1280">    rsc_lh-&gt;rsc_cons = g_list_insert_sorted(rsc_lh-&gt;rsc_cons, new_con, sort_cons_priority_rh);</a>
+<a name="ln1281"> </a>
+<a name="ln1282">    rsc_rh-&gt;rsc_cons_lhs =</a>
+<a name="ln1283">        g_list_insert_sorted(rsc_rh-&gt;rsc_cons_lhs, new_con, sort_cons_priority_lh);</a>
+<a name="ln1284"> </a>
+<a name="ln1285">    data_set-&gt;colocation_constraints = g_list_append(data_set-&gt;colocation_constraints, new_con);</a>
+<a name="ln1286"> </a>
+<a name="ln1287">    if (score &lt;= -INFINITY) {</a>
+<a name="ln1288">        anti_colocation_order(rsc_lh, new_con-&gt;role_lh, rsc_rh, new_con-&gt;role_rh, data_set);</a>
+<a name="ln1289">        anti_colocation_order(rsc_rh, new_con-&gt;role_rh, rsc_lh, new_con-&gt;role_lh, data_set);</a>
+<a name="ln1290">    }</a>
+<a name="ln1291"> </a>
+<a name="ln1292">    return TRUE;</a>
+<a name="ln1293">}</a>
+<a name="ln1294"> </a>
+<a name="ln1295">/* LHS before RHS */</a>
+<a name="ln1296">int</a>
+<a name="ln1297">new_rsc_order(resource_t * lh_rsc, const char *lh_task,</a>
+<a name="ln1298">              resource_t * rh_rsc, const char *rh_task,</a>
+<a name="ln1299">              enum pe_ordering type, pe_working_set_t * data_set)</a>
+<a name="ln1300">{</a>
+<a name="ln1301">    char *lh_key = NULL;</a>
+<a name="ln1302">    char *rh_key = NULL;</a>
+<a name="ln1303"> </a>
+<a name="ln1304">    CRM_CHECK(lh_rsc != NULL, return -1);</a>
+<a name="ln1305">    CRM_CHECK(lh_task != NULL, return -1);</a>
+<a name="ln1306">    CRM_CHECK(rh_rsc != NULL, return -1);</a>
+<a name="ln1307">    CRM_CHECK(rh_task != NULL, return -1);</a>
+<a name="ln1308"> </a>
+<a name="ln1309">    /* We no longer need to test if these reference stonith resources</a>
+<a name="ln1310">     * now that stonithd has access to them even when they're not &quot;running&quot;</a>
+<a name="ln1311">     *</a>
+<a name="ln1312">    if (validate_order_resources(lh_rsc, lh_task, rh_rsc, rh_task)) {</a>
+<a name="ln1313">        return -1;</a>
+<a name="ln1314">    }</a>
+<a name="ln1315">    */</a>
+<a name="ln1316"> </a>
+<a name="ln1317">    lh_key = generate_op_key(lh_rsc-&gt;id, lh_task, 0);</a>
+<a name="ln1318">    rh_key = generate_op_key(rh_rsc-&gt;id, rh_task, 0);</a>
+<a name="ln1319"> </a>
+<a name="ln1320">    return custom_action_order(lh_rsc, lh_key, NULL, rh_rsc, rh_key, NULL, type, data_set);</a>
+<a name="ln1321">}</a>
+<a name="ln1322"> </a>
+<a name="ln1323">static char *</a>
+<a name="ln1324">task_from_action_or_key(action_t *action, const char *key)</a>
+<a name="ln1325">{</a>
+<a name="ln1326">    char *res = NULL;</a>
+<a name="ln1327">    char *rsc_id = NULL;</a>
+<a name="ln1328">    char *op_type = NULL;</a>
+<a name="ln1329">    int interval = 0;</a>
+<a name="ln1330"> </a>
+<a name="ln1331">    if (action) {</a>
+<a name="ln1332">        res = strdup(action-&gt;task);</a>
+<a name="ln1333">    } else if (key) {</a>
+<a name="ln1334">        int rc = 0;</a>
+<a name="ln1335">        rc = parse_op_key(key, &amp;rsc_id, &amp;op_type, &amp;interval);</a>
+<a name="ln1336">        if (rc == TRUE) {</a>
+<a name="ln1337">            res = op_type;</a>
+<a name="ln1338">            op_type = NULL;</a>
+<a name="ln1339">        }</a>
+<a name="ln1340">        free(rsc_id);</a>
+<a name="ln1341">        free(op_type);</a>
+<a name="ln1342">    }</a>
+<a name="ln1343"> </a>
+<a name="ln1344">    return res;</a>
+<a name="ln1345">}</a>
+<a name="ln1346"> </a>
+<a name="ln1347">/* when order constraints are made between two resources start and stop actions</a>
+<a name="ln1348"> * those constraints have to be mirrored against the corresponding</a>
+<a name="ln1349"> * migration actions to ensure start/stop ordering is preserved during</a>
+<a name="ln1350"> * a migration */</a>
+<a name="ln1351">static void</a>
+<a name="ln1352">handle_migration_ordering(order_constraint_t *order, pe_working_set_t *data_set)</a>
+<a name="ln1353">{</a>
+<a name="ln1354">    char *lh_task = NULL;</a>
+<a name="ln1355">    char *rh_task = NULL;</a>
+<a name="ln1356">    gboolean rh_migratable;</a>
+<a name="ln1357">    gboolean lh_migratable;</a>
+<a name="ln1358"> </a>
+<a name="ln1359">    if (order-&gt;lh_rsc == NULL || order-&gt;rh_rsc == NULL) {</a>
+<a name="ln1360">        return;</a>
+<a name="ln1361">    } else if (order-&gt;lh_rsc == order-&gt;rh_rsc) {</a>
+<a name="ln1362">        return;</a>
+<a name="ln1363">    /* don't mess with those constraints built between parent</a>
+<a name="ln1364">     * resources and the children */</a>
+<a name="ln1365">    } else if (is_parent(order-&gt;lh_rsc, order-&gt;rh_rsc)) {</a>
+<a name="ln1366">        return;</a>
+<a name="ln1367">    } else if (is_parent(order-&gt;rh_rsc, order-&gt;lh_rsc)) {</a>
+<a name="ln1368">        return;</a>
+<a name="ln1369">    }</a>
+<a name="ln1370"> </a>
+<a name="ln1371">    lh_migratable = is_set(order-&gt;lh_rsc-&gt;flags, pe_rsc_allow_migrate);</a>
+<a name="ln1372">    rh_migratable = is_set(order-&gt;rh_rsc-&gt;flags, pe_rsc_allow_migrate);</a>
+<a name="ln1373"> </a>
+<a name="ln1374">    /* one of them has to be migratable for</a>
+<a name="ln1375">     * the migrate ordering logic to be applied */</a>
+<a name="ln1376">    if (lh_migratable == FALSE &amp;&amp; rh_migratable == FALSE) {</a>
+<a name="ln1377">        return;</a>
+<a name="ln1378">    }</a>
+<a name="ln1379"> </a>
+<a name="ln1380">    /* at this point we have two resources which allow migrations that have an</a>
+<a name="ln1381">     * order dependency set between them.  If those order dependencies involve</a>
+<a name="ln1382">     * start/stop actions, we need to mirror the corresponding migrate actions</a>
+<a name="ln1383">     * so order will be preserved. */</a>
+<a name="ln1384">    lh_task = task_from_action_or_key(order-&gt;lh_action, order-&gt;lh_action_task);</a>
+<a name="ln1385">    rh_task = task_from_action_or_key(order-&gt;rh_action, order-&gt;rh_action_task);</a>
+<a name="ln1386">    if (lh_task == NULL || rh_task == NULL) {</a>
+<a name="ln1387">        goto cleanup_order;</a>
+<a name="ln1388">    }</a>
+<a name="ln1389"> </a>
+<a name="ln1390">    if (safe_str_eq(lh_task, RSC_START) &amp;&amp; safe_str_eq(rh_task, RSC_START)) {</a>
+<a name="ln1391">        int flags = pe_order_optional;</a>
+<a name="ln1392"> </a>
+<a name="ln1393">        if (lh_migratable &amp;&amp; rh_migratable) {</a>
+<a name="ln1394">            /* A start then B start</a>
+<a name="ln1395">             * A migrate_from then B migrate_to */</a>
+<a name="ln1396">            custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_MIGRATED, 0), NULL,</a>
+<a name="ln1397">                                order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATE, 0), NULL,</a>
+<a name="ln1398">                                flags, data_set);</a>
+<a name="ln1399">        }</a>
+<a name="ln1400"> </a>
+<a name="ln1401">        if (rh_migratable) {</a>
+<a name="ln1402">            if (lh_migratable) {</a>
+<a name="ln1403">                flags |= pe_order_apply_first_non_migratable;</a>
+<a name="ln1404">            }</a>
+<a name="ln1405"> </a>
+<a name="ln1406">            /* A start then B start</a>
+<a name="ln1407">             * A start then B migrate_to... only if A start is not a part of a migration*/</a>
+<a name="ln1408">            custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_START, 0), NULL,</a>
+<a name="ln1409">                                order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATE, 0), NULL,</a>
+<a name="ln1410">                                flags, data_set);</a>
+<a name="ln1411">        }</a>
+<a name="ln1412"> </a>
+<a name="ln1413">    } else if (rh_migratable == TRUE &amp;&amp; safe_str_eq(lh_task, RSC_STOP) &amp;&amp; safe_str_eq(rh_task, RSC_STOP)) {</a>
+<a name="ln1414">        int flags = pe_order_optional;</a>
+<a name="ln1415"> </a>
+<a name="ln1416">        if (lh_migratable) {</a>
+<a name="ln1417">            flags |= pe_order_apply_first_non_migratable;</a>
+<a name="ln1418">        }</a>
+<a name="ln1419"> </a>
+<a name="ln1420">        /* rh side is at the bottom of the stack during a stop. If we have a constraint</a>
+<a name="ln1421">         * stop B then stop A, if B is migrating via stop/start, and A is migrating using migration actions,</a>
+<a name="ln1422">         * we need to enforce that A's migrate_to action occurs after B's stop action. */</a>
+<a name="ln1423">        custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_STOP, 0), NULL,</a>
+<a name="ln1424">                            order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATE, 0), NULL,</a>
+<a name="ln1425">                            flags, data_set);</a>
+<a name="ln1426"> </a>
+<a name="ln1427">        /* We need to build the stop constraint against migrate_from as well</a>
+<a name="ln1428">         * to account for partial migrations. */</a>
+<a name="ln1429">        if (order-&gt;rh_rsc-&gt;partial_migration_target) {</a>
+<a name="ln1430">            custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_STOP, 0), NULL,</a>
+<a name="ln1431">                                order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATED, 0), NULL,</a>
+<a name="ln1432">                                flags, data_set);</a>
+<a name="ln1433">        }</a>
+<a name="ln1434"> </a>
+<a name="ln1435">    } else if (safe_str_eq(lh_task, RSC_PROMOTE) &amp;&amp; safe_str_eq(rh_task, RSC_START)) {</a>
+<a name="ln1436">        int flags = pe_order_optional;</a>
+<a name="ln1437"> </a>
+<a name="ln1438">        if (rh_migratable) {</a>
+<a name="ln1439">            /* A promote then B start</a>
+<a name="ln1440">             * A promote then B migrate_to */</a>
+<a name="ln1441">            custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_PROMOTE, 0), NULL,</a>
+<a name="ln1442">                                order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATE, 0), NULL,</a>
+<a name="ln1443">                                flags, data_set);</a>
+<a name="ln1444">        }</a>
+<a name="ln1445"> </a>
+<a name="ln1446">    } else if (safe_str_eq(lh_task, RSC_DEMOTE) &amp;&amp; safe_str_eq(rh_task, RSC_STOP)) {</a>
+<a name="ln1447">        int flags = pe_order_optional;</a>
+<a name="ln1448"> </a>
+<a name="ln1449">        if (rh_migratable) {</a>
+<a name="ln1450">            /* A demote then B stop</a>
+<a name="ln1451">             * A demote then B migrate_to */</a>
+<a name="ln1452">            custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_DEMOTE, 0), NULL,</a>
+<a name="ln1453">                                order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATE, 0), NULL,</a>
+<a name="ln1454">                                flags, data_set);</a>
+<a name="ln1455"> </a>
+<a name="ln1456">            /* We need to build the demote constraint against migrate_from as well</a>
+<a name="ln1457">             * to account for partial migrations. */</a>
+<a name="ln1458">            if (order-&gt;rh_rsc-&gt;partial_migration_target) {</a>
+<a name="ln1459">                custom_action_order(order-&gt;lh_rsc, generate_op_key(order-&gt;lh_rsc-&gt;id, RSC_DEMOTE, 0), NULL,</a>
+<a name="ln1460">                                    order-&gt;rh_rsc, generate_op_key(order-&gt;rh_rsc-&gt;id, RSC_MIGRATED, 0), NULL,</a>
+<a name="ln1461">                                    flags, data_set);</a>
+<a name="ln1462">            }</a>
+<a name="ln1463">        }</a>
+<a name="ln1464">    }</a>
+<a name="ln1465"> </a>
+<a name="ln1466">cleanup_order:</a>
+<a name="ln1467">    free(lh_task);</a>
+<a name="ln1468">    free(rh_task);</a>
+<a name="ln1469">}</a>
+<a name="ln1470"> </a>
+<a name="ln1471">/* LHS before RHS */</a>
+<a name="ln1472">int</a>
+<a name="ln1473">custom_action_order(resource_t * lh_rsc, char *lh_action_task, action_t * lh_action,</a>
+<a name="ln1474">                    resource_t * rh_rsc, char *rh_action_task, action_t * rh_action,</a>
+<a name="ln1475">                    enum pe_ordering type, pe_working_set_t * data_set)</a>
+<a name="ln1476">{</a>
+<a name="ln1477">    order_constraint_t *order = NULL;</a>
+<a name="ln1478"> </a>
+<a name="ln1479">    if (lh_rsc == NULL &amp;&amp; lh_action) {</a>
+<a name="ln1480">        lh_rsc = lh_action-&gt;rsc;</a>
+<a name="ln1481">    }</a>
+<a name="ln1482">    if (rh_rsc == NULL &amp;&amp; rh_action) {</a>
+<a name="ln1483">        rh_rsc = rh_action-&gt;rsc;</a>
+<a name="ln1484">    }</a>
+<a name="ln1485"> </a>
+<a name="ln1486">    if ((lh_action == NULL &amp;&amp; lh_rsc == NULL)</a>
+<a name="ln1487">        || (rh_action == NULL &amp;&amp; rh_rsc == NULL)) {</a>
+<a name="ln1488">        crm_config_err(&quot;Invalid inputs %p.%p %p.%p&quot;, lh_rsc, lh_action, rh_rsc, rh_action);</a>
+<a name="ln1489">        free(lh_action_task);</a>
+<a name="ln1490">        free(rh_action_task);</a>
+<a name="ln1491">        return -1;</a>
+<a name="ln1492">    }</a>
+<a name="ln1493"> </a>
+<a name="ln1494">    order = calloc(1, sizeof(order_constraint_t));</a>
+<a name="ln1495"> </a>
+<a name="ln1496">    crm_trace(&quot;Creating[%d] %s %s %s - %s %s %s&quot;, data_set-&gt;order_id,</a>
+<a name="ln1497">              lh_rsc?lh_rsc-&gt;id:&quot;NA&quot;, lh_action_task, lh_action?lh_action-&gt;uuid:&quot;NA&quot;,</a>
+<a name="ln1498">              rh_rsc?rh_rsc-&gt;id:&quot;NA&quot;, rh_action_task, rh_action?rh_action-&gt;uuid:&quot;NA&quot;);</a>
+<a name="ln1499"> </a>
+<a name="ln1500">    /* CRM_ASSERT(data_set-&gt;order_id != 291); */</a>
+<a name="ln1501"> </a>
+<a name="ln1502">    order-&gt;id = data_set-&gt;order_id++;</a>
+<a name="ln1503">    order-&gt;type = type;</a>
+<a name="ln1504">    order-&gt;lh_rsc = lh_rsc;</a>
+<a name="ln1505">    order-&gt;rh_rsc = rh_rsc;</a>
+<a name="ln1506">    order-&gt;lh_action = lh_action;</a>
+<a name="ln1507">    order-&gt;rh_action = rh_action;</a>
+<a name="ln1508">    order-&gt;lh_action_task = lh_action_task;</a>
+<a name="ln1509">    order-&gt;rh_action_task = rh_action_task;</a>
+<a name="ln1510"> </a>
+<a name="ln1511">    if (order-&gt;lh_action_task == NULL &amp;&amp; lh_action) {</a>
+<a name="ln1512">        order-&gt;lh_action_task = strdup(lh_action-&gt;uuid);</a>
+<a name="ln1513">    }</a>
+<a name="ln1514"> </a>
+<a name="ln1515">    if (order-&gt;rh_action_task == NULL &amp;&amp; rh_action) {</a>
+<a name="ln1516">        order-&gt;rh_action_task = strdup(rh_action-&gt;uuid);</a>
+<a name="ln1517">    }</a>
+<a name="ln1518"> </a>
+<a name="ln1519">    if (order-&gt;lh_rsc == NULL &amp;&amp; lh_action) {</a>
+<a name="ln1520">        order-&gt;lh_rsc = lh_action-&gt;rsc;</a>
+<a name="ln1521">    }</a>
+<a name="ln1522"> </a>
+<a name="ln1523">    if (order-&gt;rh_rsc == NULL &amp;&amp; rh_action) {</a>
+<a name="ln1524">        order-&gt;rh_rsc = rh_action-&gt;rsc;</a>
+<a name="ln1525">    }</a>
+<a name="ln1526"> </a>
+<a name="ln1527">    data_set-&gt;ordering_constraints = g_list_prepend(data_set-&gt;ordering_constraints, order);</a>
+<a name="ln1528">    handle_migration_ordering(order, data_set);</a>
+<a name="ln1529"> </a>
+<a name="ln1530">    return order-&gt;id;</a>
+<a name="ln1531">}</a>
+<a name="ln1532"> </a>
+<a name="ln1533">enum pe_ordering</a>
+<a name="ln1534">get_asymmetrical_flags(enum pe_order_kind kind)</a>
+<a name="ln1535">{</a>
+<a name="ln1536">    enum pe_ordering flags = pe_order_optional;</a>
+<a name="ln1537"> </a>
+<a name="ln1538">    if (kind == pe_order_kind_mandatory) {</a>
+<a name="ln1539">        flags |= pe_order_asymmetrical;</a>
+<a name="ln1540">    } else if (kind == pe_order_kind_serialize) {</a>
+<a name="ln1541">        flags |= pe_order_serialize_only;</a>
+<a name="ln1542">    }</a>
+<a name="ln1543">    return flags;</a>
+<a name="ln1544">}</a>
+<a name="ln1545"> </a>
+<a name="ln1546">enum pe_ordering</a>
+<a name="ln1547">get_flags(const char *id, enum pe_order_kind kind,</a>
+<a name="ln1548">          const char *action_first, const char *action_then, gboolean invert)</a>
+<a name="ln1549">{</a>
+<a name="ln1550">    enum pe_ordering flags = pe_order_optional;</a>
+<a name="ln1551"> </a>
+<a name="ln1552">    if (invert &amp;&amp; kind == pe_order_kind_mandatory) {</a>
+<a name="ln1553">        crm_trace(&quot;Upgrade %s: implies left&quot;, id);</a>
+<a name="ln1554">        flags |= pe_order_implies_first;</a>
+<a name="ln1555"> </a>
+<a name="ln1556">    } else if (kind == pe_order_kind_mandatory) {</a>
+<a name="ln1557">        crm_trace(&quot;Upgrade %s: implies right&quot;, id);</a>
+<a name="ln1558">        flags |= pe_order_implies_then;</a>
+<a name="ln1559">        if (safe_str_eq(action_first, RSC_START)</a>
+<a name="ln1560">            || safe_str_eq(action_first, RSC_PROMOTE)) {</a>
+<a name="ln1561">            crm_trace(&quot;Upgrade %s: runnable&quot;, id);</a>
+<a name="ln1562">            flags |= pe_order_runnable_left;</a>
+<a name="ln1563">        }</a>
+<a name="ln1564"> </a>
+<a name="ln1565">    } else if (kind == pe_order_kind_serialize) {</a>
+<a name="ln1566">        flags |= pe_order_serialize_only;</a>
+<a name="ln1567">    }</a>
+<a name="ln1568"> </a>
+<a name="ln1569">    return flags;</a>
+<a name="ln1570">}</a>
+<a name="ln1571"> </a>
+<a name="ln1572">static gboolean</a>
+<a name="ln1573">unpack_order_set(xmlNode * set, enum pe_order_kind kind, resource_t ** rsc,</a>
+<a name="ln1574">                 action_t ** begin, action_t ** end, action_t ** inv_begin, action_t ** inv_end,</a>
+<a name="ln1575">                 const char *symmetrical, pe_working_set_t * data_set)</a>
+<a name="ln1576">{</a>
+<a name="ln1577">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln1578">    GListPtr set_iter = NULL;</a>
+<a name="ln1579">    GListPtr resources = NULL;</a>
+<a name="ln1580"> </a>
+<a name="ln1581">    resource_t *last = NULL;</a>
+<a name="ln1582">    resource_t *resource = NULL;</a>
+<a name="ln1583"> </a>
+<a name="ln1584">    int local_kind = kind;</a>
+<a name="ln1585">    gboolean sequential = FALSE;</a>
+<a name="ln1586">    enum pe_ordering flags = pe_order_optional;</a>
+<a name="ln1587"> </a>
+<a name="ln1588">    char *key = NULL;</a>
+<a name="ln1589">    const char *id = ID(set);</a>
+<a name="ln1590">    const char *action = crm_element_value(set, &quot;action&quot;);</a>
+<a name="ln1591">    const char *sequential_s = crm_element_value(set, &quot;sequential&quot;);</a>
+<a name="ln1592">    const char *kind_s = crm_element_value(set, XML_ORDER_ATTR_KIND);</a>
+<a name="ln1593"> </a>
+<a name="ln1594">    /*</a>
+<a name="ln1595">       char *pseudo_id = NULL;</a>
+<a name="ln1596">       char *end_id    = NULL;</a>
+<a name="ln1597">       char *begin_id  = NULL;</a>
+<a name="ln1598">     */</a>
+<a name="ln1599"> </a>
+<a name="ln1600">    if (action == NULL) {</a>
+<a name="ln1601">        action = RSC_START;</a>
+<a name="ln1602">    }</a>
+<a name="ln1603"> </a>
+<a name="ln1604">    if (kind_s) {</a>
+<a name="ln1605">        local_kind = get_ordering_type(set);</a>
+<a name="ln1606">    }</a>
+<a name="ln1607">    if (sequential_s == NULL) {</a>
+<a name="ln1608">        sequential_s = &quot;1&quot;;</a>
+<a name="ln1609">    }</a>
+<a name="ln1610"> </a>
+<a name="ln1611">    sequential = crm_is_true(sequential_s);</a>
+<a name="ln1612">    if (crm_is_true(symmetrical)) {</a>
+<a name="ln1613">        flags = get_flags(id, local_kind, action, action, FALSE);</a>
+<a name="ln1614">    } else {</a>
+<a name="ln1615">        flags = get_asymmetrical_flags(local_kind);</a>
+<a name="ln1616">    }</a>
+<a name="ln1617"> </a>
+<a name="ln1618">    for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1619">        if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1620">            EXPAND_CONSTRAINT_IDREF(id, resource, ID(xml_rsc));</a>
+<a name="ln1621">            resources = g_list_append(resources, resource);</a>
+<a name="ln1622">        }</a>
+<a name="ln1623">    }</a>
+<a name="ln1624"> </a>
+<a name="ln1625">    if (g_list_length(resources) == 1) {</a>
+<a name="ln1626">        crm_trace(&quot;Single set: %s&quot;, id);</a>
+<a name="ln1627">        *rsc = resource;</a>
+<a name="ln1628">        *end = NULL;</a>
+<a name="ln1629">        *begin = NULL;</a>
+<a name="ln1630">        *inv_end = NULL;</a>
+<a name="ln1631">        *inv_begin = NULL;</a>
+<a name="ln1632">        goto done;</a>
+<a name="ln1633">    }</a>
+<a name="ln1634"> </a>
+<a name="ln1635">    /*</a>
+<a name="ln1636">       pseudo_id = crm_concat(id, action, '-');</a>
+<a name="ln1637">       end_id    = crm_concat(pseudo_id, &quot;end&quot;, '-');</a>
+<a name="ln1638">       begin_id  = crm_concat(pseudo_id, &quot;begin&quot;, '-');</a>
+<a name="ln1639">     */</a>
+<a name="ln1640"> </a>
+<a name="ln1641">    *rsc = NULL;</a>
+<a name="ln1642">    /*</a>
+<a name="ln1643">     *end = get_pseudo_op(end_id, data_set);</a>
+<a name="ln1644">     *begin = get_pseudo_op(begin_id, data_set);</a>
+<a name="ln1645"> </a>
+<a name="ln1646">     free(pseudo_id);</a>
+<a name="ln1647">     free(begin_id);</a>
+<a name="ln1648">     free(end_id);</a>
+<a name="ln1649">     */</a>
+<a name="ln1650"> </a>
+<a name="ln1651">    set_iter = resources;</a>
+<a name="ln1652">    while (set_iter != NULL) {</a>
+<a name="ln1653">        resource = (resource_t *) set_iter-&gt;data;</a>
+<a name="ln1654">        set_iter = set_iter-&gt;next;</a>
+<a name="ln1655"> </a>
+<a name="ln1656">        key = generate_op_key(resource-&gt;id, action, 0);</a>
+<a name="ln1657"> </a>
+<a name="ln1658">        /*</a>
+<a name="ln1659">           custom_action_order(NULL, NULL, *begin, resource, strdup(key), NULL,</a>
+<a name="ln1660">           flags|pe_order_implies_first_printed, data_set);</a>
+<a name="ln1661"> </a>
+<a name="ln1662">           custom_action_order(resource, strdup(key), NULL, NULL, NULL, *end,</a>
+<a name="ln1663">           flags|pe_order_implies_then_printed, data_set);</a>
+<a name="ln1664">         */</a>
+<a name="ln1665"> </a>
+<a name="ln1666">        if (local_kind == pe_order_kind_serialize) {</a>
+<a name="ln1667">            /* Serialize before everything that comes after */</a>
+<a name="ln1668"> </a>
+<a name="ln1669">            GListPtr gIter = NULL;</a>
+<a name="ln1670"> </a>
+<a name="ln1671">            for (gIter = set_iter; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1672">                resource_t *then_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln1673">                char *then_key = generate_op_key(then_rsc-&gt;id, action, 0);</a>
+<a name="ln1674"> </a>
+<a name="ln1675">                custom_action_order(resource, strdup(key), NULL, then_rsc, then_key, NULL,</a>
+<a name="ln1676">                                    flags, data_set);</a>
+<a name="ln1677">            }</a>
+<a name="ln1678"> </a>
+<a name="ln1679">        } else if (sequential) {</a>
+<a name="ln1680">            if (last != NULL) {</a>
+<a name="ln1681">                new_rsc_order(last, action, resource, action, flags, data_set);</a>
+<a name="ln1682">            }</a>
+<a name="ln1683">            last = resource;</a>
+<a name="ln1684">        }</a>
+<a name="ln1685">        free(key);</a>
+<a name="ln1686">    }</a>
+<a name="ln1687"> </a>
+<a name="ln1688">    if (crm_is_true(symmetrical) == FALSE) {</a>
+<a name="ln1689">        goto done;</a>
+<a name="ln1690"> </a>
+<a name="ln1691">    } else if (symmetrical &amp;&amp; local_kind == pe_order_kind_serialize) {</a>
+<a name="ln1692">        crm_config_warn(&quot;Cannot invert serialized constraint set %s&quot;, id);</a>
+<a name="ln1693">        goto done;</a>
+<a name="ln1694"> </a>
+<a name="ln1695">    } else if (local_kind == pe_order_kind_serialize) {</a>
+<a name="ln1696">        goto done;</a>
+<a name="ln1697">    }</a>
+<a name="ln1698"> </a>
+<a name="ln1699">    last = NULL;</a>
+<a name="ln1700">    action = invert_action(action);</a>
+<a name="ln1701"> </a>
+<a name="ln1702">    /*</a>
+<a name="ln1703">       pseudo_id = crm_concat(id, action, '-');</a>
+<a name="ln1704">       end_id    = crm_concat(pseudo_id, &quot;end&quot;, '-');</a>
+<a name="ln1705">       begin_id  = crm_concat(pseudo_id, &quot;begin&quot;, '-');</a>
+<a name="ln1706"> </a>
+<a name="ln1707">       *inv_end = get_pseudo_op(end_id, data_set);</a>
+<a name="ln1708">       *inv_begin = get_pseudo_op(begin_id, data_set);</a>
+<a name="ln1709"> </a>
+<a name="ln1710">       free(pseudo_id);</a>
+<a name="ln1711">       free(begin_id);</a>
+<a name="ln1712">       free(end_id);</a>
+<a name="ln1713">     */</a>
+<a name="ln1714"> </a>
+<a name="ln1715">    flags = get_flags(id, local_kind, action, action, TRUE);</a>
+<a name="ln1716"> </a>
+<a name="ln1717">    set_iter = resources;</a>
+<a name="ln1718">    while (set_iter != NULL) {</a>
+<a name="ln1719">        resource = (resource_t *) set_iter-&gt;data;</a>
+<a name="ln1720">        set_iter = set_iter-&gt;next;</a>
+<a name="ln1721"> </a>
+<a name="ln1722">        /*</a>
+<a name="ln1723">           key = generate_op_key(resource-&gt;id, action, 0);</a>
+<a name="ln1724"> </a>
+<a name="ln1725">           custom_action_order(NULL, NULL, *inv_begin, resource, strdup(key), NULL,</a>
+<a name="ln1726">           flags|pe_order_implies_first_printed, data_set);</a>
+<a name="ln1727"> </a>
+<a name="ln1728">           custom_action_order(resource, key, NULL, NULL, NULL, *inv_end,</a>
+<a name="ln1729">           flags|pe_order_implies_then_printed, data_set);</a>
+<a name="ln1730">         */</a>
+<a name="ln1731"> </a>
+<a name="ln1732">        if (sequential) {</a>
+<a name="ln1733">            if (last != NULL) {</a>
+<a name="ln1734">                new_rsc_order(resource, action, last, action, flags, data_set);</a>
+<a name="ln1735">            }</a>
+<a name="ln1736">            last = resource;</a>
+<a name="ln1737">        }</a>
+<a name="ln1738">    }</a>
+<a name="ln1739"> </a>
+<a name="ln1740">  done:</a>
+<a name="ln1741">    g_list_free(resources);</a>
+<a name="ln1742">    return TRUE;</a>
+<a name="ln1743">}</a>
+<a name="ln1744"> </a>
+<a name="ln1745">static gboolean</a>
+<a name="ln1746">order_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, enum pe_order_kind kind,</a>
+<a name="ln1747">               pe_working_set_t * data_set, gboolean invert, gboolean symmetrical)</a>
+<a name="ln1748">{</a>
+<a name="ln1749"> </a>
+<a name="ln1750">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln1751">    xmlNode *xml_rsc_2 = NULL;</a>
+<a name="ln1752"> </a>
+<a name="ln1753">    resource_t *rsc_1 = NULL;</a>
+<a name="ln1754">    resource_t *rsc_2 = NULL;</a>
+<a name="ln1755"> </a>
+<a name="ln1756">    const char *action_1 = crm_element_value(set1, &quot;action&quot;);</a>
+<a name="ln1757">    const char *action_2 = crm_element_value(set2, &quot;action&quot;);</a>
+<a name="ln1758"> </a>
+<a name="ln1759">    const char *sequential_1 = crm_element_value(set1, &quot;sequential&quot;);</a>
+<a name="ln1760">    const char *sequential_2 = crm_element_value(set2, &quot;sequential&quot;);</a>
+<a name="ln1761"> </a>
+<a name="ln1762">    const char *require_all_s = crm_element_value(set1, &quot;require-all&quot;);</a>
+<a name="ln1763">    gboolean require_all = require_all_s ? crm_is_true(require_all_s) : TRUE;</a>
+<a name="ln1764"> </a>
+<a name="ln1765">    enum pe_ordering flags = pe_order_none;</a>
+<a name="ln1766"> </a>
+<a name="ln1767">    if (action_1 == NULL) {</a>
+<a name="ln1768">        action_1 = RSC_START;</a>
+<a name="ln1769">    };</a>
+<a name="ln1770"> </a>
+<a name="ln1771">    if (action_2 == NULL) {</a>
+<a name="ln1772">        action_2 = RSC_START;</a>
+<a name="ln1773">    };</a>
+<a name="ln1774"> </a>
+<a name="ln1775">    if (invert) {</a>
+<a name="ln1776">        action_1 = invert_action(action_1);</a>
+<a name="ln1777">        action_2 = invert_action(action_2);</a>
+<a name="ln1778">    }</a>
+<a name="ln1779"> </a>
+<a name="ln1780">    if(safe_str_eq(RSC_STOP, action_1) || safe_str_eq(RSC_DEMOTE, action_1)) {</a>
+<a name="ln1781">        /* Assuming: A -&gt; ( B || C) -&gt; D</a>
+<a name="ln1782">         * The one-or-more logic only applies during the start/promote phase</a>
+<a name="ln1783">         * During shutdown neither B nor can shutdown until D is down, so simply turn require_all back on.</a>
+<a name="ln1784">         */</a>
+<a name="ln1785">        require_all = TRUE;</a>
+<a name="ln1786">    }</a>
+<a name="ln1787"> </a>
+<a name="ln1788">    if (symmetrical == FALSE) {</a>
+<a name="ln1789">        flags = get_asymmetrical_flags(kind);</a>
+<a name="ln1790">    } else {</a>
+<a name="ln1791">        flags = get_flags(id, kind, action_2, action_1, invert);</a>
+<a name="ln1792">    }</a>
+<a name="ln1793"> </a>
+<a name="ln1794">    /* If we have an un-ordered set1, whether it is sequential or not is irrelevant in regards to set2. */</a>
+<a name="ln1795">    if (!require_all) {</a>
+<a name="ln1796">        char *task = crm_concat(CRM_OP_RELAXED_SET, ID(set1), ':');</a>
+<a name="ln1797">        action_t *unordered_action = get_pseudo_op(task, data_set);</a>
+<a name="ln1798"> </a>
+<a name="ln1799">        free(task);</a>
+<a name="ln1800">        update_action_flags(unordered_action, pe_action_requires_any, __FUNCTION__, __LINE__);</a>
+<a name="ln1801"> </a>
+<a name="ln1802">        for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1803">            if (!crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1804">                continue;</a>
+<a name="ln1805">            }</a>
+<a name="ln1806"> </a>
+<a name="ln1807">            EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln1808"> </a>
+<a name="ln1809">            /* Add an ordering constraint between every element in set1 and the pseudo action.</a>
+<a name="ln1810">             * If any action in set1 is runnable the pseudo action will be runnable. */</a>
+<a name="ln1811">            custom_action_order(rsc_1, generate_op_key(rsc_1-&gt;id, action_1, 0), NULL,</a>
+<a name="ln1812">                                NULL, NULL, unordered_action,</a>
+<a name="ln1813">                                pe_order_one_or_more | pe_order_implies_then_printed, data_set);</a>
+<a name="ln1814">        }</a>
+<a name="ln1815">        for (xml_rsc_2 = __xml_first_child(set2); xml_rsc_2 != NULL; xml_rsc_2 = __xml_next_element(xml_rsc_2)) {</a>
+<a name="ln1816">            if (!crm_str_eq((const char *)xml_rsc_2-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1817">                continue;</a>
+<a name="ln1818">            }</a>
+<a name="ln1819"> </a>
+<a name="ln1820">            EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc_2));</a>
+<a name="ln1821"> </a>
+<a name="ln1822">            /* Add an ordering constraint between the pseudo action and every element in set2.</a>
+<a name="ln1823">             * If the pseudo action is runnable, every action in set2 will be runnable */</a>
+<a name="ln1824">            custom_action_order(NULL, NULL, unordered_action,</a>
+<a name="ln1825">                                rsc_2, generate_op_key(rsc_2-&gt;id, action_2, 0), NULL,</a>
+<a name="ln1826">                                flags | pe_order_runnable_left, data_set);</a>
+<a name="ln1827">        }</a>
+<a name="ln1828"> </a>
+<a name="ln1829">        return TRUE;</a>
+<a name="ln1830">    }</a>
+<a name="ln1831"> </a>
+<a name="ln1832">    if (crm_is_true(sequential_1)) {</a>
+<a name="ln1833">        if (invert == FALSE) {</a>
+<a name="ln1834">            /* get the last one */</a>
+<a name="ln1835">            const char *rid = NULL;</a>
+<a name="ln1836"> </a>
+<a name="ln1837">            for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1838">                if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1839">                    rid = ID(xml_rsc);</a>
+<a name="ln1840">                }</a>
+<a name="ln1841">            }</a>
+<a name="ln1842">            EXPAND_CONSTRAINT_IDREF(id, rsc_1, rid);</a>
+<a name="ln1843"> </a>
+<a name="ln1844">        } else {</a>
+<a name="ln1845">            /* get the first one */</a>
+<a name="ln1846">            for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1847">                if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1848">                    EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln1849">                    break;</a>
+<a name="ln1850">                }</a>
+<a name="ln1851">            }</a>
+<a name="ln1852">        }</a>
+<a name="ln1853">    }</a>
+<a name="ln1854"> </a>
+<a name="ln1855">    if (crm_is_true(sequential_2)) {</a>
+<a name="ln1856">        if (invert == FALSE) {</a>
+<a name="ln1857">            /* get the first one */</a>
+<a name="ln1858">            for (xml_rsc = __xml_first_child(set2); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1859">                if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1860">                    EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc));</a>
+<a name="ln1861">                    break;</a>
+<a name="ln1862">                }</a>
+<a name="ln1863">            }</a>
+<a name="ln1864"> </a>
+<a name="ln1865">        } else {</a>
+<a name="ln1866">            /* get the last one */</a>
+<a name="ln1867">            const char *rid = NULL;</a>
+<a name="ln1868"> </a>
+<a name="ln1869">            for (xml_rsc = __xml_first_child(set2); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1870">                if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1871">                    rid = ID(xml_rsc);</a>
+<a name="ln1872">                }</a>
+<a name="ln1873">            }</a>
+<a name="ln1874">            EXPAND_CONSTRAINT_IDREF(id, rsc_2, rid);</a>
+<a name="ln1875">        }</a>
+<a name="ln1876">    }</a>
+<a name="ln1877"> </a>
+<a name="ln1878">    if (rsc_1 != NULL &amp;&amp; rsc_2 != NULL) {</a>
+<a name="ln1879">        new_rsc_order(rsc_1, action_1, rsc_2, action_2, flags, data_set);</a>
+<a name="ln1880"> </a>
+<a name="ln1881">    } else if (rsc_1 != NULL) {</a>
+<a name="ln1882">        for (xml_rsc = __xml_first_child(set2); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1883">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1884">                EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc));</a>
+<a name="ln1885">                new_rsc_order(rsc_1, action_1, rsc_2, action_2, flags, data_set);</a>
+<a name="ln1886">            }</a>
+<a name="ln1887">        }</a>
+<a name="ln1888"> </a>
+<a name="ln1889">    } else if (rsc_2 != NULL) {</a>
+<a name="ln1890">        xmlNode *xml_rsc = NULL;</a>
+<a name="ln1891"> </a>
+<a name="ln1892">        for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1893">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1894">                EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln1895">                new_rsc_order(rsc_1, action_1, rsc_2, action_2, flags, data_set);</a>
+<a name="ln1896">            }</a>
+<a name="ln1897">        }</a>
+<a name="ln1898"> </a>
+<a name="ln1899">    } else {</a>
+<a name="ln1900">        for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln1901">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1902">                xmlNode *xml_rsc_2 = NULL;</a>
+<a name="ln1903"> </a>
+<a name="ln1904">                EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln1905"> </a>
+<a name="ln1906">                for (xml_rsc_2 = __xml_first_child(set2); xml_rsc_2 != NULL;</a>
+<a name="ln1907">                     xml_rsc_2 = __xml_next_element(xml_rsc_2)) {</a>
+<a name="ln1908">                    if (crm_str_eq((const char *)xml_rsc_2-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln1909">                        EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc_2));</a>
+<a name="ln1910">                        new_rsc_order(rsc_1, action_1, rsc_2, action_2, flags, data_set);</a>
+<a name="ln1911">                    }</a>
+<a name="ln1912">                }</a>
+<a name="ln1913">            }</a>
+<a name="ln1914">        }</a>
+<a name="ln1915">    }</a>
+<a name="ln1916"> </a>
+<a name="ln1917">    return TRUE;</a>
+<a name="ln1918">}</a>
+<a name="ln1919"> </a>
+<a name="ln1920">static gboolean</a>
+<a name="ln1921">unpack_order_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)</a>
+<a name="ln1922">{</a>
+<a name="ln1923">    const char *id = NULL;</a>
+<a name="ln1924">    const char *id_first = NULL;</a>
+<a name="ln1925">    const char *id_then = NULL;</a>
+<a name="ln1926">    const char *action_first = NULL;</a>
+<a name="ln1927">    const char *action_then = NULL;</a>
+<a name="ln1928"> </a>
+<a name="ln1929">    resource_t *rsc_first = NULL;</a>
+<a name="ln1930">    resource_t *rsc_then = NULL;</a>
+<a name="ln1931">    tag_t *tag_first = NULL;</a>
+<a name="ln1932">    tag_t *tag_then = NULL;</a>
+<a name="ln1933"> </a>
+<a name="ln1934">    xmlNode *new_xml = NULL;</a>
+<a name="ln1935">    xmlNode *rsc_set_first = NULL;</a>
+<a name="ln1936">    xmlNode *rsc_set_then = NULL;</a>
+<a name="ln1937">    gboolean any_sets = FALSE;</a>
+<a name="ln1938"> </a>
+<a name="ln1939">    *expanded_xml = NULL;</a>
+<a name="ln1940"> </a>
+<a name="ln1941">    if (xml_obj == NULL) {</a>
+<a name="ln1942">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln1943">        return FALSE;</a>
+<a name="ln1944">    }</a>
+<a name="ln1945"> </a>
+<a name="ln1946">    id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln1947">    if (id == NULL) {</a>
+<a name="ln1948">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln1949">        return FALSE;</a>
+<a name="ln1950">    }</a>
+<a name="ln1951"> </a>
+<a name="ln1952">    /* Attempt to expand any template/tag references in possible resource sets. */</a>
+<a name="ln1953">    expand_tags_in_sets(xml_obj, &amp;new_xml, data_set);</a>
+<a name="ln1954">    if (new_xml) {</a>
+<a name="ln1955">        /* There are resource sets referencing templates/tags. Return with the expanded XML. */</a>
+<a name="ln1956">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_order...&quot;);</a>
+<a name="ln1957">        *expanded_xml = new_xml;</a>
+<a name="ln1958">        return TRUE;</a>
+<a name="ln1959">    }</a>
+<a name="ln1960"> </a>
+<a name="ln1961">    id_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST);</a>
+<a name="ln1962">    id_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN);</a>
+<a name="ln1963">    if (id_first == NULL || id_then == NULL) {</a>
+<a name="ln1964">        return TRUE;</a>
+<a name="ln1965">    }</a>
+<a name="ln1966"> </a>
+<a name="ln1967">    if (valid_resource_or_tag(data_set, id_first, &amp;rsc_first, &amp;tag_first) == FALSE) {</a>
+<a name="ln1968">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, id, id_first);</a>
+<a name="ln1969">        return FALSE;</a>
+<a name="ln1970">    }</a>
+<a name="ln1971"> </a>
+<a name="ln1972">    if (valid_resource_or_tag(data_set, id_then, &amp;rsc_then, &amp;tag_then) == FALSE) {</a>
+<a name="ln1973">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, id, id_then);</a>
+<a name="ln1974">        return FALSE;</a>
+<a name="ln1975">    }</a>
+<a name="ln1976"> </a>
+<a name="ln1977">    if (rsc_first &amp;&amp; rsc_then) {</a>
+<a name="ln1978">        /* Neither side references any template/tag. */</a>
+<a name="ln1979">        return TRUE;</a>
+<a name="ln1980">    }</a>
+<a name="ln1981"> </a>
+<a name="ln1982">    action_first = crm_element_value(xml_obj, XML_ORDER_ATTR_FIRST_ACTION);</a>
+<a name="ln1983">    action_then = crm_element_value(xml_obj, XML_ORDER_ATTR_THEN_ACTION);</a>
+<a name="ln1984"> </a>
+<a name="ln1985">    new_xml = copy_xml(xml_obj);</a>
+<a name="ln1986"> </a>
+<a name="ln1987">    /* Convert the template/tag reference in &quot;first&quot; into a resource_set under the order constraint. */</a>
+<a name="ln1988">    if (tag_to_set(new_xml, &amp;rsc_set_first, XML_ORDER_ATTR_FIRST, TRUE, data_set) == FALSE) {</a>
+<a name="ln1989">        free_xml(new_xml);</a>
+<a name="ln1990">        return FALSE;</a>
+<a name="ln1991">    }</a>
+<a name="ln1992"> </a>
+<a name="ln1993">    if (rsc_set_first) {</a>
+<a name="ln1994">        if (action_first) {</a>
+<a name="ln1995">            /* A &quot;first-action&quot; is specified.</a>
+<a name="ln1996">               Move it into the converted resource_set as an &quot;action&quot; attribute. */</a>
+<a name="ln1997">            crm_xml_add(rsc_set_first, &quot;action&quot;, action_first);</a>
+<a name="ln1998">            xml_remove_prop(new_xml, XML_ORDER_ATTR_FIRST_ACTION);</a>
+<a name="ln1999">        }</a>
+<a name="ln2000">        any_sets = TRUE;</a>
+<a name="ln2001">    }</a>
+<a name="ln2002"> </a>
+<a name="ln2003">    /* Convert the template/tag reference in &quot;then&quot; into a resource_set under the order constraint. */</a>
+<a name="ln2004">    if (tag_to_set(new_xml, &amp;rsc_set_then, XML_ORDER_ATTR_THEN, TRUE, data_set) == FALSE) {</a>
+<a name="ln2005">        free_xml(new_xml);</a>
+<a name="ln2006">        return FALSE;</a>
+<a name="ln2007">    }</a>
+<a name="ln2008"> </a>
+<a name="ln2009">    if (rsc_set_then) {</a>
+<a name="ln2010">        if (action_then) {</a>
+<a name="ln2011">            /* A &quot;then-action&quot; is specified.</a>
+<a name="ln2012">               Move it into the converted resource_set as an &quot;action&quot; attribute. */</a>
+<a name="ln2013">            crm_xml_add(rsc_set_then, &quot;action&quot;, action_then);</a>
+<a name="ln2014">            xml_remove_prop(new_xml, XML_ORDER_ATTR_THEN_ACTION);</a>
+<a name="ln2015">        }</a>
+<a name="ln2016">        any_sets = TRUE;</a>
+<a name="ln2017">    }</a>
+<a name="ln2018"> </a>
+<a name="ln2019">    if (any_sets) {</a>
+<a name="ln2020">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_order...&quot;);</a>
+<a name="ln2021">        *expanded_xml = new_xml;</a>
+<a name="ln2022">    } else {</a>
+<a name="ln2023">        free_xml(new_xml);</a>
+<a name="ln2024">    }</a>
+<a name="ln2025"> </a>
+<a name="ln2026">    return TRUE;</a>
+<a name="ln2027">}</a>
+<a name="ln2028"> </a>
+<a name="ln2029">gboolean</a>
+<a name="ln2030">unpack_rsc_order(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln2031">{</a>
+<a name="ln2032">    gboolean any_sets = FALSE;</a>
+<a name="ln2033"> </a>
+<a name="ln2034">    resource_t *rsc = NULL;</a>
+<a name="ln2035"> </a>
+<a name="ln2036">    /*</a>
+<a name="ln2037">       resource_t *last_rsc = NULL;</a>
+<a name="ln2038">     */</a>
+<a name="ln2039"> </a>
+<a name="ln2040">    action_t *set_end = NULL;</a>
+<a name="ln2041">    action_t *set_begin = NULL;</a>
+<a name="ln2042"> </a>
+<a name="ln2043">    action_t *set_inv_end = NULL;</a>
+<a name="ln2044">    action_t *set_inv_begin = NULL;</a>
+<a name="ln2045"> </a>
+<a name="ln2046">    xmlNode *set = NULL;</a>
+<a name="ln2047">    xmlNode *last = NULL;</a>
+<a name="ln2048"> </a>
+<a name="ln2049">    xmlNode *orig_xml = NULL;</a>
+<a name="ln2050">    xmlNode *expanded_xml = NULL;</a>
+<a name="ln2051"> </a>
+<a name="ln2052">    /*</a>
+<a name="ln2053">       action_t *last_end = NULL;</a>
+<a name="ln2054">       action_t *last_begin = NULL;</a>
+<a name="ln2055">       action_t *last_inv_end = NULL;</a>
+<a name="ln2056">       action_t *last_inv_begin = NULL;</a>
+<a name="ln2057">     */</a>
+<a name="ln2058"> </a>
+<a name="ln2059">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2060">    const char *invert = crm_element_value(xml_obj, XML_CONS_ATTR_SYMMETRICAL);</a>
+<a name="ln2061">    enum pe_order_kind kind = get_ordering_type(xml_obj);</a>
+<a name="ln2062"> </a>
+<a name="ln2063">    gboolean invert_bool = TRUE;</a>
+<a name="ln2064">    gboolean rc = TRUE;</a>
+<a name="ln2065"> </a>
+<a name="ln2066">    if (invert == NULL) {</a>
+<a name="ln2067">        invert = &quot;true&quot;;</a>
+<a name="ln2068">    }</a>
+<a name="ln2069"> </a>
+<a name="ln2070">    invert_bool = crm_is_true(invert);</a>
+<a name="ln2071"> </a>
+<a name="ln2072">    rc = unpack_order_tags(xml_obj, &amp;expanded_xml, data_set);</a>
+<a name="ln2073">    if (expanded_xml) {</a>
+<a name="ln2074">        orig_xml = xml_obj;</a>
+<a name="ln2075">        xml_obj = expanded_xml;</a>
+<a name="ln2076"> </a>
+<a name="ln2077">    } else if (rc == FALSE) {</a>
+<a name="ln2078">        return FALSE;</a>
+<a name="ln2079">    }</a>
+<a name="ln2080"> </a>
+<a name="ln2081">    for (set = __xml_first_child(xml_obj); set != NULL; set = __xml_next_element(set)) {</a>
+<a name="ln2082">        if (crm_str_eq((const char *)set-&gt;name, XML_CONS_TAG_RSC_SET, TRUE)) {</a>
+<a name="ln2083">            any_sets = TRUE;</a>
+<a name="ln2084">            set = expand_idref(set, data_set-&gt;input);</a>
+<a name="ln2085">            if (unpack_order_set(set, kind, &amp;rsc, &amp;set_begin, &amp;set_end,</a>
+<a name="ln2086">                                 &amp;set_inv_begin, &amp;set_inv_end, invert, data_set) == FALSE) {</a>
+<a name="ln2087">                return FALSE;</a>
+<a name="ln2088"> </a>
+<a name="ln2089">                /* Expand orders in order_rsc_sets() instead of via pseudo actions. */</a>
+<a name="ln2090">                /*</a>
+<a name="ln2091">                   } else if(last) {</a>
+<a name="ln2092">                   const char *set_action = crm_element_value(set, &quot;action&quot;);</a>
+<a name="ln2093">                   const char *last_action = crm_element_value(last, &quot;action&quot;);</a>
+<a name="ln2094">                   enum pe_ordering flags = get_flags(id, kind, last_action, set_action, FALSE);</a>
+<a name="ln2095"> </a>
+<a name="ln2096">                   if(!set_action) { set_action = RSC_START; }</a>
+<a name="ln2097">                   if(!last_action) { last_action = RSC_START; }</a>
+<a name="ln2098"> </a>
+<a name="ln2099">                   if(rsc == NULL &amp;&amp; last_rsc == NULL) {</a>
+<a name="ln2100">                   order_actions(last_end, set_begin, flags);</a>
+<a name="ln2101">                   } else {</a>
+<a name="ln2102">                   custom_action_order(</a>
+<a name="ln2103">                   last_rsc, null_or_opkey(last_rsc, last_action), last_end,</a>
+<a name="ln2104">                   rsc, null_or_opkey(rsc, set_action), set_begin,</a>
+<a name="ln2105">                   flags, data_set);</a>
+<a name="ln2106">                   }</a>
+<a name="ln2107"> </a>
+<a name="ln2108">                   if(crm_is_true(invert)) {</a>
+<a name="ln2109">                   set_action = invert_action(set_action);</a>
+<a name="ln2110">                   last_action = invert_action(last_action);</a>
+<a name="ln2111"> </a>
+<a name="ln2112">                   flags = get_flags(id, kind, last_action, set_action, TRUE);</a>
+<a name="ln2113">                   if(rsc == NULL &amp;&amp; last_rsc == NULL) {</a>
+<a name="ln2114">                   order_actions(last_inv_begin, set_inv_end, flags);</a>
+<a name="ln2115"> </a>
+<a name="ln2116">                   } else {</a>
+<a name="ln2117">                   custom_action_order(</a>
+<a name="ln2118">                   last_rsc, null_or_opkey(last_rsc, last_action), last_inv_begin,</a>
+<a name="ln2119">                   rsc, null_or_opkey(rsc, set_action), set_inv_end,</a>
+<a name="ln2120">                   flags, data_set);</a>
+<a name="ln2121">                   }</a>
+<a name="ln2122">                   }</a>
+<a name="ln2123">                 */</a>
+<a name="ln2124"> </a>
+<a name="ln2125">            } else if (         /* never called -- Now call it for supporting clones in resource sets */</a>
+<a name="ln2126">                          last) {</a>
+<a name="ln2127">                if (order_rsc_sets(id, last, set, kind, data_set, FALSE, invert_bool) == FALSE) {</a>
+<a name="ln2128">                    return FALSE;</a>
+<a name="ln2129">                }</a>
+<a name="ln2130"> </a>
+<a name="ln2131">                if (invert_bool</a>
+<a name="ln2132">                    &amp;&amp; order_rsc_sets(id, set, last, kind, data_set, TRUE, invert_bool) == FALSE) {</a>
+<a name="ln2133">                    return FALSE;</a>
+<a name="ln2134">                }</a>
+<a name="ln2135"> </a>
+<a name="ln2136">            }</a>
+<a name="ln2137">            last = set;</a>
+<a name="ln2138">            /*</a>
+<a name="ln2139">               last_rsc = rsc;</a>
+<a name="ln2140">               last_end = set_end;</a>
+<a name="ln2141">               last_begin = set_begin;</a>
+<a name="ln2142">               last_inv_end = set_inv_end;</a>
+<a name="ln2143">               last_inv_begin = set_inv_begin;</a>
+<a name="ln2144">             */</a>
+<a name="ln2145">        }</a>
+<a name="ln2146">    }</a>
+<a name="ln2147"> </a>
+<a name="ln2148">    if (expanded_xml) {</a>
+<a name="ln2149">        free_xml(expanded_xml);</a>
+<a name="ln2150">        xml_obj = orig_xml;</a>
+<a name="ln2151">    }</a>
+<a name="ln2152"> </a>
+<a name="ln2153">    if (any_sets == FALSE) {</a>
+<a name="ln2154">        return unpack_simple_rsc_order(xml_obj, data_set);</a>
+<a name="ln2155">    }</a>
+<a name="ln2156"> </a>
+<a name="ln2157">    return TRUE;</a>
+<a name="ln2158">}</a>
+<a name="ln2159"> </a>
+<a name="ln2160">static gboolean</a>
+<a name="ln2161">unpack_colocation_set(xmlNode * set, int score, pe_working_set_t * data_set)</a>
+<a name="ln2162">{</a>
+<a name="ln2163">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln2164">    resource_t *with = NULL;</a>
+<a name="ln2165">    resource_t *resource = NULL;</a>
+<a name="ln2166">    const char *set_id = ID(set);</a>
+<a name="ln2167">    const char *role = crm_element_value(set, &quot;role&quot;);</a>
+<a name="ln2168">    const char *sequential = crm_element_value(set, &quot;sequential&quot;);</a>
+<a name="ln2169">    const char *ordering = crm_element_value(set, &quot;ordering&quot;);</a>
+<a name="ln2170">    int local_score = score;</a>
+<a name="ln2171"> </a>
+<a name="ln2172">    const char *score_s = crm_element_value(set, XML_RULE_ATTR_SCORE);</a>
+<a name="ln2173"> </a>
+<a name="ln2174">    if (score_s) {</a>
+<a name="ln2175">        local_score = char2score(score_s);</a>
+<a name="ln2176">    }</a>
+<a name="ln2177"> </a>
+<a name="ln2178">    if(ordering == NULL) {</a>
+<a name="ln2179">        ordering = &quot;group&quot;;</a>
+<a name="ln2180">    }</a>
+<a name="ln2181"> </a>
+<a name="ln2182">    if (sequential != NULL &amp;&amp; crm_is_true(sequential) == FALSE) {</a>
+<a name="ln2183">        return TRUE;</a>
+<a name="ln2184"> </a>
+<a name="ln2185">    } else if (local_score &gt;= 0 &amp;&amp; safe_str_eq(ordering, &quot;group&quot;)) {</a>
+<a name="ln2186">        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2187">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2188">                EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));</a>
+<a name="ln2189">                if (with != NULL) {</a>
+<a name="ln2190">                    pe_rsc_trace(resource, &quot;Colocating %s with %s&quot;, resource-&gt;id, with-&gt;id);</a>
+<a name="ln2191">                    rsc_colocation_new(set_id, NULL, local_score, resource, with, role, role,</a>
+<a name="ln2192">                                       data_set);</a>
+<a name="ln2193">                }</a>
+<a name="ln2194"> </a>
+<a name="ln2195">                with = resource;</a>
+<a name="ln2196">            }</a>
+<a name="ln2197">        }</a>
+<a name="ln2198">    } else if (local_score &gt;= 0) {</a>
+<a name="ln2199">        resource_t *last = NULL;</a>
+<a name="ln2200">        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2201">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2202">                EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));</a>
+<a name="ln2203">                if (last != NULL) {</a>
+<a name="ln2204">                    pe_rsc_trace(resource, &quot;Colocating %s with %s&quot;, last-&gt;id, resource-&gt;id);</a>
+<a name="ln2205">                    rsc_colocation_new(set_id, NULL, local_score, last, resource, role, role,</a>
+<a name="ln2206">                                       data_set);</a>
+<a name="ln2207">                }</a>
+<a name="ln2208"> </a>
+<a name="ln2209">                last = resource;</a>
+<a name="ln2210">            }</a>
+<a name="ln2211">        }</a>
+<a name="ln2212"> </a>
+<a name="ln2213">    } else {</a>
+<a name="ln2214">        /* Anti-colocating with every prior resource is</a>
+<a name="ln2215">         * the only way to ensure the intuitive result</a>
+<a name="ln2216">         * (ie. that no-one in the set can run with anyone</a>
+<a name="ln2217">         * else in the set)</a>
+<a name="ln2218">         */</a>
+<a name="ln2219"> </a>
+<a name="ln2220">        for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2221">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2222">                xmlNode *xml_rsc_with = NULL;</a>
+<a name="ln2223"> </a>
+<a name="ln2224">                EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));</a>
+<a name="ln2225"> </a>
+<a name="ln2226">                for (xml_rsc_with = __xml_first_child(set); xml_rsc_with != NULL;</a>
+<a name="ln2227">                     xml_rsc_with = __xml_next_element(xml_rsc_with)) {</a>
+<a name="ln2228">                    if (crm_str_eq((const char *)xml_rsc_with-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2229">                        if (safe_str_eq(resource-&gt;id, ID(xml_rsc_with))) {</a>
+<a name="ln2230">                            break;</a>
+<a name="ln2231">                        } else if (resource == NULL) {</a>
+<a name="ln2232">                            crm_config_err(&quot;%s: No resource found for %s&quot;, set_id,</a>
+<a name="ln2233">                                           ID(xml_rsc_with));</a>
+<a name="ln2234">                            return FALSE;</a>
+<a name="ln2235">                        }</a>
+<a name="ln2236">                        EXPAND_CONSTRAINT_IDREF(set_id, with, ID(xml_rsc_with));</a>
+<a name="ln2237">                        pe_rsc_trace(resource, &quot;Anti-Colocating %s with %s&quot;, resource-&gt;id,</a>
+<a name="ln2238">                                     with-&gt;id);</a>
+<a name="ln2239">                        rsc_colocation_new(set_id, NULL, local_score, resource, with, role, role,</a>
+<a name="ln2240">                                           data_set);</a>
+<a name="ln2241">                    }</a>
+<a name="ln2242">                }</a>
+<a name="ln2243">            }</a>
+<a name="ln2244">        }</a>
+<a name="ln2245">    }</a>
+<a name="ln2246"> </a>
+<a name="ln2247">    return TRUE;</a>
+<a name="ln2248">}</a>
+<a name="ln2249"> </a>
+<a name="ln2250">static gboolean</a>
+<a name="ln2251">colocate_rsc_sets(const char *id, xmlNode * set1, xmlNode * set2, int score,</a>
+<a name="ln2252">                  pe_working_set_t * data_set)</a>
+<a name="ln2253">{</a>
+<a name="ln2254">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln2255">    resource_t *rsc_1 = NULL;</a>
+<a name="ln2256">    resource_t *rsc_2 = NULL;</a>
+<a name="ln2257"> </a>
+<a name="ln2258">    const char *role_1 = crm_element_value(set1, &quot;role&quot;);</a>
+<a name="ln2259">    const char *role_2 = crm_element_value(set2, &quot;role&quot;);</a>
+<a name="ln2260"> </a>
+<a name="ln2261">    const char *sequential_1 = crm_element_value(set1, &quot;sequential&quot;);</a>
+<a name="ln2262">    const char *sequential_2 = crm_element_value(set2, &quot;sequential&quot;);</a>
+<a name="ln2263"> </a>
+<a name="ln2264">    if (sequential_1 == NULL || crm_is_true(sequential_1)) {</a>
+<a name="ln2265">        /* get the first one */</a>
+<a name="ln2266">        for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2267">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2268">                EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln2269">                break;</a>
+<a name="ln2270">            }</a>
+<a name="ln2271">        }</a>
+<a name="ln2272">    }</a>
+<a name="ln2273"> </a>
+<a name="ln2274">    if (sequential_2 == NULL || crm_is_true(sequential_2)) {</a>
+<a name="ln2275">        /* get the last one */</a>
+<a name="ln2276">        const char *rid = NULL;</a>
+<a name="ln2277"> </a>
+<a name="ln2278">        for (xml_rsc = __xml_first_child(set2); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2279">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2280">                rid = ID(xml_rsc);</a>
+<a name="ln2281">            }</a>
+<a name="ln2282">        }</a>
+<a name="ln2283">        EXPAND_CONSTRAINT_IDREF(id, rsc_2, rid);</a>
+<a name="ln2284">    }</a>
+<a name="ln2285"> </a>
+<a name="ln2286">    if (rsc_1 != NULL &amp;&amp; rsc_2 != NULL) {</a>
+<a name="ln2287">        rsc_colocation_new(id, NULL, score, rsc_1, rsc_2, role_1, role_2, data_set);</a>
+<a name="ln2288"> </a>
+<a name="ln2289">    } else if (rsc_1 != NULL) {</a>
+<a name="ln2290">        for (xml_rsc = __xml_first_child(set2); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2291">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2292">                EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc));</a>
+<a name="ln2293">                rsc_colocation_new(id, NULL, score, rsc_1, rsc_2, role_1, role_2, data_set);</a>
+<a name="ln2294">            }</a>
+<a name="ln2295">        }</a>
+<a name="ln2296"> </a>
+<a name="ln2297">    } else if (rsc_2 != NULL) {</a>
+<a name="ln2298">        for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2299">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2300">                EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln2301">                rsc_colocation_new(id, NULL, score, rsc_1, rsc_2, role_1, role_2, data_set);</a>
+<a name="ln2302">            }</a>
+<a name="ln2303">        }</a>
+<a name="ln2304"> </a>
+<a name="ln2305">    } else {</a>
+<a name="ln2306">        for (xml_rsc = __xml_first_child(set1); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2307">            if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2308">                xmlNode *xml_rsc_2 = NULL;</a>
+<a name="ln2309"> </a>
+<a name="ln2310">                EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));</a>
+<a name="ln2311"> </a>
+<a name="ln2312">                for (xml_rsc_2 = __xml_first_child(set2); xml_rsc_2 != NULL;</a>
+<a name="ln2313">                     xml_rsc_2 = __xml_next_element(xml_rsc_2)) {</a>
+<a name="ln2314">                    if (crm_str_eq((const char *)xml_rsc_2-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2315">                        EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc_2));</a>
+<a name="ln2316">                        rsc_colocation_new(id, NULL, score, rsc_1, rsc_2, role_1, role_2, data_set);</a>
+<a name="ln2317">                    }</a>
+<a name="ln2318">                }</a>
+<a name="ln2319">            }</a>
+<a name="ln2320">        }</a>
+<a name="ln2321">    }</a>
+<a name="ln2322"> </a>
+<a name="ln2323">    return TRUE;</a>
+<a name="ln2324">}</a>
+<a name="ln2325"> </a>
+<a name="ln2326">static gboolean</a>
+<a name="ln2327">unpack_simple_colocation(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln2328">{</a>
+<a name="ln2329">    int score_i = 0;</a>
+<a name="ln2330"> </a>
+<a name="ln2331">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2332">    const char *score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);</a>
+<a name="ln2333"> </a>
+<a name="ln2334">    const char *id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);</a>
+<a name="ln2335">    const char *id_rh = crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET);</a>
+<a name="ln2336">    const char *state_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE);</a>
+<a name="ln2337">    const char *state_rh = crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET_ROLE);</a>
+<a name="ln2338">    const char *instance_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_INSTANCE);</a>
+<a name="ln2339">    const char *instance_rh = crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET_INSTANCE);</a>
+<a name="ln2340">    const char *attr = crm_element_value(xml_obj, XML_COLOC_ATTR_NODE_ATTR);</a>
+<a name="ln2341"> </a>
+<a name="ln2342">    const char *symmetrical = crm_element_value(xml_obj, XML_CONS_ATTR_SYMMETRICAL);</a>
+<a name="ln2343"> </a>
+<a name="ln2344">    resource_t *rsc_lh = pe_find_constraint_resource(data_set-&gt;resources, id_lh);</a>
+<a name="ln2345">    resource_t *rsc_rh = pe_find_constraint_resource(data_set-&gt;resources, id_rh);</a>
+<a name="ln2346"> </a>
+<a name="ln2347">    if (rsc_lh == NULL) {</a>
+<a name="ln2348">        crm_config_err(&quot;Invalid constraint '%s': No resource named '%s'&quot;, id, id_lh);</a>
+<a name="ln2349">        return FALSE;</a>
+<a name="ln2350"> </a>
+<a name="ln2351">    } else if (rsc_rh == NULL) {</a>
+<a name="ln2352">        crm_config_err(&quot;Invalid constraint '%s': No resource named '%s'&quot;, id, id_rh);</a>
+<a name="ln2353">        return FALSE;</a>
+<a name="ln2354"> </a>
+<a name="ln2355">    } else if (instance_lh &amp;&amp; pe_rsc_is_clone(rsc_lh) == FALSE) {</a>
+<a name="ln2356">        crm_config_err</a>
+<a name="ln2357">            (&quot;Invalid constraint '%s': Resource '%s' is not a clone but instance %s was requested&quot;,</a>
+<a name="ln2358">             id, id_lh, instance_lh);</a>
+<a name="ln2359">        return FALSE;</a>
+<a name="ln2360"> </a>
+<a name="ln2361">    } else if (instance_rh &amp;&amp; pe_rsc_is_clone(rsc_rh) == FALSE) {</a>
+<a name="ln2362">        crm_config_err</a>
+<a name="ln2363">            (&quot;Invalid constraint '%s': Resource '%s' is not a clone but instance %s was requested&quot;,</a>
+<a name="ln2364">             id, id_rh, instance_rh);</a>
+<a name="ln2365">        return FALSE;</a>
+<a name="ln2366">    }</a>
+<a name="ln2367"> </a>
+<a name="ln2368">    if (instance_lh) {</a>
+<a name="ln2369">        rsc_lh = find_clone_instance(rsc_lh, instance_lh, data_set);</a>
+<a name="ln2370">        if (rsc_lh == NULL) {</a>
+<a name="ln2371">            crm_config_warn(&quot;Invalid constraint '%s': No instance '%s' of '%s'&quot;, id, instance_lh,</a>
+<a name="ln2372">                            id_lh);</a>
+<a name="ln2373">            return FALSE;</a>
+<a name="ln2374">        }</a>
+<a name="ln2375">    }</a>
+<a name="ln2376"> </a>
+<a name="ln2377">    if (instance_rh) {</a>
+<a name="ln2378">        rsc_rh = find_clone_instance(rsc_rh, instance_rh, data_set);</a>
+<a name="ln2379">        if (rsc_rh == NULL) {</a>
+<a name="ln2380">            crm_config_warn(&quot;Invalid constraint '%s': No instance '%s' of '%s'&quot;, id, instance_rh,</a>
+<a name="ln2381">                            id_rh);</a>
+<a name="ln2382">            return FALSE;</a>
+<a name="ln2383">        }</a>
+<a name="ln2384">    }</a>
+<a name="ln2385"> </a>
+<a name="ln2386">    if (crm_is_true(symmetrical)) {</a>
+<a name="ln2387">        crm_config_warn(&quot;The %s colocation constraint attribute has been removed.&quot;</a>
+<a name="ln2388">                        &quot;  It didn't do what you think it did anyway.&quot;, XML_CONS_ATTR_SYMMETRICAL);</a>
+<a name="ln2389">    }</a>
+<a name="ln2390"> </a>
+<a name="ln2391">    if (score) {</a>
+<a name="ln2392">        score_i = char2score(score);</a>
+<a name="ln2393">    }</a>
+<a name="ln2394"> </a>
+<a name="ln2395">    rsc_colocation_new(id, attr, score_i, rsc_lh, rsc_rh, state_lh, state_rh, data_set);</a>
+<a name="ln2396">    return TRUE;</a>
+<a name="ln2397">}</a>
+<a name="ln2398"> </a>
+<a name="ln2399">static gboolean</a>
+<a name="ln2400">unpack_colocation_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)</a>
+<a name="ln2401">{</a>
+<a name="ln2402">    const char *id = NULL;</a>
+<a name="ln2403">    const char *id_lh = NULL;</a>
+<a name="ln2404">    const char *id_rh = NULL;</a>
+<a name="ln2405">    const char *state_lh = NULL;</a>
+<a name="ln2406">    const char *state_rh = NULL;</a>
+<a name="ln2407"> </a>
+<a name="ln2408">    resource_t *rsc_lh = NULL;</a>
+<a name="ln2409">    resource_t *rsc_rh = NULL;</a>
+<a name="ln2410"> </a>
+<a name="ln2411">    tag_t *tag_lh = NULL;</a>
+<a name="ln2412">    tag_t *tag_rh = NULL;</a>
+<a name="ln2413"> </a>
+<a name="ln2414">    xmlNode *new_xml = NULL;</a>
+<a name="ln2415">    xmlNode *rsc_set_lh = NULL;</a>
+<a name="ln2416">    xmlNode *rsc_set_rh = NULL;</a>
+<a name="ln2417">    gboolean any_sets = FALSE;</a>
+<a name="ln2418"> </a>
+<a name="ln2419">    *expanded_xml = NULL;</a>
+<a name="ln2420"> </a>
+<a name="ln2421">    if (xml_obj == NULL) {</a>
+<a name="ln2422">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln2423">        return FALSE;</a>
+<a name="ln2424">    }</a>
+<a name="ln2425"> </a>
+<a name="ln2426">    id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2427">    if (id == NULL) {</a>
+<a name="ln2428">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln2429">        return FALSE;</a>
+<a name="ln2430">    }</a>
+<a name="ln2431"> </a>
+<a name="ln2432">    /* Attempt to expand any template/tag references in possible resource sets. */</a>
+<a name="ln2433">    expand_tags_in_sets(xml_obj, &amp;new_xml, data_set);</a>
+<a name="ln2434">    if (new_xml) {</a>
+<a name="ln2435">        /* There are resource sets referencing templates/tags. Return with the expanded XML. */</a>
+<a name="ln2436">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_colocation...&quot;);</a>
+<a name="ln2437">        *expanded_xml = new_xml;</a>
+<a name="ln2438">        return TRUE;</a>
+<a name="ln2439">    }</a>
+<a name="ln2440"> </a>
+<a name="ln2441">    id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);</a>
+<a name="ln2442">    id_rh = crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET);</a>
+<a name="ln2443">    if (id_lh == NULL || id_rh == NULL) {</a>
+<a name="ln2444">        return TRUE;</a>
+<a name="ln2445">    }</a>
+<a name="ln2446"> </a>
+<a name="ln2447">    if (valid_resource_or_tag(data_set, id_lh, &amp;rsc_lh, &amp;tag_lh) == FALSE) {</a>
+<a name="ln2448">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, id, id_lh);</a>
+<a name="ln2449">        return FALSE;</a>
+<a name="ln2450">    }</a>
+<a name="ln2451"> </a>
+<a name="ln2452">    if (valid_resource_or_tag(data_set, id_rh, &amp;rsc_rh, &amp;tag_rh) == FALSE) {</a>
+<a name="ln2453">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, id, id_rh);</a>
+<a name="ln2454">        return FALSE;</a>
+<a name="ln2455">    }</a>
+<a name="ln2456"> </a>
+<a name="ln2457">    if (rsc_lh &amp;&amp; rsc_rh) {</a>
+<a name="ln2458">        /* Neither side references any template/tag. */</a>
+<a name="ln2459">        return TRUE;</a>
+<a name="ln2460">    }</a>
+<a name="ln2461"> </a>
+<a name="ln2462">    if (tag_lh &amp;&amp; tag_rh) {</a>
+<a name="ln2463">        /* A colocation constraint between two templates/tags makes no sense. */</a>
+<a name="ln2464">        crm_config_err(&quot;Either LHS or RHS of %s should be a normal resource instead of a template/tag&quot;,</a>
+<a name="ln2465">                       id);</a>
+<a name="ln2466">        return FALSE;</a>
+<a name="ln2467">    }</a>
+<a name="ln2468"> </a>
+<a name="ln2469">    state_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE);</a>
+<a name="ln2470">    state_rh = crm_element_value(xml_obj, XML_COLOC_ATTR_TARGET_ROLE);</a>
+<a name="ln2471"> </a>
+<a name="ln2472">    new_xml = copy_xml(xml_obj);</a>
+<a name="ln2473"> </a>
+<a name="ln2474">    /* Convert the template/tag reference in &quot;rsc&quot; into a resource_set under the colocation constraint. */</a>
+<a name="ln2475">    if (tag_to_set(new_xml, &amp;rsc_set_lh, XML_COLOC_ATTR_SOURCE, TRUE, data_set) == FALSE) {</a>
+<a name="ln2476">        free_xml(new_xml);</a>
+<a name="ln2477">        return FALSE;</a>
+<a name="ln2478">    }</a>
+<a name="ln2479"> </a>
+<a name="ln2480">    if (rsc_set_lh) {</a>
+<a name="ln2481">        if (state_lh) {</a>
+<a name="ln2482">            /* A &quot;rsc-role&quot; is specified.</a>
+<a name="ln2483">               Move it into the converted resource_set as a &quot;role&quot;&quot; attribute. */</a>
+<a name="ln2484">            crm_xml_add(rsc_set_lh, &quot;role&quot;, state_lh);</a>
+<a name="ln2485">            xml_remove_prop(new_xml, XML_COLOC_ATTR_SOURCE_ROLE);</a>
+<a name="ln2486">        }</a>
+<a name="ln2487">        any_sets = TRUE;</a>
+<a name="ln2488">    }</a>
+<a name="ln2489"> </a>
+<a name="ln2490">    /* Convert the template/tag reference in &quot;with-rsc&quot; into a resource_set under the colocation constraint. */</a>
+<a name="ln2491">    if (tag_to_set(new_xml, &amp;rsc_set_rh, XML_COLOC_ATTR_TARGET, TRUE, data_set) == FALSE) {</a>
+<a name="ln2492">        free_xml(new_xml);</a>
+<a name="ln2493">        return FALSE;</a>
+<a name="ln2494">    }</a>
+<a name="ln2495"> </a>
+<a name="ln2496">    if (rsc_set_rh) {</a>
+<a name="ln2497">        if (state_rh) {</a>
+<a name="ln2498">            /* A &quot;with-rsc-role&quot; is specified.</a>
+<a name="ln2499">               Move it into the converted resource_set as a &quot;role&quot;&quot; attribute. */</a>
+<a name="ln2500">            crm_xml_add(rsc_set_rh, &quot;role&quot;, state_rh);</a>
+<a name="ln2501">            xml_remove_prop(new_xml, XML_COLOC_ATTR_TARGET_ROLE);</a>
+<a name="ln2502">        }</a>
+<a name="ln2503">        any_sets = TRUE;</a>
+<a name="ln2504">    }</a>
+<a name="ln2505"> </a>
+<a name="ln2506">    if (any_sets) {</a>
+<a name="ln2507">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_colocation...&quot;);</a>
+<a name="ln2508">        *expanded_xml = new_xml;</a>
+<a name="ln2509">    } else {</a>
+<a name="ln2510">        free_xml(new_xml);</a>
+<a name="ln2511">    }</a>
+<a name="ln2512"> </a>
+<a name="ln2513">    return TRUE;</a>
+<a name="ln2514">}</a>
+<a name="ln2515"> </a>
+<a name="ln2516">gboolean</a>
+<a name="ln2517">unpack_rsc_colocation(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln2518">{</a>
+<a name="ln2519">    int score_i = 0;</a>
+<a name="ln2520">    xmlNode *set = NULL;</a>
+<a name="ln2521">    xmlNode *last = NULL;</a>
+<a name="ln2522">    gboolean any_sets = FALSE;</a>
+<a name="ln2523"> </a>
+<a name="ln2524">    xmlNode *orig_xml = NULL;</a>
+<a name="ln2525">    xmlNode *expanded_xml = NULL;</a>
+<a name="ln2526"> </a>
+<a name="ln2527">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2528">    const char *score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);</a>
+<a name="ln2529"> </a>
+<a name="ln2530">    gboolean rc = TRUE;</a>
+<a name="ln2531"> </a>
+<a name="ln2532">    if (score) {</a>
+<a name="ln2533">        score_i = char2score(score);</a>
+<a name="ln2534">    }</a>
+<a name="ln2535"> </a>
+<a name="ln2536">    rc = unpack_colocation_tags(xml_obj, &amp;expanded_xml, data_set);</a>
+<a name="ln2537">    if (expanded_xml) {</a>
+<a name="ln2538">        orig_xml = xml_obj;</a>
+<a name="ln2539">        xml_obj = expanded_xml;</a>
+<a name="ln2540"> </a>
+<a name="ln2541">    } else if (rc == FALSE) {</a>
+<a name="ln2542">        return FALSE;</a>
+<a name="ln2543">    }</a>
+<a name="ln2544"> </a>
+<a name="ln2545">    for (set = __xml_first_child(xml_obj); set != NULL; set = __xml_next_element(set)) {</a>
+<a name="ln2546">        if (crm_str_eq((const char *)set-&gt;name, XML_CONS_TAG_RSC_SET, TRUE)) {</a>
+<a name="ln2547">            any_sets = TRUE;</a>
+<a name="ln2548">            set = expand_idref(set, data_set-&gt;input);</a>
+<a name="ln2549">            if (unpack_colocation_set(set, score_i, data_set) == FALSE) {</a>
+<a name="ln2550">                return FALSE;</a>
+<a name="ln2551"> </a>
+<a name="ln2552">            } else if (last &amp;&amp; colocate_rsc_sets(id, last, set, score_i, data_set) == FALSE) {</a>
+<a name="ln2553">                return FALSE;</a>
+<a name="ln2554">            }</a>
+<a name="ln2555">            last = set;</a>
+<a name="ln2556">        }</a>
+<a name="ln2557">    }</a>
+<a name="ln2558"> </a>
+<a name="ln2559">    if (expanded_xml) {</a>
+<a name="ln2560">        free_xml(expanded_xml);</a>
+<a name="ln2561">        xml_obj = orig_xml;</a>
+<a name="ln2562">    }</a>
+<a name="ln2563"> </a>
+<a name="ln2564">    if (any_sets == FALSE) {</a>
+<a name="ln2565">        return unpack_simple_colocation(xml_obj, data_set);</a>
+<a name="ln2566">    }</a>
+<a name="ln2567"> </a>
+<a name="ln2568">    return TRUE;</a>
+<a name="ln2569">}</a>
+<a name="ln2570"> </a>
+<a name="ln2571">gboolean</a>
+<a name="ln2572">rsc_ticket_new(const char *id, resource_t * rsc_lh, ticket_t * ticket,</a>
+<a name="ln2573">               const char *state_lh, const char *loss_policy, pe_working_set_t * data_set)</a>
+<a name="ln2574">{</a>
+<a name="ln2575">    rsc_ticket_t *new_rsc_ticket = NULL;</a>
+<a name="ln2576"> </a>
+<a name="ln2577">    if (rsc_lh == NULL) {</a>
+<a name="ln2578">        crm_config_err(&quot;No resource found for LHS %s&quot;, id);</a>
+<a name="ln2579">        return FALSE;</a>
+<a name="ln2580">    }</a>
+<a name="ln2581"> </a>
+<a name="ln2582">    new_rsc_ticket = calloc(1, sizeof(rsc_ticket_t));</a>
+<a name="ln2583">    if (new_rsc_ticket == NULL) {</a>
+<a name="ln2584">        return FALSE;</a>
+<a name="ln2585">    }</a>
+<a name="ln2586"> </a>
+<a name="ln2587">    if (state_lh == NULL || safe_str_eq(state_lh, RSC_ROLE_STARTED_S)) {</a>
+<a name="ln2588">        state_lh = RSC_ROLE_UNKNOWN_S;</a>
+<a name="ln2589">    }</a>
+<a name="ln2590"> </a>
+<a name="ln2591">    new_rsc_ticket-&gt;id = id;</a>
+<a name="ln2592">    new_rsc_ticket-&gt;ticket = ticket;</a>
+<a name="ln2593">    new_rsc_ticket-&gt;rsc_lh = rsc_lh;</a>
+<a name="ln2594">    new_rsc_ticket-&gt;role_lh = text2role(state_lh);</a>
+<a name="ln2595"> </a>
+<a name="ln2596">    if (safe_str_eq(loss_policy, &quot;fence&quot;)) {</a>
+<a name="ln2597">        crm_debug(&quot;On loss of ticket '%s': Fence the nodes running %s (%s)&quot;,</a>
+<a name="ln2598">                  new_rsc_ticket-&gt;ticket-&gt;id, new_rsc_ticket-&gt;rsc_lh-&gt;id,</a>
+<a name="ln2599">                  role2text(new_rsc_ticket-&gt;role_lh));</a>
+<a name="ln2600">        new_rsc_ticket-&gt;loss_policy = loss_ticket_fence;</a>
+<a name="ln2601"> </a>
+<a name="ln2602">    } else if (safe_str_eq(loss_policy, &quot;freeze&quot;)) {</a>
+<a name="ln2603">        crm_debug(&quot;On loss of ticket '%s': Freeze %s (%s)&quot;,</a>
+<a name="ln2604">                  new_rsc_ticket-&gt;ticket-&gt;id, new_rsc_ticket-&gt;rsc_lh-&gt;id,</a>
+<a name="ln2605">                  role2text(new_rsc_ticket-&gt;role_lh));</a>
+<a name="ln2606">        new_rsc_ticket-&gt;loss_policy = loss_ticket_freeze;</a>
+<a name="ln2607"> </a>
+<a name="ln2608">    } else if (safe_str_eq(loss_policy, &quot;demote&quot;)) {</a>
+<a name="ln2609">        crm_debug(&quot;On loss of ticket '%s': Demote %s (%s)&quot;,</a>
+<a name="ln2610">                  new_rsc_ticket-&gt;ticket-&gt;id, new_rsc_ticket-&gt;rsc_lh-&gt;id,</a>
+<a name="ln2611">                  role2text(new_rsc_ticket-&gt;role_lh));</a>
+<a name="ln2612">        new_rsc_ticket-&gt;loss_policy = loss_ticket_demote;</a>
+<a name="ln2613"> </a>
+<a name="ln2614">    } else if (safe_str_eq(loss_policy, &quot;stop&quot;)) {</a>
+<a name="ln2615">        crm_debug(&quot;On loss of ticket '%s': Stop %s (%s)&quot;,</a>
+<a name="ln2616">                  new_rsc_ticket-&gt;ticket-&gt;id, new_rsc_ticket-&gt;rsc_lh-&gt;id,</a>
+<a name="ln2617">                  role2text(new_rsc_ticket-&gt;role_lh));</a>
+<a name="ln2618">        new_rsc_ticket-&gt;loss_policy = loss_ticket_stop;</a>
+<a name="ln2619"> </a>
+<a name="ln2620">    } else {</a>
+<a name="ln2621">        if (new_rsc_ticket-&gt;role_lh == RSC_ROLE_MASTER) {</a>
+<a name="ln2622">            crm_debug(&quot;On loss of ticket '%s': Default to demote %s (%s)&quot;,</a>
+<a name="ln2623">                      new_rsc_ticket-&gt;ticket-&gt;id, new_rsc_ticket-&gt;rsc_lh-&gt;id,</a>
+<a name="ln2624">                      role2text(new_rsc_ticket-&gt;role_lh));</a>
+<a name="ln2625">            new_rsc_ticket-&gt;loss_policy = loss_ticket_demote;</a>
+<a name="ln2626"> </a>
+<a name="ln2627">        } else {</a>
+<a name="ln2628">            crm_debug(&quot;On loss of ticket '%s': Default to stop %s (%s)&quot;,</a>
+<a name="ln2629">                      new_rsc_ticket-&gt;ticket-&gt;id, new_rsc_ticket-&gt;rsc_lh-&gt;id,</a>
+<a name="ln2630">                      role2text(new_rsc_ticket-&gt;role_lh));</a>
+<a name="ln2631">            new_rsc_ticket-&gt;loss_policy = loss_ticket_stop;</a>
+<a name="ln2632">        }</a>
+<a name="ln2633">    }</a>
+<a name="ln2634"> </a>
+<a name="ln2635">    pe_rsc_trace(rsc_lh, &quot;%s (%s) ==&gt; %s&quot;, rsc_lh-&gt;id, role2text(new_rsc_ticket-&gt;role_lh),</a>
+<a name="ln2636">                 ticket-&gt;id);</a>
+<a name="ln2637"> </a>
+<a name="ln2638">    rsc_lh-&gt;rsc_tickets = g_list_append(rsc_lh-&gt;rsc_tickets, new_rsc_ticket);</a>
+<a name="ln2639"> </a>
+<a name="ln2640">    data_set-&gt;ticket_constraints = g_list_append(data_set-&gt;ticket_constraints, new_rsc_ticket);</a>
+<a name="ln2641"> </a>
+<a name="ln2642">    if (new_rsc_ticket-&gt;ticket-&gt;granted == FALSE || new_rsc_ticket-&gt;ticket-&gt;standby) {</a>
+<a name="ln2643">        rsc_ticket_constraint(rsc_lh, new_rsc_ticket, data_set);</a>
+<a name="ln2644">    }</a>
+<a name="ln2645"> </a>
+<a name="ln2646">    return TRUE;</a>
+<a name="ln2647">}</a>
+<a name="ln2648"> </a>
+<a name="ln2649">static gboolean</a>
+<a name="ln2650">unpack_rsc_ticket_set(xmlNode * set, ticket_t * ticket, const char *loss_policy,</a>
+<a name="ln2651">                      pe_working_set_t * data_set)</a>
+<a name="ln2652">{</a>
+<a name="ln2653">    xmlNode *xml_rsc = NULL;</a>
+<a name="ln2654">    resource_t *resource = NULL;</a>
+<a name="ln2655">    const char *set_id = ID(set);</a>
+<a name="ln2656">    const char *role = crm_element_value(set, &quot;role&quot;);</a>
+<a name="ln2657"> </a>
+<a name="ln2658">    if (set == NULL) {</a>
+<a name="ln2659">        crm_config_err(&quot;No resource_set object to process.&quot;);</a>
+<a name="ln2660">        return FALSE;</a>
+<a name="ln2661">    }</a>
+<a name="ln2662"> </a>
+<a name="ln2663">    if (set_id == NULL) {</a>
+<a name="ln2664">        crm_config_err(&quot;resource_set must have an id&quot;);</a>
+<a name="ln2665">        return FALSE;</a>
+<a name="ln2666">    }</a>
+<a name="ln2667"> </a>
+<a name="ln2668">    if (ticket == NULL) {</a>
+<a name="ln2669">        crm_config_err(&quot;No dependented ticket specified for '%s'&quot;, set_id);</a>
+<a name="ln2670">        return FALSE;</a>
+<a name="ln2671">    }</a>
+<a name="ln2672"> </a>
+<a name="ln2673">    for (xml_rsc = __xml_first_child(set); xml_rsc != NULL; xml_rsc = __xml_next_element(xml_rsc)) {</a>
+<a name="ln2674">        if (crm_str_eq((const char *)xml_rsc-&gt;name, XML_TAG_RESOURCE_REF, TRUE)) {</a>
+<a name="ln2675">            EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));</a>
+<a name="ln2676">            pe_rsc_trace(resource, &quot;Resource '%s' depends on ticket '%s'&quot;, resource-&gt;id,</a>
+<a name="ln2677">                         ticket-&gt;id);</a>
+<a name="ln2678">            rsc_ticket_new(set_id, resource, ticket, role, loss_policy, data_set);</a>
+<a name="ln2679">        }</a>
+<a name="ln2680">    }</a>
+<a name="ln2681"> </a>
+<a name="ln2682">    return TRUE;</a>
+<a name="ln2683">}</a>
+<a name="ln2684"> </a>
+<a name="ln2685">static gboolean</a>
+<a name="ln2686">unpack_simple_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln2687">{</a>
+<a name="ln2688">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2689">    const char *ticket_str = crm_element_value(xml_obj, XML_TICKET_ATTR_TICKET);</a>
+<a name="ln2690">    const char *loss_policy = crm_element_value(xml_obj, XML_TICKET_ATTR_LOSS_POLICY);</a>
+<a name="ln2691"> </a>
+<a name="ln2692">    ticket_t *ticket = NULL;</a>
+<a name="ln2693"> </a>
+<a name="ln2694">    const char *id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);</a>
+<a name="ln2695">    const char *state_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE);</a>
+<a name="ln2696">    const char *instance_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_INSTANCE);</a>
+<a name="ln2697"> </a>
+<a name="ln2698">    resource_t *rsc_lh = NULL;</a>
+<a name="ln2699"> </a>
+<a name="ln2700">    if (xml_obj == NULL) {</a>
+<a name="ln2701">        crm_config_err(&quot;No rsc_ticket constraint object to process.&quot;);</a>
+<a name="ln2702">        return FALSE;</a>
+<a name="ln2703">    }</a>
+<a name="ln2704"> </a>
+<a name="ln2705">    if (id == NULL) {</a>
+<a name="ln2706">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln2707">        return FALSE;</a>
+<a name="ln2708">    }</a>
+<a name="ln2709"> </a>
+<a name="ln2710">    if (ticket_str == NULL) {</a>
+<a name="ln2711">        crm_config_err(&quot;Invalid constraint '%s': No ticket specified&quot;, id);</a>
+<a name="ln2712">        return FALSE;</a>
+<a name="ln2713">    } else {</a>
+<a name="ln2714">        ticket = g_hash_table_lookup(data_set-&gt;tickets, ticket_str);</a>
+<a name="ln2715">    }</a>
+<a name="ln2716"> </a>
+<a name="ln2717">    if (ticket == NULL) {</a>
+<a name="ln2718">        crm_config_err(&quot;Invalid constraint '%s': No ticket named '%s'&quot;, id, ticket_str);</a>
+<a name="ln2719">        return FALSE;</a>
+<a name="ln2720">    }</a>
+<a name="ln2721"> </a>
+<a name="ln2722">    if (id_lh == NULL) {</a>
+<a name="ln2723">        crm_config_err(&quot;Invalid constraint '%s': No resource specified&quot;, id);</a>
+<a name="ln2724">        return FALSE;</a>
+<a name="ln2725">    } else {</a>
+<a name="ln2726">        rsc_lh = pe_find_constraint_resource(data_set-&gt;resources, id_lh);</a>
+<a name="ln2727">    }</a>
+<a name="ln2728"> </a>
+<a name="ln2729">    if (rsc_lh == NULL) {</a>
+<a name="ln2730">        crm_config_err(&quot;Invalid constraint '%s': No resource named '%s'&quot;, id, id_lh);</a>
+<a name="ln2731">        return FALSE;</a>
+<a name="ln2732"> </a>
+<a name="ln2733">    } else if (instance_lh &amp;&amp; pe_rsc_is_clone(rsc_lh) == FALSE) {</a>
+<a name="ln2734">        crm_config_err</a>
+<a name="ln2735">            (&quot;Invalid constraint '%s': Resource '%s' is not a clone but instance %s was requested&quot;,</a>
+<a name="ln2736">             id, id_lh, instance_lh);</a>
+<a name="ln2737">        return FALSE;</a>
+<a name="ln2738">    }</a>
+<a name="ln2739"> </a>
+<a name="ln2740">    if (instance_lh) {</a>
+<a name="ln2741">        rsc_lh = find_clone_instance(rsc_lh, instance_lh, data_set);</a>
+<a name="ln2742">        if (rsc_lh == NULL) {</a>
+<a name="ln2743">            crm_config_warn(&quot;Invalid constraint '%s': No instance '%s' of '%s'&quot;, id, instance_lh,</a>
+<a name="ln2744">                            id_lh);</a>
+<a name="ln2745">            return FALSE;</a>
+<a name="ln2746">        }</a>
+<a name="ln2747">    }</a>
+<a name="ln2748"> </a>
+<a name="ln2749">    rsc_ticket_new(id, rsc_lh, ticket, state_lh, loss_policy, data_set);</a>
+<a name="ln2750">    return TRUE;</a>
+<a name="ln2751">}</a>
+<a name="ln2752"> </a>
+<a name="ln2753">static gboolean</a>
+<a name="ln2754">unpack_rsc_ticket_tags(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)</a>
+<a name="ln2755">{</a>
+<a name="ln2756">    const char *id = NULL;</a>
+<a name="ln2757">    const char *id_lh = NULL;</a>
+<a name="ln2758">    const char *state_lh = NULL;</a>
+<a name="ln2759"> </a>
+<a name="ln2760">    resource_t *rsc_lh = NULL;</a>
+<a name="ln2761">    tag_t *tag_lh = NULL;</a>
+<a name="ln2762"> </a>
+<a name="ln2763">    xmlNode *new_xml = NULL;</a>
+<a name="ln2764">    xmlNode *rsc_set_lh = NULL;</a>
+<a name="ln2765">    gboolean any_sets = FALSE;</a>
+<a name="ln2766"> </a>
+<a name="ln2767">    *expanded_xml = NULL;</a>
+<a name="ln2768"> </a>
+<a name="ln2769">    if (xml_obj == NULL) {</a>
+<a name="ln2770">        crm_config_err(&quot;No constraint object to process.&quot;);</a>
+<a name="ln2771">        return FALSE;</a>
+<a name="ln2772">    }</a>
+<a name="ln2773"> </a>
+<a name="ln2774">    id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2775">    if (id == NULL) {</a>
+<a name="ln2776">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln2777">        return FALSE;</a>
+<a name="ln2778">    }</a>
+<a name="ln2779"> </a>
+<a name="ln2780">    /* Attempt to expand any template/tag references in possible resource sets. */</a>
+<a name="ln2781">    expand_tags_in_sets(xml_obj, &amp;new_xml, data_set);</a>
+<a name="ln2782">    if (new_xml) {</a>
+<a name="ln2783">        /* There are resource sets referencing templates/tags. Return with the expanded XML. */</a>
+<a name="ln2784">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_ticket...&quot;);</a>
+<a name="ln2785">        *expanded_xml = new_xml;</a>
+<a name="ln2786">        return TRUE;</a>
+<a name="ln2787">    }</a>
+<a name="ln2788"> </a>
+<a name="ln2789">    id_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE);</a>
+<a name="ln2790">    if (id_lh == NULL) {</a>
+<a name="ln2791">        return TRUE;</a>
+<a name="ln2792">    }</a>
+<a name="ln2793"> </a>
+<a name="ln2794">    if (valid_resource_or_tag(data_set, id_lh, &amp;rsc_lh, &amp;tag_lh) == FALSE) {</a>
+<a name="ln2795">        crm_config_err(&quot;Constraint '%s': Invalid reference to '%s'&quot;, id, id_lh);</a>
+<a name="ln2796">        return FALSE;</a>
+<a name="ln2797"> </a>
+<a name="ln2798">    } else if (rsc_lh) {</a>
+<a name="ln2799">        /* No template/tag is referenced. */</a>
+<a name="ln2800">        return TRUE;</a>
+<a name="ln2801">    }</a>
+<a name="ln2802"> </a>
+<a name="ln2803">    state_lh = crm_element_value(xml_obj, XML_COLOC_ATTR_SOURCE_ROLE);</a>
+<a name="ln2804"> </a>
+<a name="ln2805">    new_xml = copy_xml(xml_obj);</a>
+<a name="ln2806"> </a>
+<a name="ln2807">    /* Convert the template/tag reference in &quot;rsc&quot; into a resource_set under the rsc_ticket constraint. */</a>
+<a name="ln2808">    if (tag_to_set(new_xml, &amp;rsc_set_lh, XML_COLOC_ATTR_SOURCE, FALSE, data_set) == FALSE) {</a>
+<a name="ln2809">        free_xml(new_xml);</a>
+<a name="ln2810">        return FALSE;</a>
+<a name="ln2811">    }</a>
+<a name="ln2812"> </a>
+<a name="ln2813">    if (rsc_set_lh) {</a>
+<a name="ln2814">        if (state_lh) {</a>
+<a name="ln2815">            /* A &quot;rsc-role&quot; is specified.</a>
+<a name="ln2816">               Move it into the converted resource_set as a &quot;role&quot;&quot; attribute. */</a>
+<a name="ln2817">            crm_xml_add(rsc_set_lh, &quot;role&quot;, state_lh);</a>
+<a name="ln2818">            xml_remove_prop(new_xml, XML_COLOC_ATTR_SOURCE_ROLE);</a>
+<a name="ln2819">        }</a>
+<a name="ln2820">        any_sets = TRUE;</a>
+<a name="ln2821">    }</a>
+<a name="ln2822"> </a>
+<a name="ln2823">    if (any_sets) {</a>
+<a name="ln2824">        crm_log_xml_trace(new_xml, &quot;Expanded rsc_ticket...&quot;);</a>
+<a name="ln2825">        *expanded_xml = new_xml;</a>
+<a name="ln2826">    } else {</a>
+<a name="ln2827">        free_xml(new_xml);</a>
+<a name="ln2828">    }</a>
+<a name="ln2829"> </a>
+<a name="ln2830">    return TRUE;</a>
+<a name="ln2831">}</a>
+<a name="ln2832"> </a>
+<a name="ln2833">gboolean</a>
+<a name="ln2834">unpack_rsc_ticket(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln2835">{</a>
+<a name="ln2836">    xmlNode *set = NULL;</a>
+<a name="ln2837">    gboolean any_sets = FALSE;</a>
+<a name="ln2838"> </a>
+<a name="ln2839">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln2840">    const char *ticket_str = crm_element_value(xml_obj, XML_TICKET_ATTR_TICKET);</a>
+<a name="ln2841">    const char *loss_policy = crm_element_value(xml_obj, XML_TICKET_ATTR_LOSS_POLICY);</a>
+<a name="ln2842"> </a>
+<a name="ln2843">    ticket_t *ticket = NULL;</a>
+<a name="ln2844"> </a>
+<a name="ln2845">    xmlNode *orig_xml = NULL;</a>
+<a name="ln2846">    xmlNode *expanded_xml = NULL;</a>
+<a name="ln2847"> </a>
+<a name="ln2848">    gboolean rc = TRUE;</a>
+<a name="ln2849"> </a>
+<a name="ln2850">    if (xml_obj == NULL) {</a>
+<a name="ln2851">        crm_config_err(&quot;No rsc_ticket constraint object to process.&quot;);</a>
+<a name="ln2852">        return FALSE;</a>
+<a name="ln2853">    }</a>
+<a name="ln2854"> </a>
+<a name="ln2855">    if (id == NULL) {</a>
+<a name="ln2856">        crm_config_err(&quot;%s constraint must have an id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln2857">        return FALSE;</a>
+<a name="ln2858">    }</a>
+<a name="ln2859"> </a>
+<a name="ln2860">    if (data_set-&gt;tickets == NULL) {</a>
+<a name="ln2861">        data_set-&gt;tickets =</a>
+<a name="ln2862">            g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, destroy_ticket);</a>
+<a name="ln2863">    }</a>
+<a name="ln2864"> </a>
+<a name="ln2865">    if (ticket_str == NULL) {</a>
+<a name="ln2866">        crm_config_err(&quot;Invalid constraint '%s': No ticket specified&quot;, id);</a>
+<a name="ln2867">        return FALSE;</a>
+<a name="ln2868">    } else {</a>
+<a name="ln2869">        ticket = g_hash_table_lookup(data_set-&gt;tickets, ticket_str);</a>
+<a name="ln2870">    }</a>
+<a name="ln2871"> </a>
+<a name="ln2872">    if (ticket == NULL) {</a>
+<a name="ln2873">        ticket = ticket_new(ticket_str, data_set);</a>
+<a name="ln2874">        if (ticket == NULL) {</a>
+<a name="ln2875">            return FALSE;</a>
+<a name="ln2876">        }</a>
+<a name="ln2877">    }</a>
+<a name="ln2878"> </a>
+<a name="ln2879">    rc = unpack_rsc_ticket_tags(xml_obj, &amp;expanded_xml, data_set);</a>
+<a name="ln2880">    if (expanded_xml) {</a>
+<a name="ln2881">        orig_xml = xml_obj;</a>
+<a name="ln2882">        xml_obj = expanded_xml;</a>
+<a name="ln2883"> </a>
+<a name="ln2884">    } else if (rc == FALSE) {</a>
+<a name="ln2885">        return FALSE;</a>
+<a name="ln2886">    }</a>
+<a name="ln2887"> </a>
+<a name="ln2888">    for (set = __xml_first_child(xml_obj); set != NULL; set = __xml_next_element(set)) {</a>
+<a name="ln2889">        if (crm_str_eq((const char *)set-&gt;name, XML_CONS_TAG_RSC_SET, TRUE)) {</a>
+<a name="ln2890">            any_sets = TRUE;</a>
+<a name="ln2891">            set = expand_idref(set, data_set-&gt;input);</a>
+<a name="ln2892">            if (unpack_rsc_ticket_set(set, ticket, loss_policy, data_set) == FALSE) {</a>
+<a name="ln2893">                return FALSE;</a>
+<a name="ln2894">            }</a>
+<a name="ln2895">        }</a>
+<a name="ln2896">    }</a>
+<a name="ln2897"> </a>
+<a name="ln2898">    if (expanded_xml) {</a>
+<a name="ln2899">        free_xml(expanded_xml);</a>
+<a name="ln2900">        xml_obj = orig_xml;</a>
+<a name="ln2901">    }</a>
+<a name="ln2902"> </a>
+<a name="ln2903">    if (any_sets == FALSE) {</a>
+<a name="ln2904">        return unpack_simple_rsc_ticket(xml_obj, data_set);</a>
+<a name="ln2905">    }</a>
+<a name="ln2906"> </a>
+<a name="ln2907">    return TRUE;</a>
+<a name="ln2908">}</a>
+<a name="ln2909"> </a>
+<a name="ln2910">gboolean</a>
+<a name="ln2911">is_active(rsc_to_node_t * cons)</a>
+<a name="ln2912">{</a>
+<a name="ln2913">    return TRUE;</a>
+<a name="ln2914">}</a>
+
+</code></pre>
+<div class="balloon" rel="399"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: id.</p></div>
+<div class="balloon" rel="679"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'regcomp' function. Inspect the first argument. Check lines: 679, 670.</p></div>
+<div class="balloon" rel="715"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V646/" target="_blank">V646</a> Consider inspecting the application's logic. It's possible that 'else' keyword is missing.</p></div>
+<div class="balloon" rel="1101"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: !accept.</p></div>
+<div class="balloon" rel="1502"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'order'. Check lines: 1502, 1494.</p></div>
+<div class="balloon" rel="2231"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'resource == NULL' is always false.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

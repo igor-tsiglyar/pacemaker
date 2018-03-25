@@ -1,0 +1,633 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5"> </a>
+<a name="ln6">/*</a>
+<a name="ln7"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln8"> *</a>
+<a name="ln9"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln10"> * modify it under the terms of the GNU General Public</a>
+<a name="ln11"> * License as published by the Free Software Foundation; either</a>
+<a name="ln12"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln13"> *</a>
+<a name="ln14"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln15"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln16"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln17"> * General Public License for more details.</a>
+<a name="ln18"> *</a>
+<a name="ln19"> * You should have received a copy of the GNU General Public</a>
+<a name="ln20"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln21"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;sys/param.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;crm/crm.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;stdio.h&gt;</a>
+<a name="ln31">#include &lt;sys/types.h&gt;</a>
+<a name="ln32">#include &lt;unistd.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;stdlib.h&gt;</a>
+<a name="ln35">#include &lt;errno.h&gt;</a>
+<a name="ln36">#include &lt;fcntl.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/ipc.h&gt;</a>
+<a name="ln41">#include &lt;crm/cib/internal.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">int exit_code = pcmk_ok;</a>
+<a name="ln44">int message_timer_id = -1;</a>
+<a name="ln45">int message_timeout_ms = 30;</a>
+<a name="ln46"> </a>
+<a name="ln47">GMainLoop *mainloop = NULL;</a>
+<a name="ln48"> </a>
+<a name="ln49">const char *host = NULL;</a>
+<a name="ln50">void usage(const char *cmd, int exit_status);</a>
+<a name="ln51">int do_init(void);</a>
+<a name="ln52">int do_work(xmlNode * input, int command_options, xmlNode ** output);</a>
+<a name="ln53"> </a>
+<a name="ln54">gboolean admin_message_timeout(gpointer data);</a>
+<a name="ln55">void cib_connection_destroy(gpointer user_data);</a>
+<a name="ln56">void cibadmin_op_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data);</a>
+<a name="ln57"> </a>
+<a name="ln58">int command_options = 0;</a>
+<a name="ln59">const char *cib_user = NULL;</a>
+<a name="ln60">const char *cib_action = NULL;</a>
+<a name="ln61"> </a>
+<a name="ln62">typedef struct str_list_s {</a>
+<a name="ln63">    int num_items;</a>
+<a name="ln64">    char *value;</a>
+<a name="ln65">    struct str_list_s *next;</a>
+<a name="ln66">} str_list_t;</a>
+<a name="ln67"> </a>
+<a name="ln68">const char *obj_type = NULL;</a>
+<a name="ln69">char *status = NULL;</a>
+<a name="ln70">char *migrate_from = NULL;</a>
+<a name="ln71">char *migrate_res = NULL;</a>
+<a name="ln72">char *subtype = NULL;</a>
+<a name="ln73">char *reset = NULL;</a>
+<a name="ln74"> </a>
+<a name="ln75">int request_id = 0;</a>
+<a name="ln76">int operation_status = 0;</a>
+<a name="ln77">cib_t *the_cib = NULL;</a>
+<a name="ln78">gboolean force_flag = FALSE;</a>
+<a name="ln79">gboolean quiet = FALSE;</a>
+<a name="ln80">int bump_log_num = 0;</a>
+<a name="ln81"> </a>
+<a name="ln82">/* *INDENT-OFF* */</a>
+<a name="ln83">static struct crm_option long_options[] = {</a>
+<a name="ln84">    {&quot;help&quot;,    0, 0, '?', &quot;\tThis text&quot;},</a>
+<a name="ln85">    {&quot;version&quot;, 0, 0, '$', &quot;\tVersion information&quot;  },</a>
+<a name="ln86">    {&quot;verbose&quot;, 0, 0, 'V', &quot;\tIncrease debug output\n&quot;},</a>
+<a name="ln87"> </a>
+<a name="ln88">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Commands:&quot;},</a>
+<a name="ln89">    {&quot;upgrade&quot;,     0, 0, 'u', &quot;\tUpgrade the configuration to the latest syntax&quot;},</a>
+<a name="ln90">    {&quot;query&quot;,       0, 0, 'Q', &quot;\tQuery the contents of the CIB&quot;},</a>
+<a name="ln91">    {&quot;erase&quot;,       0, 0, 'E', &quot;\tErase the contents of the whole CIB&quot;},</a>
+<a name="ln92">    {&quot;bump&quot;,        0, 0, 'B', &quot;\tIncrease the CIB's epoch value by 1&quot;},</a>
+<a name="ln93">    {&quot;create&quot;,      0, 0, 'C', &quot;\tCreate an object in the CIB.  Will fail if the object already exists.&quot;},</a>
+<a name="ln94">    {&quot;modify&quot;,      0, 0, 'M', &quot;\tFind the object somewhere in the CIB's XML tree and update it.  Fails if the object does not exist unless -c is specified&quot;},</a>
+<a name="ln95">    {&quot;patch&quot;,	    0, 0, 'P', &quot;\tSupply an update in the form of an xml diff (See also: crm_diff)&quot;},</a>
+<a name="ln96">    {&quot;replace&quot;,     0, 0, 'R', &quot;\tRecursively replace an object in the CIB&quot;},</a>
+<a name="ln97">    {&quot;delete&quot;,      0, 0, 'D', &quot;\tDelete the first object matching the supplied criteria, Eg. &lt;op id=\&quot;rsc1_op1\&quot; name=\&quot;monitor\&quot;/&gt;&quot;},</a>
+<a name="ln98">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;\n\tThe tagname and all attributes must match in order for the element to be deleted\n&quot;},</a>
+<a name="ln99">    {&quot;delete-all&quot;,  0, 0, 'd', &quot;When used with --xpath, remove all matching objects in the configuration instead of just the first one&quot;},</a>
+<a name="ln100">    {&quot;empty&quot;,       0, 0, 'a', &quot;\tOutput an empty CIB&quot;},</a>
+<a name="ln101">    {&quot;md5-sum&quot;,	    0, 0, '5', &quot;\tCalculate the on-disk CIB digest&quot;},</a>
+<a name="ln102">    {&quot;md5-sum-versioned&quot;,  0, 0, '6', &quot;Calculate an on-the-wire versioned CIB digest&quot;},</a>
+<a name="ln103">    {&quot;blank&quot;,       0, 0, '-', NULL, 1},</a>
+<a name="ln104"> </a>
+<a name="ln105">    {&quot;-spacer-&quot;,1, 0, '-', &quot;\nAdditional options:&quot;},</a>
+<a name="ln106">    {&quot;force&quot;,	    0, 0, 'f'},</a>
+<a name="ln107">    {&quot;timeout&quot;,	    1, 0, 't', &quot;Time (in seconds) to wait before declaring the operation failed&quot;},</a>
+<a name="ln108">    {&quot;user&quot;,	    1, 0, 'U', &quot;Run the command with permissions of the named user (valid only for the root and &quot;CRM_DAEMON_USER&quot; accounts)&quot;},</a>
+<a name="ln109">    {&quot;sync-call&quot;,   0, 0, 's', &quot;Wait for call to complete before returning&quot;},</a>
+<a name="ln110">    {&quot;local&quot;,	    0, 0, 'l', &quot;\tCommand takes effect locally.  Should only be used for queries&quot;},</a>
+<a name="ln111">    {&quot;allow-create&quot;,0, 0, 'c', &quot;(Advanced) Allow the target of a --modify,-M operation to be created if they do not exist&quot;},</a>
+<a name="ln112">    {&quot;no-children&quot;, 0, 0, 'n', &quot;(Advanced) When querying an object, do not return include its children in the result\n&quot;},</a>
+<a name="ln113">    {&quot;no-bcast&quot;,    0, 0, 'b', NULL, 1},</a>
+<a name="ln114"> </a>
+<a name="ln115">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Data:&quot;},</a>
+<a name="ln116">    {&quot;xml-text&quot;,    1, 0, 'X', &quot;Retrieve XML from the supplied string&quot;},</a>
+<a name="ln117">    {&quot;xml-file&quot;,    1, 0, 'x', &quot;Retrieve XML from the named file&quot;},</a>
+<a name="ln118">    {&quot;xml-pipe&quot;,    0, 0, 'p', &quot;Retrieve XML from stdin\n&quot;},</a>
+<a name="ln119"> </a>
+<a name="ln120">    {&quot;scope&quot;,       1, 0, 'o', &quot;Limit the scope of the operation to a specific section of the CIB.&quot;},</a>
+<a name="ln121">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;\tValid values are: nodes, resources, constraints, crm_config, rsc_defaults, op_defaults, status&quot;},</a>
+<a name="ln122"> </a>
+<a name="ln123">    {&quot;xpath&quot;,       1, 0, 'A', &quot;A valid XPath to use instead of --scope,-o&quot;},</a>
+<a name="ln124">    {&quot;node-path&quot;,   0, 0, 'e',  &quot;When performing XPath queries, return the address of any matches found.&quot;},</a>
+<a name="ln125">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; Eg: /cib/configuration/resources/master[@id='ms_RH1_SCS']/primitive[@id='prm_RH1_SCS']&quot;, pcmk_option_paragraph},</a>
+<a name="ln126">    {&quot;node&quot;,	    1, 0, 'N', &quot;(Advanced) Send command to the specified host\n&quot;},</a>
+<a name="ln127">    {&quot;-space-&quot;,	    0, 0, '!', NULL, 1},</a>
+<a name="ln128"> </a>
+<a name="ln129">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;\nExamples:\n&quot;},</a>
+<a name="ln130">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Query the configuration from the local node:&quot;, pcmk_option_paragraph},</a>
+<a name="ln131">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --query --local&quot;, pcmk_option_example},</a>
+<a name="ln132"> </a>
+<a name="ln133">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Query just the cluster options configuration:&quot;, pcmk_option_paragraph},</a>
+<a name="ln134">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --query --scope crm_config&quot;, pcmk_option_example},</a>
+<a name="ln135"> </a>
+<a name="ln136">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Query all 'target-role' settings:&quot;, pcmk_option_paragraph},</a>
+<a name="ln137">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --query --xpath \&quot;//nvpair[@name='target-role']\&quot;&quot;, pcmk_option_example},</a>
+<a name="ln138"> </a>
+<a name="ln139">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Remove all 'is-managed' settings:&quot;, pcmk_option_paragraph},</a>
+<a name="ln140">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --delete-all --xpath \&quot;//nvpair[@name='is-managed']\&quot;&quot;, pcmk_option_example},</a>
+<a name="ln141"> </a>
+<a name="ln142">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Remove the resource named 'old':&quot;, pcmk_option_paragraph},</a>
+<a name="ln143">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --delete --xml-text '&lt;primitive id=\&quot;old\&quot;/&gt;'&quot;, pcmk_option_example},</a>
+<a name="ln144"> </a>
+<a name="ln145">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Remove all resources from the configuration:&quot;, pcmk_option_paragraph},</a>
+<a name="ln146">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --replace --scope resources --xml-text '&lt;resources/&gt;'&quot;, pcmk_option_example},</a>
+<a name="ln147"> </a>
+<a name="ln148">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Replace the complete configuration with the contents of $HOME/pacemaker.xml:&quot;, pcmk_option_paragraph},</a>
+<a name="ln149">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --replace --xml-file $HOME/pacemaker.xml&quot;, pcmk_option_example},</a>
+<a name="ln150"> </a>
+<a name="ln151">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Replace the constraints section of the configuration with the contents of $HOME/constraints.xml:&quot;, pcmk_option_paragraph},</a>
+<a name="ln152">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --replace --scope constraints --xml-file $HOME/constraints.xml&quot;, pcmk_option_example},</a>
+<a name="ln153"> </a>
+<a name="ln154">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Increase the configuration version to prevent old configurations from being loaded accidentally:&quot;, pcmk_option_paragraph},</a>
+<a name="ln155">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --modify --xml-text '&lt;cib admin_epoch=\&quot;admin_epoch++\&quot;/&gt;'&quot;, pcmk_option_example},</a>
+<a name="ln156"> </a>
+<a name="ln157">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;Edit the configuration with your favorite $EDITOR:&quot;, pcmk_option_paragraph},</a>
+<a name="ln158">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --query &gt; $HOME/local.xml&quot;, pcmk_option_example},</a>
+<a name="ln159">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; $EDITOR $HOME/local.xml&quot;, pcmk_option_example},</a>
+<a name="ln160">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; cibadmin --replace --xml-file $HOME/local.xml&quot;, pcmk_option_example},</a>
+<a name="ln161"> </a>
+<a name="ln162">    {&quot;-spacer-&quot;,    0, 0, '-', &quot;SEE ALSO:&quot;},</a>
+<a name="ln163">    {&quot;-spacer-&quot;,    0, 0, '-', &quot; crm(8), pcs(8), crm_shadow(8), crm_diff(8)&quot;},</a>
+<a name="ln164"> </a>
+<a name="ln165">    /* Legacy options */</a>
+<a name="ln166">    {&quot;host&quot;,	     1, 0, 'h', NULL, 1},</a>
+<a name="ln167"> </a>
+<a name="ln168">    {0, 0, 0, 0}</a>
+<a name="ln169">};</a>
+<a name="ln170">/* *INDENT-ON* */</a>
+<a name="ln171"> </a>
+<a name="ln172">static void</a>
+<a name="ln173">print_xml_output(xmlNode * xml)</a>
+<a name="ln174">{</a>
+<a name="ln175">    char *buffer;</a>
+<a name="ln176"> </a>
+<a name="ln177">    if (!xml) {</a>
+<a name="ln178">        return;</a>
+<a name="ln179">    } else if (xml-&gt;type != XML_ELEMENT_NODE) {</a>
+<a name="ln180">        return;</a>
+<a name="ln181">    }</a>
+<a name="ln182"> </a>
+<a name="ln183">    if (command_options &amp; cib_xpath_address) {</a>
+<a name="ln184">        const char *id = crm_element_value(xml, XML_ATTR_ID);</a>
+<a name="ln185"> </a>
+<a name="ln186">        if (safe_str_eq((const char *)xml-&gt;name, &quot;xpath-query&quot;)) {</a>
+<a name="ln187">            xmlNode *child = NULL;</a>
+<a name="ln188"> </a>
+<a name="ln189">            for (child = xml-&gt;children; child; child = child-&gt;next) {</a>
+<a name="ln190">                print_xml_output(child);</a>
+<a name="ln191">            }</a>
+<a name="ln192"> </a>
+<a name="ln193">        } else if (id) {</a>
+<a name="ln194">            printf(&quot;%s\n&quot;, id);</a>
+<a name="ln195">        }</a>
+<a name="ln196"> </a>
+<a name="ln197">    } else {</a>
+<a name="ln198">        buffer = dump_xml_formatted(xml);</a>
+<a name="ln199">        fprintf(stdout, &quot;%s&quot;, crm_str(buffer));</a>
+<a name="ln200">        free(buffer);</a>
+<a name="ln201">    }</a>
+<a name="ln202">}</a>
+<a name="ln203"> </a>
+<a name="ln204">int</a>
+<a name="ln205">main(int argc, char **argv)</a>
+<a name="ln206">{</a>
+<a name="ln207">    int argerr = 0;</a>
+<a name="ln208">    int flag;</a>
+<a name="ln209">    const char *source = NULL;</a>
+<a name="ln210">    const char *admin_input_xml = NULL;</a>
+<a name="ln211">    const char *admin_input_file = NULL;</a>
+<a name="ln212">    gboolean dangerous_cmd = FALSE;</a>
+<a name="ln213">    gboolean admin_input_stdin = FALSE;</a>
+<a name="ln214">    xmlNode *output = NULL;</a>
+<a name="ln215">    xmlNode *input = NULL;</a>
+<a name="ln216"> </a>
+<a name="ln217">    int option_index = 0;</a>
+<a name="ln218"> </a>
+<a name="ln219">    crm_xml_init(); /* Sets buffer allocation strategy */</a>
+<a name="ln220">    crm_log_cli_init(&quot;cibadmin&quot;);</a>
+<a name="ln221">    set_crm_log_level(LOG_CRIT);</a>
+<a name="ln222">    crm_set_options(NULL, &quot;command [options] [data]&quot;, long_options,</a>
+<a name="ln223">                    &quot;Provides direct access to the cluster configuration.&quot;</a>
+<a name="ln224">                    &quot;\n\nAllows the configuration, or sections of it, to be queried, modified, replaced and deleted.&quot;</a>
+<a name="ln225">                    &quot;\n\nWhere necessary, XML data will be obtained using the -X, -x, or -p options.\n&quot;);</a>
+<a name="ln226"> </a>
+<a name="ln227">    if (argc &lt; 2) {</a>
+<a name="ln228">        crm_help('?', EX_USAGE);</a>
+<a name="ln229">    }</a>
+<a name="ln230"> </a>
+<a name="ln231">    while (1) {</a>
+<a name="ln232">        flag = crm_get_option(argc, argv, &amp;option_index);</a>
+<a name="ln233">        if (flag == -1)</a>
+<a name="ln234">            break;</a>
+<a name="ln235"> </a>
+<a name="ln236">        switch (flag) {</a>
+<a name="ln237">            case 't':</a>
+<a name="ln238">                message_timeout_ms = atoi(optarg);</a>
+<a name="ln239">                if (message_timeout_ms &lt; 1) {</a>
+<a name="ln240">                    message_timeout_ms = 30;</a>
+<a name="ln241">                }</a>
+<a name="ln242">                break;</a>
+<a name="ln243">            case 'A':</a>
+<a name="ln244">                obj_type = optarg;</a>
+<a name="ln245">                command_options |= cib_xpath;</a>
+<a name="ln246">                break;</a>
+<a name="ln247">            case 'e':</a>
+<a name="ln248">                command_options |= cib_xpath_address;</a>
+<a name="ln249">                break;</a>
+<a name="ln250">            case 'u':</a>
+<a name="ln251">                cib_action = CIB_OP_UPGRADE;</a>
+<a name="ln252">                dangerous_cmd = TRUE;</a>
+<a name="ln253">                break;</a>
+<a name="ln254">            case 'E':</a>
+<a name="ln255">                cib_action = CIB_OP_ERASE;</a>
+<a name="ln256">                dangerous_cmd = TRUE;</a>
+<a name="ln257">                break;</a>
+<a name="ln258">            case 'Q':</a>
+<a name="ln259">                cib_action = CIB_OP_QUERY;</a>
+<a name="ln260">                quiet = TRUE;</a>
+<a name="ln261">                break;</a>
+<a name="ln262">            case 'P':</a>
+<a name="ln263">                cib_action = CIB_OP_APPLY_DIFF;</a>
+<a name="ln264">                break;</a>
+<a name="ln265">            case 'U':</a>
+<a name="ln266">                cib_user = optarg;</a>
+<a name="ln267">                break;</a>
+<a name="ln268">            case 'M':</a>
+<a name="ln269">                cib_action = CIB_OP_MODIFY;</a>
+<a name="ln270">                break;</a>
+<a name="ln271">            case 'R':</a>
+<a name="ln272">                cib_action = CIB_OP_REPLACE;</a>
+<a name="ln273">                break;</a>
+<a name="ln274">            case 'C':</a>
+<a name="ln275">                cib_action = CIB_OP_CREATE;</a>
+<a name="ln276">                break;</a>
+<a name="ln277">            case 'D':</a>
+<a name="ln278">                cib_action = CIB_OP_DELETE;</a>
+<a name="ln279">                break;</a>
+<a name="ln280">            case '5':</a>
+<a name="ln281">                cib_action = &quot;md5-sum&quot;;</a>
+<a name="ln282">                break;</a>
+<a name="ln283">            case '6':</a>
+<a name="ln284">                cib_action = &quot;md5-sum-versioned&quot;;</a>
+<a name="ln285">                break;</a>
+<a name="ln286">            case 'c':</a>
+<a name="ln287">                command_options |= cib_can_create;</a>
+<a name="ln288">                break;</a>
+<a name="ln289">            case 'n':</a>
+<a name="ln290">                command_options |= cib_no_children;</a>
+<a name="ln291">                break;</a>
+<a name="ln292">            case 'B':</a>
+<a name="ln293">                cib_action = CIB_OP_BUMP;</a>
+<a name="ln294">                crm_log_args(argc, argv);</a>
+<a name="ln295">                break;</a>
+<a name="ln296">            case 'V':</a>
+<a name="ln297">                command_options = command_options | cib_verbose;</a>
+<a name="ln298">                bump_log_num++;</a>
+<a name="ln299">                break;</a>
+<a name="ln300">            case '?':</a>
+<a name="ln301">            case '$':</a>
+<a name="ln302">            case '!':</a>
+<a name="ln303">                crm_help(flag, EX_OK);</a>
+<a name="ln304">                break;</a>
+<a name="ln305">            case 'o':</a>
+<a name="ln306">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln307">                obj_type = optarg;</a>
+<a name="ln308">                break;</a>
+<a name="ln309">            case 'X':</a>
+<a name="ln310">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln311">                admin_input_xml = optarg;</a>
+<a name="ln312">                crm_log_args(argc, argv);</a>
+<a name="ln313">                break;</a>
+<a name="ln314">            case 'x':</a>
+<a name="ln315">                crm_trace(&quot;Option %c =&gt; %s&quot;, flag, optarg);</a>
+<a name="ln316">                admin_input_file = optarg;</a>
+<a name="ln317">                crm_log_args(argc, argv);</a>
+<a name="ln318">                break;</a>
+<a name="ln319">            case 'p':</a>
+<a name="ln320">                admin_input_stdin = TRUE;</a>
+<a name="ln321">                crm_log_args(argc, argv);</a>
+<a name="ln322">                break;</a>
+<a name="ln323">            case 'N':</a>
+<a name="ln324">            case 'h':</a>
+<a name="ln325">                host = strdup(optarg);</a>
+<a name="ln326">                break;</a>
+<a name="ln327">            case 'l':</a>
+<a name="ln328">                command_options |= cib_scope_local;</a>
+<a name="ln329">                break;</a>
+<a name="ln330">            case 'd':</a>
+<a name="ln331">                cib_action = CIB_OP_DELETE;</a>
+<a name="ln332">                command_options |= cib_multiple;</a>
+<a name="ln333">                dangerous_cmd = TRUE;</a>
+<a name="ln334">                break;</a>
+<a name="ln335">            case 'b':</a>
+<a name="ln336">                dangerous_cmd = TRUE;</a>
+<a name="ln337">                command_options |= cib_inhibit_bcast;</a>
+<a name="ln338">                command_options |= cib_scope_local;</a>
+<a name="ln339">                break;</a>
+<a name="ln340">            case 's':</a>
+<a name="ln341">                command_options |= cib_sync_call;</a>
+<a name="ln342">                break;</a>
+<a name="ln343">            case 'f':</a>
+<a name="ln344">                force_flag = TRUE;</a>
+<a name="ln345">                command_options |= cib_quorum_override;</a>
+<a name="ln346">                crm_log_args(argc, argv);</a>
+<a name="ln347">                break;</a>
+<a name="ln348">            case 'a':</a>
+<a name="ln349">                output = createEmptyCib(1);</a>
+<a name="ln350">                if (optind &lt; argc) {</a>
+<a name="ln351">                    crm_xml_add(output, XML_ATTR_VALIDATION, argv[optind]);</a>
+<a name="ln352">                }</a>
+<a name="ln353">                admin_input_xml = dump_xml_formatted(output);</a>
+<a name="ln354">                fprintf(stdout, &quot;%s\n&quot;, crm_str(admin_input_xml));</a>
+<a name="ln355">                goto bail;</a>
+<a name="ln356">                break;</a>
+<a name="ln357">            default:</a>
+<a name="ln358">                printf(&quot;Argument code 0%o (%c)&quot; &quot; is not (?yet?) supported\n&quot;, flag, flag);</a>
+<a name="ln359">                ++argerr;</a>
+<a name="ln360">                break;</a>
+<a name="ln361">        }</a>
+<a name="ln362">    }</a>
+<a name="ln363"> </a>
+<a name="ln364">    if (bump_log_num &gt; 0) {</a>
+<a name="ln365">        quiet = FALSE;</a>
+<a name="ln366">    }</a>
+<a name="ln367"> </a>
+<a name="ln368">    while (bump_log_num &gt; 0) {</a>
+<a name="ln369">        crm_bump_log_level(argc, argv);</a>
+<a name="ln370">        bump_log_num--;</a>
+<a name="ln371">    }</a>
+<a name="ln372"> </a>
+<a name="ln373">    if (optind &lt; argc) {</a>
+<a name="ln374">        printf(&quot;non-option ARGV-elements: &quot;);</a>
+<a name="ln375">        while (optind &lt; argc)</a>
+<a name="ln376">            printf(&quot;%s &quot;, argv[optind++]);</a>
+<a name="ln377">        printf(&quot;\n&quot;);</a>
+<a name="ln378">        crm_help('?', EX_USAGE);</a>
+<a name="ln379">    }</a>
+<a name="ln380"> </a>
+<a name="ln381">    if (optind &gt; argc || cib_action == NULL) {</a>
+<a name="ln382">        ++argerr;</a>
+<a name="ln383">    }</a>
+<a name="ln384"> </a>
+<a name="ln385">    if (argerr) {</a>
+<a name="ln386">        crm_help('?', EX_USAGE);</a>
+<a name="ln387">    }</a>
+<a name="ln388"> </a>
+<a name="ln389">    if (dangerous_cmd &amp;&amp; force_flag == FALSE) {</a>
+<a name="ln390">        fprintf(stderr, &quot;The supplied command is considered dangerous.&quot;</a>
+<a name="ln391">                &quot;  To prevent accidental destruction of the cluster,&quot;</a>
+<a name="ln392">                &quot; the --force flag is required in order to proceed.\n&quot;);</a>
+<a name="ln393">        fflush(stderr);</a>
+<a name="ln394">        exit_code = -EINVAL;</a>
+<a name="ln395">        goto bail;</a>
+<a name="ln396">    }</a>
+<a name="ln397"> </a>
+<a name="ln398">    if (admin_input_file != NULL) {</a>
+<a name="ln399">        input = filename2xml(admin_input_file);</a>
+<a name="ln400">        source = admin_input_file;</a>
+<a name="ln401"> </a>
+<a name="ln402">    } else if (admin_input_xml != NULL) {</a>
+<a name="ln403">        source = &quot;input string&quot;;</a>
+<a name="ln404">        input = string2xml(admin_input_xml);</a>
+<a name="ln405"> </a>
+<a name="ln406">    } else if (admin_input_stdin) {</a>
+<a name="ln407">        source = &quot;STDIN&quot;;</a>
+<a name="ln408">        input = stdin2xml();</a>
+<a name="ln409">    }</a>
+<a name="ln410"> </a>
+<a name="ln411">    if (input != NULL) {</a>
+<a name="ln412">        crm_log_xml_debug(input, &quot;[admin input]&quot;);</a>
+<a name="ln413"> </a>
+<a name="ln414">    } else if (source) {</a>
+<a name="ln415">        fprintf(stderr, &quot;Couldn't parse input from %s.\n&quot;, source);</a>
+<a name="ln416">        exit_code = -EINVAL;</a>
+<a name="ln417">        goto bail;</a>
+<a name="ln418">    }</a>
+<a name="ln419"> </a>
+<a name="ln420">    if (safe_str_eq(cib_action, &quot;md5-sum&quot;)) {</a>
+<a name="ln421">        char *digest = NULL;</a>
+<a name="ln422"> </a>
+<a name="ln423">        if (input == NULL) {</a>
+<a name="ln424">            fprintf(stderr, &quot;Please supply XML to process with -X, -x or -p\n&quot;);</a>
+<a name="ln425">            exit_code = -EINVAL;</a>
+<a name="ln426">            goto bail;</a>
+<a name="ln427">        }</a>
+<a name="ln428"> </a>
+<a name="ln429">        digest = calculate_on_disk_digest(input);</a>
+<a name="ln430">        fprintf(stderr, &quot;Digest: &quot;);</a>
+<a name="ln431">        fprintf(stdout, &quot;%s\n&quot;, crm_str(digest));</a>
+<a name="ln432">        free(digest);</a>
+<a name="ln433">        goto bail;</a>
+<a name="ln434"> </a>
+<a name="ln435">    } else if (safe_str_eq(cib_action, &quot;md5-sum-versioned&quot;)) {</a>
+<a name="ln436">        char *digest = NULL;</a>
+<a name="ln437">        const char *version = NULL;</a>
+<a name="ln438"> </a>
+<a name="ln439">        if (input == NULL) {</a>
+<a name="ln440">            fprintf(stderr, &quot;Please supply XML to process with -X, -x or -p\n&quot;);</a>
+<a name="ln441">            exit_code = -EINVAL;</a>
+<a name="ln442">            goto bail;</a>
+<a name="ln443">        }</a>
+<a name="ln444"> </a>
+<a name="ln445">        version = crm_element_value(input, XML_ATTR_CRM_VERSION);</a>
+<a name="ln446">        digest = calculate_xml_versioned_digest(input, FALSE, TRUE, version);</a>
+<a name="ln447">        fprintf(stderr, &quot;Versioned (%s) digest: &quot;, version);</a>
+<a name="ln448">        fprintf(stdout, &quot;%s\n&quot;, crm_str(digest));</a>
+<a name="ln449">        free(digest);</a>
+<a name="ln450">        goto bail;</a>
+<a name="ln451">    }</a>
+<a name="ln452"> </a>
+<a name="ln453">    exit_code = do_init();</a>
+<a name="ln454">    if (exit_code != pcmk_ok) {</a>
+<a name="ln455">        crm_err(&quot;Init failed, could not perform requested operations&quot;);</a>
+<a name="ln456">        fprintf(stderr, &quot;Init failed, could not perform requested operations\n&quot;);</a>
+<a name="ln457">        return crm_exit(-exit_code);</a>
+<a name="ln458">    }</a>
+<a name="ln459"> </a>
+<a name="ln460">    exit_code = do_work(input, command_options, &amp;output);</a>
+<a name="ln461">    if (exit_code &gt; 0) {</a>
+<a name="ln462">        /* wait for the reply by creating a mainloop and running it until</a>
+<a name="ln463">         * the callbacks are invoked...</a>
+<a name="ln464">         */</a>
+<a name="ln465">        request_id = exit_code;</a>
+<a name="ln466"> </a>
+<a name="ln467">        the_cib-&gt;cmds-&gt;register_callback(the_cib, request_id, message_timeout_ms, FALSE, NULL,</a>
+<a name="ln468">                                         &quot;cibadmin_op_callback&quot;, cibadmin_op_callback);</a>
+<a name="ln469"> </a>
+<a name="ln470">        mainloop = g_main_new(FALSE);</a>
+<a name="ln471"> </a>
+<a name="ln472">        crm_trace(&quot;%s waiting for reply from the local CIB&quot;, crm_system_name);</a>
+<a name="ln473"> </a>
+<a name="ln474">        crm_info(&quot;Starting mainloop&quot;);</a>
+<a name="ln475">        g_main_run(mainloop);</a>
+<a name="ln476"> </a>
+<a name="ln477">    } else if (exit_code &lt; 0) {</a>
+<a name="ln478">        crm_err(&quot;Call failed: %s&quot;, pcmk_strerror(exit_code));</a>
+<a name="ln479">        fprintf(stderr, &quot;Call failed: %s\n&quot;, pcmk_strerror(exit_code));</a>
+<a name="ln480">        operation_status = exit_code;</a>
+<a name="ln481"> </a>
+<a name="ln482">        if (exit_code == -pcmk_err_schema_validation) {</a>
+<a name="ln483">            if (crm_str_eq(cib_action, CIB_OP_UPGRADE, TRUE)) {</a>
+<a name="ln484">                xmlNode *obj = NULL;</a>
+<a name="ln485">                int version = 0, rc = 0;</a>
+<a name="ln486"> </a>
+<a name="ln487">                rc = the_cib-&gt;cmds-&gt;query(the_cib, NULL, &amp;obj, command_options);</a>
+<a name="ln488">                if (rc == pcmk_ok) {</a>
+<a name="ln489">                    update_validation(&amp;obj, &amp;version, 0, TRUE, FALSE);</a>
+<a name="ln490">                }</a>
+<a name="ln491"> </a>
+<a name="ln492">            } else if (output) {</a>
+<a name="ln493">                validate_xml_verbose(output);</a>
+<a name="ln494">            }</a>
+<a name="ln495">        }</a>
+<a name="ln496">    }</a>
+<a name="ln497"> </a>
+<a name="ln498">    if (output != NULL) {</a>
+<a name="ln499">        print_xml_output(output);</a>
+<a name="ln500">        free_xml(output);</a>
+<a name="ln501">    }</a>
+<a name="ln502"> </a>
+<a name="ln503">    crm_trace(&quot;%s exiting normally&quot;, crm_system_name);</a>
+<a name="ln504"> </a>
+<a name="ln505">    free_xml(input);</a>
+<a name="ln506">    flag = the_cib-&gt;cmds-&gt;signoff(the_cib);</a>
+<a name="ln507">    cib_delete(the_cib);</a>
+<a name="ln508"> </a>
+<a name="ln509">    if(exit_code == pcmk_ok) {</a>
+<a name="ln510">        exit_code = flag;</a>
+<a name="ln511">    }</a>
+<a name="ln512">  bail:</a>
+<a name="ln513">    return crm_exit(exit_code);</a>
+<a name="ln514">}</a>
+<a name="ln515"> </a>
+<a name="ln516">int</a>
+<a name="ln517">do_work(xmlNode * input, int call_options, xmlNode ** output)</a>
+<a name="ln518">{</a>
+<a name="ln519">    /* construct the request */</a>
+<a name="ln520">    the_cib-&gt;call_timeout = message_timeout_ms;</a>
+<a name="ln521">    if (strcasecmp(CIB_OP_REPLACE, cib_action) == 0</a>
+<a name="ln522">        &amp;&amp; safe_str_eq(crm_element_name(input), XML_TAG_CIB)) {</a>
+<a name="ln523">        xmlNode *status = get_object_root(XML_CIB_TAG_STATUS, input);</a>
+<a name="ln524"> </a>
+<a name="ln525">        if (status == NULL) {</a>
+<a name="ln526">            create_xml_node(input, XML_CIB_TAG_STATUS);</a>
+<a name="ln527">        }</a>
+<a name="ln528">    }</a>
+<a name="ln529"> </a>
+<a name="ln530">    if (cib_action != NULL) {</a>
+<a name="ln531">        crm_trace(&quot;Passing \&quot;%s\&quot; to variant_op...&quot;, cib_action);</a>
+<a name="ln532">        return cib_internal_op(the_cib, cib_action, host, obj_type, input, output, call_options, cib_user);</a>
+<a name="ln533"> </a>
+<a name="ln534">    } else {</a>
+<a name="ln535">        crm_err(&quot;You must specify an operation&quot;);</a>
+<a name="ln536">    }</a>
+<a name="ln537">    return -EINVAL;</a>
+<a name="ln538">}</a>
+<a name="ln539"> </a>
+<a name="ln540">int</a>
+<a name="ln541">do_init(void)</a>
+<a name="ln542">{</a>
+<a name="ln543">    int rc = pcmk_ok;</a>
+<a name="ln544"> </a>
+<a name="ln545">    the_cib = cib_new();</a>
+<a name="ln546">    rc = the_cib-&gt;cmds-&gt;signon(the_cib, crm_system_name, cib_command);</a>
+<a name="ln547">    if (rc != pcmk_ok) {</a>
+<a name="ln548">        crm_err(&quot;Signon to CIB failed: %s&quot;, pcmk_strerror(rc));</a>
+<a name="ln549">        fprintf(stderr, &quot;Signon to CIB failed: %s\n&quot;, pcmk_strerror(rc));</a>
+<a name="ln550">    }</a>
+<a name="ln551"> </a>
+<a name="ln552">    return rc;</a>
+<a name="ln553">}</a>
+<a name="ln554"> </a>
+<a name="ln555">void</a>
+<a name="ln556">cib_connection_destroy(gpointer user_data)</a>
+<a name="ln557">{</a>
+<a name="ln558">    crm_err(&quot;Connection to the CIB terminated... exiting&quot;);</a>
+<a name="ln559">    g_main_quit(mainloop);</a>
+<a name="ln560">    return;</a>
+<a name="ln561">}</a>
+<a name="ln562"> </a>
+<a name="ln563">void</a>
+<a name="ln564">cibadmin_op_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln565">{</a>
+<a name="ln566">    exit_code = rc;</a>
+<a name="ln567"> </a>
+<a name="ln568">    if (rc != 0) {</a>
+<a name="ln569">        crm_warn(&quot;Call %s failed (%d): %s&quot;, cib_action, rc, pcmk_strerror(rc));</a>
+<a name="ln570">        fprintf(stderr, &quot;Call %s failed (%d): %s\n&quot;, cib_action, rc, pcmk_strerror(rc));</a>
+<a name="ln571">        print_xml_output(output);</a>
+<a name="ln572"> </a>
+<a name="ln573">    } else if (safe_str_eq(cib_action, CIB_OP_QUERY) &amp;&amp; output == NULL) {</a>
+<a name="ln574">        crm_err(&quot;Output expected in query response&quot;);</a>
+<a name="ln575">        crm_log_xml_err(msg, &quot;no output&quot;);</a>
+<a name="ln576"> </a>
+<a name="ln577">    } else if (output == NULL) {</a>
+<a name="ln578">        crm_info(&quot;Call passed&quot;);</a>
+<a name="ln579"> </a>
+<a name="ln580">    } else {</a>
+<a name="ln581">        crm_info(&quot;Call passed&quot;);</a>
+<a name="ln582">        print_xml_output(output);</a>
+<a name="ln583">    }</a>
+<a name="ln584"> </a>
+<a name="ln585">    if (call_id == request_id) {</a>
+<a name="ln586">        g_main_quit(mainloop);</a>
+<a name="ln587"> </a>
+<a name="ln588">    } else {</a>
+<a name="ln589">        crm_info(&quot;Message was not the response we were looking for (%d vs. %d&quot;, call_id,</a>
+<a name="ln590">                 request_id);</a>
+<a name="ln591">    }</a>
+<a name="ln592">}</a>
+
+</code></pre>
+<div class="balloon" rel="521"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V595/" target="_blank">V595</a> The 'cib_action' pointer was utilized before it was verified against nullptr. Check lines: 521, 530.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

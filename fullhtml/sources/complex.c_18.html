@@ -1,0 +1,953 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln26">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln27">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">void populate_hash(xmlNode * nvpair_list, GHashTable * hash, const char **attrs, int attrs_length);</a>
+<a name="ln30"> </a>
+<a name="ln31">resource_object_functions_t resource_class_functions[] = {</a>
+<a name="ln32">    {</a>
+<a name="ln33">     native_unpack,</a>
+<a name="ln34">     native_find_rsc,</a>
+<a name="ln35">     native_parameter,</a>
+<a name="ln36">     native_print,</a>
+<a name="ln37">     native_active,</a>
+<a name="ln38">     native_resource_state,</a>
+<a name="ln39">     native_location,</a>
+<a name="ln40">     native_free</a>
+<a name="ln41">    },</a>
+<a name="ln42">    {</a>
+<a name="ln43">     group_unpack,</a>
+<a name="ln44">     native_find_rsc,</a>
+<a name="ln45">     native_parameter,</a>
+<a name="ln46">     group_print,</a>
+<a name="ln47">     group_active,</a>
+<a name="ln48">     group_resource_state,</a>
+<a name="ln49">     native_location,</a>
+<a name="ln50">     group_free</a>
+<a name="ln51">    },</a>
+<a name="ln52">    {</a>
+<a name="ln53">     clone_unpack,</a>
+<a name="ln54">     native_find_rsc,</a>
+<a name="ln55">     native_parameter,</a>
+<a name="ln56">     clone_print,</a>
+<a name="ln57">     clone_active,</a>
+<a name="ln58">     clone_resource_state,</a>
+<a name="ln59">     native_location,</a>
+<a name="ln60">     clone_free</a>
+<a name="ln61">    },</a>
+<a name="ln62">    {</a>
+<a name="ln63">     master_unpack,</a>
+<a name="ln64">     native_find_rsc,</a>
+<a name="ln65">     native_parameter,</a>
+<a name="ln66">     clone_print,</a>
+<a name="ln67">     clone_active,</a>
+<a name="ln68">     clone_resource_state,</a>
+<a name="ln69">     native_location,</a>
+<a name="ln70">     clone_free</a>
+<a name="ln71">    },</a>
+<a name="ln72">    {</a>
+<a name="ln73">     container_unpack,</a>
+<a name="ln74">     native_find_rsc,</a>
+<a name="ln75">     native_parameter,</a>
+<a name="ln76">     container_print,</a>
+<a name="ln77">     container_active,</a>
+<a name="ln78">     container_resource_state,</a>
+<a name="ln79">     native_location,</a>
+<a name="ln80">     container_free</a>
+<a name="ln81">    }</a>
+<a name="ln82">};</a>
+<a name="ln83"> </a>
+<a name="ln84">enum pe_obj_types</a>
+<a name="ln85">get_resource_type(const char *name)</a>
+<a name="ln86">{</a>
+<a name="ln87">    if (safe_str_eq(name, XML_CIB_TAG_RESOURCE)) {</a>
+<a name="ln88">        return pe_native;</a>
+<a name="ln89"> </a>
+<a name="ln90">    } else if (safe_str_eq(name, XML_CIB_TAG_GROUP)) {</a>
+<a name="ln91">        return pe_group;</a>
+<a name="ln92"> </a>
+<a name="ln93">    } else if (safe_str_eq(name, XML_CIB_TAG_INCARNATION)) {</a>
+<a name="ln94">        return pe_clone;</a>
+<a name="ln95"> </a>
+<a name="ln96">    } else if (safe_str_eq(name, XML_CIB_TAG_MASTER)) {</a>
+<a name="ln97">        return pe_master;</a>
+<a name="ln98"> </a>
+<a name="ln99">    } else if (safe_str_eq(name, XML_CIB_TAG_CONTAINER)) {</a>
+<a name="ln100">        return pe_container;</a>
+<a name="ln101">    }</a>
+<a name="ln102"> </a>
+<a name="ln103">    return pe_unknown;</a>
+<a name="ln104">}</a>
+<a name="ln105"> </a>
+<a name="ln106">const char *</a>
+<a name="ln107">get_resource_typename(enum pe_obj_types type)</a>
+<a name="ln108">{</a>
+<a name="ln109">    switch (type) {</a>
+<a name="ln110">        case pe_native:</a>
+<a name="ln111">            return XML_CIB_TAG_RESOURCE;</a>
+<a name="ln112">        case pe_group:</a>
+<a name="ln113">            return XML_CIB_TAG_GROUP;</a>
+<a name="ln114">        case pe_clone:</a>
+<a name="ln115">            return XML_CIB_TAG_INCARNATION;</a>
+<a name="ln116">        case pe_master:</a>
+<a name="ln117">            return XML_CIB_TAG_MASTER;</a>
+<a name="ln118">        case pe_container:</a>
+<a name="ln119">            return XML_CIB_TAG_CONTAINER;</a>
+<a name="ln120">        case pe_unknown:</a>
+<a name="ln121">            return &quot;unknown&quot;;</a>
+<a name="ln122">    }</a>
+<a name="ln123">    return &quot;&lt;unknown&gt;&quot;;</a>
+<a name="ln124">}</a>
+<a name="ln125"> </a>
+<a name="ln126">static void</a>
+<a name="ln127">dup_attr(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln128">{</a>
+<a name="ln129">    add_hash_param(user_data, key, value);</a>
+<a name="ln130">}</a>
+<a name="ln131"> </a>
+<a name="ln132">void</a>
+<a name="ln133">get_meta_attributes(GHashTable * meta_hash, resource_t * rsc,</a>
+<a name="ln134">                    node_t * node, pe_working_set_t * data_set)</a>
+<a name="ln135">{</a>
+<a name="ln136">    GHashTable *node_hash = NULL;</a>
+<a name="ln137">    const char *version = crm_element_value(data_set-&gt;input, XML_ATTR_CRM_VERSION);</a>
+<a name="ln138"> </a>
+<a name="ln139">    if (node) {</a>
+<a name="ln140">        node_hash = node-&gt;details-&gt;attrs;</a>
+<a name="ln141">    }</a>
+<a name="ln142"> </a>
+<a name="ln143">    if (rsc-&gt;xml) {</a>
+<a name="ln144">        xmlAttrPtr xIter = NULL;</a>
+<a name="ln145"> </a>
+<a name="ln146">        for (xIter = rsc-&gt;xml-&gt;properties; xIter; xIter = xIter-&gt;next) {</a>
+<a name="ln147">            const char *prop_name = (const char *)xIter-&gt;name;</a>
+<a name="ln148">            const char *prop_value = crm_element_value(rsc-&gt;xml, prop_name);</a>
+<a name="ln149"> </a>
+<a name="ln150">            add_hash_param(meta_hash, prop_name, prop_value);</a>
+<a name="ln151">        }</a>
+<a name="ln152">    }</a>
+<a name="ln153"> </a>
+<a name="ln154">    unpack_instance_attributes(data_set-&gt;input, rsc-&gt;xml, XML_TAG_META_SETS, node_hash,</a>
+<a name="ln155">                               meta_hash, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln156"> </a>
+<a name="ln157">    if(version == NULL || compare_version(version, &quot;3.0.9&quot;) &lt; 0) {</a>
+<a name="ln158">        /* populate from the regular attributes until the GUI can create</a>
+<a name="ln159">         * meta attributes</a>
+<a name="ln160">         */</a>
+<a name="ln161">        unpack_instance_attributes(data_set-&gt;input, rsc-&gt;xml, XML_TAG_ATTR_SETS, node_hash,</a>
+<a name="ln162">                                   meta_hash, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln163">    }</a>
+<a name="ln164"> </a>
+<a name="ln165">    /* set anything else based on the parent */</a>
+<a name="ln166">    if (rsc-&gt;parent != NULL) {</a>
+<a name="ln167">        g_hash_table_foreach(rsc-&gt;parent-&gt;meta, dup_attr, meta_hash);</a>
+<a name="ln168">    }</a>
+<a name="ln169"> </a>
+<a name="ln170">    /* and finally check the defaults */</a>
+<a name="ln171">    unpack_instance_attributes(data_set-&gt;input, data_set-&gt;rsc_defaults, XML_TAG_META_SETS,</a>
+<a name="ln172">                               node_hash, meta_hash, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln173">}</a>
+<a name="ln174"> </a>
+<a name="ln175">void</a>
+<a name="ln176">get_rsc_attributes(GHashTable * meta_hash, resource_t * rsc,</a>
+<a name="ln177">                   node_t * node, pe_working_set_t * data_set)</a>
+<a name="ln178">{</a>
+<a name="ln179">    GHashTable *node_hash = NULL;</a>
+<a name="ln180"> </a>
+<a name="ln181">    if (node) {</a>
+<a name="ln182">        node_hash = node-&gt;details-&gt;attrs;</a>
+<a name="ln183">    }</a>
+<a name="ln184"> </a>
+<a name="ln185">    unpack_instance_attributes(data_set-&gt;input, rsc-&gt;xml, XML_TAG_ATTR_SETS, node_hash,</a>
+<a name="ln186">                               meta_hash, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln187"> </a>
+<a name="ln188">    /* set anything else based on the parent */</a>
+<a name="ln189">    if (rsc-&gt;parent != NULL) {</a>
+<a name="ln190">        get_rsc_attributes(meta_hash, rsc-&gt;parent, node, data_set);</a>
+<a name="ln191"> </a>
+<a name="ln192">    } else {</a>
+<a name="ln193">        /* and finally check the defaults */</a>
+<a name="ln194">        unpack_instance_attributes(data_set-&gt;input, data_set-&gt;rsc_defaults, XML_TAG_ATTR_SETS,</a>
+<a name="ln195">                                   node_hash, meta_hash, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln196">    }</a>
+<a name="ln197">}</a>
+<a name="ln198"> </a>
+<a name="ln199">void</a>
+<a name="ln200">pe_get_versioned_attributes(xmlNode * meta_hash, resource_t * rsc,</a>
+<a name="ln201">                            node_t * node, pe_working_set_t * data_set)</a>
+<a name="ln202">{</a>
+<a name="ln203">    GHashTable *node_hash = NULL;</a>
+<a name="ln204"> </a>
+<a name="ln205">    if (node) {</a>
+<a name="ln206">        node_hash = node-&gt;details-&gt;attrs;</a>
+<a name="ln207">    }</a>
+<a name="ln208"> </a>
+<a name="ln209">    pe_unpack_versioned_attributes(data_set-&gt;input, rsc-&gt;xml, XML_TAG_ATTR_SETS, node_hash,</a>
+<a name="ln210">                                   meta_hash, data_set-&gt;now);</a>
+<a name="ln211"> </a>
+<a name="ln212">    /* set anything else based on the parent */</a>
+<a name="ln213">    if (rsc-&gt;parent != NULL) {</a>
+<a name="ln214">        pe_get_versioned_attributes(meta_hash, rsc-&gt;parent, node, data_set);</a>
+<a name="ln215"> </a>
+<a name="ln216">    } else {</a>
+<a name="ln217">        /* and finally check the defaults */</a>
+<a name="ln218">        pe_unpack_versioned_attributes(data_set-&gt;input, data_set-&gt;rsc_defaults, XML_TAG_ATTR_SETS,</a>
+<a name="ln219">                                       node_hash, meta_hash, data_set-&gt;now);</a>
+<a name="ln220">    }</a>
+<a name="ln221">}</a>
+<a name="ln222"> </a>
+<a name="ln223">static char *</a>
+<a name="ln224">template_op_key(xmlNode * op)</a>
+<a name="ln225">{</a>
+<a name="ln226">    const char *name = crm_element_value(op, &quot;name&quot;);</a>
+<a name="ln227">    const char *role = crm_element_value(op, &quot;role&quot;);</a>
+<a name="ln228">    char *key = NULL;</a>
+<a name="ln229"> </a>
+<a name="ln230">    if (role == NULL || crm_str_eq(role, RSC_ROLE_STARTED_S, TRUE)</a>
+<a name="ln231">        || crm_str_eq(role, RSC_ROLE_SLAVE_S, TRUE)) {</a>
+<a name="ln232">        role = RSC_ROLE_UNKNOWN_S;</a>
+<a name="ln233">    }</a>
+<a name="ln234"> </a>
+<a name="ln235">    key = crm_concat(name, role, '-');</a>
+<a name="ln236">    return key;</a>
+<a name="ln237">}</a>
+<a name="ln238"> </a>
+<a name="ln239">static gboolean</a>
+<a name="ln240">unpack_template(xmlNode * xml_obj, xmlNode ** expanded_xml, pe_working_set_t * data_set)</a>
+<a name="ln241">{</a>
+<a name="ln242">    xmlNode *cib_resources = NULL;</a>
+<a name="ln243">    xmlNode *template = NULL;</a>
+<a name="ln244">    xmlNode *new_xml = NULL;</a>
+<a name="ln245">    xmlNode *child_xml = NULL;</a>
+<a name="ln246">    xmlNode *rsc_ops = NULL;</a>
+<a name="ln247">    xmlNode *template_ops = NULL;</a>
+<a name="ln248">    const char *template_ref = NULL;</a>
+<a name="ln249">    const char *clone = NULL;</a>
+<a name="ln250">    const char *id = NULL;</a>
+<a name="ln251"> </a>
+<a name="ln252">    if (xml_obj == NULL) {</a>
+<a name="ln253">        pe_err(&quot;No resource object for template unpacking&quot;);</a>
+<a name="ln254">        return FALSE;</a>
+<a name="ln255">    }</a>
+<a name="ln256"> </a>
+<a name="ln257">    template_ref = crm_element_value(xml_obj, XML_CIB_TAG_RSC_TEMPLATE);</a>
+<a name="ln258">    if (template_ref == NULL) {</a>
+<a name="ln259">        return TRUE;</a>
+<a name="ln260">    }</a>
+<a name="ln261"> </a>
+<a name="ln262">    id = ID(xml_obj);</a>
+<a name="ln263">    if (id == NULL) {</a>
+<a name="ln264">        pe_err(&quot;'%s' object must have a id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln265">        return FALSE;</a>
+<a name="ln266">    }</a>
+<a name="ln267"> </a>
+<a name="ln268">    if (crm_str_eq(template_ref, id, TRUE)) {</a>
+<a name="ln269">        pe_err(&quot;The resource object '%s' should not reference itself&quot;, id);</a>
+<a name="ln270">        return FALSE;</a>
+<a name="ln271">    }</a>
+<a name="ln272"> </a>
+<a name="ln273">    cib_resources = get_xpath_object(&quot;//&quot;XML_CIB_TAG_RESOURCES, data_set-&gt;input, LOG_TRACE);</a>
+<a name="ln274">    if (cib_resources == NULL) {</a>
+<a name="ln275">        pe_err(&quot;No resources configured&quot;);</a>
+<a name="ln276">        return FALSE;</a>
+<a name="ln277">    }</a>
+<a name="ln278"> </a>
+<a name="ln279">    template = find_entity(cib_resources, XML_CIB_TAG_RSC_TEMPLATE, template_ref);</a>
+<a name="ln280">    if (template == NULL) {</a>
+<a name="ln281">        pe_err(&quot;No template named '%s'&quot;, template_ref);</a>
+<a name="ln282">        return FALSE;</a>
+<a name="ln283">    }</a>
+<a name="ln284"> </a>
+<a name="ln285">    new_xml = copy_xml(template);</a>
+<a name="ln286">    xmlNodeSetName(new_xml, xml_obj-&gt;name);</a>
+<a name="ln287">    crm_xml_replace(new_xml, XML_ATTR_ID, id);</a>
+<a name="ln288"> </a>
+<a name="ln289">    clone = crm_element_value(xml_obj, XML_RSC_ATTR_INCARNATION);</a>
+<a name="ln290">    if(clone) {</a>
+<a name="ln291">        crm_xml_add(new_xml, XML_RSC_ATTR_INCARNATION, clone);</a>
+<a name="ln292">    }</a>
+<a name="ln293"> </a>
+<a name="ln294">    template_ops = find_xml_node(new_xml, &quot;operations&quot;, FALSE);</a>
+<a name="ln295"> </a>
+<a name="ln296">    for (child_xml = __xml_first_child(xml_obj); child_xml != NULL;</a>
+<a name="ln297">         child_xml = __xml_next_element(child_xml)) {</a>
+<a name="ln298">        xmlNode *new_child = NULL;</a>
+<a name="ln299"> </a>
+<a name="ln300">        new_child = add_node_copy(new_xml, child_xml);</a>
+<a name="ln301"> </a>
+<a name="ln302">        if (crm_str_eq((const char *)new_child-&gt;name, &quot;operations&quot;, TRUE)) {</a>
+<a name="ln303">            rsc_ops = new_child;</a>
+<a name="ln304">        }</a>
+<a name="ln305">    }</a>
+<a name="ln306"> </a>
+<a name="ln307">    if (template_ops &amp;&amp; rsc_ops) {</a>
+<a name="ln308">        xmlNode *op = NULL;</a>
+<a name="ln309">        GHashTable *rsc_ops_hash =</a>
+<a name="ln310">            g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, NULL);</a>
+<a name="ln311"> </a>
+<a name="ln312">        for (op = __xml_first_child(rsc_ops); op != NULL; op = __xml_next_element(op)) {</a>
+<a name="ln313">            char *key = template_op_key(op);</a>
+<a name="ln314"> </a>
+<a name="ln315">            g_hash_table_insert(rsc_ops_hash, key, op);</a>
+<a name="ln316">        }</a>
+<a name="ln317"> </a>
+<a name="ln318">        for (op = __xml_first_child(template_ops); op != NULL; op = __xml_next_element(op)) {</a>
+<a name="ln319">            char *key = template_op_key(op);</a>
+<a name="ln320"> </a>
+<a name="ln321">            if (g_hash_table_lookup(rsc_ops_hash, key) == NULL) {</a>
+<a name="ln322">                add_node_copy(rsc_ops, op);</a>
+<a name="ln323">            }</a>
+<a name="ln324"> </a>
+<a name="ln325">            free(key);</a>
+<a name="ln326">        }</a>
+<a name="ln327"> </a>
+<a name="ln328">        if (rsc_ops_hash) {</a>
+<a name="ln329">            g_hash_table_destroy(rsc_ops_hash);</a>
+<a name="ln330">        }</a>
+<a name="ln331"> </a>
+<a name="ln332">        free_xml(template_ops);</a>
+<a name="ln333">    }</a>
+<a name="ln334"> </a>
+<a name="ln335">    /*free_xml(*expanded_xml); */</a>
+<a name="ln336">    *expanded_xml = new_xml;</a>
+<a name="ln337"> </a>
+<a name="ln338">    /* Disable multi-level templates for now */</a>
+<a name="ln339">    /*if(unpack_template(new_xml, expanded_xml, data_set) == FALSE) {</a>
+<a name="ln340">       free_xml(*expanded_xml);</a>
+<a name="ln341">       *expanded_xml = NULL;</a>
+<a name="ln342"> </a>
+<a name="ln343">       return FALSE;</a>
+<a name="ln344">       } */</a>
+<a name="ln345"> </a>
+<a name="ln346">    return TRUE;</a>
+<a name="ln347">}</a>
+<a name="ln348"> </a>
+<a name="ln349">static gboolean</a>
+<a name="ln350">add_template_rsc(xmlNode * xml_obj, pe_working_set_t * data_set)</a>
+<a name="ln351">{</a>
+<a name="ln352">    const char *template_ref = NULL;</a>
+<a name="ln353">    const char *id = NULL;</a>
+<a name="ln354"> </a>
+<a name="ln355">    if (xml_obj == NULL) {</a>
+<a name="ln356">        pe_err(&quot;No resource object for processing resource list of template&quot;);</a>
+<a name="ln357">        return FALSE;</a>
+<a name="ln358">    }</a>
+<a name="ln359"> </a>
+<a name="ln360">    template_ref = crm_element_value(xml_obj, XML_CIB_TAG_RSC_TEMPLATE);</a>
+<a name="ln361">    if (template_ref == NULL) {</a>
+<a name="ln362">        return TRUE;</a>
+<a name="ln363">    }</a>
+<a name="ln364"> </a>
+<a name="ln365">    id = ID(xml_obj);</a>
+<a name="ln366">    if (id == NULL) {</a>
+<a name="ln367">        pe_err(&quot;'%s' object must have a id&quot;, crm_element_name(xml_obj));</a>
+<a name="ln368">        return FALSE;</a>
+<a name="ln369">    }</a>
+<a name="ln370"> </a>
+<a name="ln371">    if (crm_str_eq(template_ref, id, TRUE)) {</a>
+<a name="ln372">        pe_err(&quot;The resource object '%s' should not reference itself&quot;, id);</a>
+<a name="ln373">        return FALSE;</a>
+<a name="ln374">    }</a>
+<a name="ln375"> </a>
+<a name="ln376">    if (add_tag_ref(data_set-&gt;template_rsc_sets, template_ref, id) == FALSE) {</a>
+<a name="ln377">        return FALSE;</a>
+<a name="ln378">    }</a>
+<a name="ln379"> </a>
+<a name="ln380">    return TRUE;</a>
+<a name="ln381">}</a>
+<a name="ln382"> </a>
+<a name="ln383">static void</a>
+<a name="ln384">handle_rsc_isolation(resource_t *rsc)</a>
+<a name="ln385">{</a>
+<a name="ln386">    resource_t *top = uber_parent(rsc);</a>
+<a name="ln387">    resource_t *iso = rsc;</a>
+<a name="ln388">    const char *wrapper = NULL;</a>
+<a name="ln389">    const char *value;</a>
+<a name="ln390"> </a>
+<a name="ln391">    /* check for isolation wrapper mapping if the parent doesn't have one set</a>
+<a name="ln392">     * isolation mapping is enabled by default. For safety, we are allowing isolation</a>
+<a name="ln393">     * to be disabled by setting the meta attr, isolation=false. */</a>
+<a name="ln394">    value = g_hash_table_lookup(rsc-&gt;meta, XML_RSC_ATTR_ISOLATION);</a>
+<a name="ln395">    if (top-&gt;isolation_wrapper == NULL &amp;&amp; (value == NULL || crm_is_true(value))) {</a>
+<a name="ln396">        if (g_hash_table_lookup(rsc-&gt;parameters, &quot;pcmk_docker_image&quot;)) {</a>
+<a name="ln397">            wrapper = &quot;docker-wrapper&quot;;</a>
+<a name="ln398">        }</a>
+<a name="ln399">        /* add more isolation technologies here as we expand */</a>
+<a name="ln400">    } else if (top-&gt;isolation_wrapper) {</a>
+<a name="ln401">        goto set_rsc_opts;</a>
+<a name="ln402">    }</a>
+<a name="ln403"> </a>
+<a name="ln404">    if (wrapper == NULL) {</a>
+<a name="ln405">        return;</a>
+<a name="ln406">    }</a>
+<a name="ln407"> </a>
+<a name="ln408">    /* if this is a cloned primitive/group, go head and set the isolation wrapper at</a>
+<a name="ln409">     * at the clone level. this is really the only sane thing to do in this situation.</a>
+<a name="ln410">     * This allows someone to clone an isolated resource without having to shuffle</a>
+<a name="ln411">     * around the isolation attributes to the clone parent */</a>
+<a name="ln412">    if (top == rsc-&gt;parent &amp;&amp; pe_rsc_is_clone(top)) {</a>
+<a name="ln413">        iso = top;</a>
+<a name="ln414">    }</a>
+<a name="ln415"> </a>
+<a name="ln416">    iso-&gt;isolation_wrapper = wrapper;</a>
+<a name="ln417">    set_bit(top-&gt;flags, pe_rsc_unique);</a>
+<a name="ln418"> </a>
+<a name="ln419">set_rsc_opts:</a>
+<a name="ln420">    clear_bit(rsc-&gt;flags, pe_rsc_allow_migrate);</a>
+<a name="ln421">    set_bit(rsc-&gt;flags, pe_rsc_unique);</a>
+<a name="ln422">    if (pe_rsc_is_clone(top)) {</a>
+<a name="ln423">        add_hash_param(rsc-&gt;meta, XML_RSC_ATTR_UNIQUE, XML_BOOLEAN_TRUE);</a>
+<a name="ln424">    }</a>
+<a name="ln425">}</a>
+<a name="ln426"> </a>
+<a name="ln427">gboolean</a>
+<a name="ln428">common_unpack(xmlNode * xml_obj, resource_t ** rsc,</a>
+<a name="ln429">              resource_t * parent, pe_working_set_t * data_set)</a>
+<a name="ln430">{</a>
+<a name="ln431">    bool isdefault = FALSE;</a>
+<a name="ln432">    xmlNode *expanded_xml = NULL;</a>
+<a name="ln433">    xmlNode *ops = NULL;</a>
+<a name="ln434">    resource_t *top = NULL;</a>
+<a name="ln435">    const char *value = NULL;</a>
+<a name="ln436">    const char *rclass = NULL; /* Look for this after any templates have been expanded */</a>
+<a name="ln437">    const char *id = crm_element_value(xml_obj, XML_ATTR_ID);</a>
+<a name="ln438">    int container_remote_node = 0;</a>
+<a name="ln439">    int baremetal_remote_node = 0;</a>
+<a name="ln440">    bool has_versioned_params = FALSE;</a>
+<a name="ln441"> </a>
+<a name="ln442">    crm_log_xml_trace(xml_obj, &quot;Processing resource input...&quot;);</a>
+<a name="ln443"> </a>
+<a name="ln444">    if (id == NULL) {</a>
+<a name="ln445">        pe_err(&quot;Must specify id tag in &lt;resource&gt;&quot;);</a>
+<a name="ln446">        return FALSE;</a>
+<a name="ln447"> </a>
+<a name="ln448">    } else if (rsc == NULL) {</a>
+<a name="ln449">        pe_err(&quot;Nowhere to unpack resource into&quot;);</a>
+<a name="ln450">        return FALSE;</a>
+<a name="ln451"> </a>
+<a name="ln452">    }</a>
+<a name="ln453"> </a>
+<a name="ln454">    if (unpack_template(xml_obj, &amp;expanded_xml, data_set) == FALSE) {</a>
+<a name="ln455">        return FALSE;</a>
+<a name="ln456">    }</a>
+<a name="ln457"> </a>
+<a name="ln458">    *rsc = calloc(1, sizeof(resource_t));</a>
+<a name="ln459">    (*rsc)-&gt;cluster = data_set;</a>
+<a name="ln460"> </a>
+<a name="ln461">    if (expanded_xml) {</a>
+<a name="ln462">        crm_log_xml_trace(expanded_xml, &quot;Expanded resource...&quot;);</a>
+<a name="ln463">        (*rsc)-&gt;xml = expanded_xml;</a>
+<a name="ln464">        (*rsc)-&gt;orig_xml = xml_obj;</a>
+<a name="ln465"> </a>
+<a name="ln466">    } else {</a>
+<a name="ln467">        (*rsc)-&gt;xml = xml_obj;</a>
+<a name="ln468">        (*rsc)-&gt;orig_xml = NULL;</a>
+<a name="ln469">    }</a>
+<a name="ln470"> </a>
+<a name="ln471">    /* Do not use xml_obj from here on, use (*rsc)-&gt;xml in case templates are involved */</a>
+<a name="ln472">    rclass = crm_element_value((*rsc)-&gt;xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln473">    (*rsc)-&gt;parent = parent;</a>
+<a name="ln474"> </a>
+<a name="ln475">    ops = find_xml_node((*rsc)-&gt;xml, &quot;operations&quot;, FALSE);</a>
+<a name="ln476">    (*rsc)-&gt;ops_xml = expand_idref(ops, data_set-&gt;input);</a>
+<a name="ln477"> </a>
+<a name="ln478">    (*rsc)-&gt;variant = get_resource_type(crm_element_name((*rsc)-&gt;xml));</a>
+<a name="ln479">    if ((*rsc)-&gt;variant == pe_unknown) {</a>
+<a name="ln480">        pe_err(&quot;Unknown resource type: %s&quot;, crm_element_name((*rsc)-&gt;xml));</a>
+<a name="ln481">        free(*rsc);</a>
+<a name="ln482">        return FALSE;</a>
+<a name="ln483">    }</a>
+<a name="ln484"> </a>
+<a name="ln485">    (*rsc)-&gt;parameters =</a>
+<a name="ln486">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln487"> </a>
+<a name="ln488">    (*rsc)-&gt;versioned_parameters = create_xml_node(NULL, XML_TAG_RSC_VER_ATTRS);</a>
+<a name="ln489"> </a>
+<a name="ln490">    (*rsc)-&gt;meta =</a>
+<a name="ln491">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln492"> </a>
+<a name="ln493">    (*rsc)-&gt;allowed_nodes =</a>
+<a name="ln494">        g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, g_hash_destroy_str);</a>
+<a name="ln495"> </a>
+<a name="ln496">    (*rsc)-&gt;known_on = g_hash_table_new_full(crm_str_hash, g_str_equal, NULL, g_hash_destroy_str);</a>
+<a name="ln497"> </a>
+<a name="ln498">    value = crm_element_value((*rsc)-&gt;xml, XML_RSC_ATTR_INCARNATION);</a>
+<a name="ln499">    if (value) {</a>
+<a name="ln500">        (*rsc)-&gt;id = crm_concat(id, value, ':');</a>
+<a name="ln501">        add_hash_param((*rsc)-&gt;meta, XML_RSC_ATTR_INCARNATION, value);</a>
+<a name="ln502"> </a>
+<a name="ln503">    } else {</a>
+<a name="ln504">        (*rsc)-&gt;id = strdup(id);</a>
+<a name="ln505">    }</a>
+<a name="ln506"> </a>
+<a name="ln507">    (*rsc)-&gt;fns = &amp;resource_class_functions[(*rsc)-&gt;variant];</a>
+<a name="ln508">    pe_rsc_trace((*rsc), &quot;Unpacking resource...&quot;);</a>
+<a name="ln509"> </a>
+<a name="ln510">    get_meta_attributes((*rsc)-&gt;meta, *rsc, NULL, data_set);</a>
+<a name="ln511">    get_rsc_attributes((*rsc)-&gt;parameters, *rsc, NULL, data_set);</a>
+<a name="ln512">    pe_get_versioned_attributes((*rsc)-&gt;versioned_parameters, *rsc, NULL, data_set);</a>
+<a name="ln513"> </a>
+<a name="ln514">    (*rsc)-&gt;flags = 0;</a>
+<a name="ln515">    set_bit((*rsc)-&gt;flags, pe_rsc_runnable);</a>
+<a name="ln516">    set_bit((*rsc)-&gt;flags, pe_rsc_provisional);</a>
+<a name="ln517"> </a>
+<a name="ln518">    if (is_set(data_set-&gt;flags, pe_flag_is_managed_default)) {</a>
+<a name="ln519">        set_bit((*rsc)-&gt;flags, pe_rsc_managed);</a>
+<a name="ln520">    }</a>
+<a name="ln521"> </a>
+<a name="ln522">    (*rsc)-&gt;rsc_cons = NULL;</a>
+<a name="ln523">    (*rsc)-&gt;rsc_tickets = NULL;</a>
+<a name="ln524">    (*rsc)-&gt;actions = NULL;</a>
+<a name="ln525">    (*rsc)-&gt;role = RSC_ROLE_STOPPED;</a>
+<a name="ln526">    (*rsc)-&gt;next_role = RSC_ROLE_UNKNOWN;</a>
+<a name="ln527"> </a>
+<a name="ln528">    (*rsc)-&gt;recovery_type = recovery_stop_start;</a>
+<a name="ln529">    (*rsc)-&gt;stickiness = data_set-&gt;default_resource_stickiness;</a>
+<a name="ln530">    (*rsc)-&gt;migration_threshold = INFINITY;</a>
+<a name="ln531">    (*rsc)-&gt;failure_timeout = 0;</a>
+<a name="ln532"> </a>
+<a name="ln533">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_CIB_ATTR_PRIORITY);</a>
+<a name="ln534">    (*rsc)-&gt;priority = crm_parse_int(value, &quot;0&quot;);</a>
+<a name="ln535">    (*rsc)-&gt;effective_priority = (*rsc)-&gt;priority;</a>
+<a name="ln536"> </a>
+<a name="ln537">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_NOTIFY);</a>
+<a name="ln538">    if (crm_is_true(value)) {</a>
+<a name="ln539">        set_bit((*rsc)-&gt;flags, pe_rsc_notify);</a>
+<a name="ln540">    }</a>
+<a name="ln541"> </a>
+<a name="ln542">    if (xml_contains_remote_node((*rsc)-&gt;xml)) {</a>
+<a name="ln543">        if (g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_CONTAINER)) {</a>
+<a name="ln544">            container_remote_node = 1;</a>
+<a name="ln545">        } else {</a>
+<a name="ln546">            baremetal_remote_node = 1;</a>
+<a name="ln547">        }</a>
+<a name="ln548">    }</a>
+<a name="ln549"> </a>
+<a name="ln550">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_OP_ATTR_ALLOW_MIGRATE);</a>
+<a name="ln551">    has_versioned_params = xml_has_children((*rsc)-&gt;versioned_parameters);</a>
+<a name="ln552">    if (crm_is_true(value) &amp;&amp; has_versioned_params) {</a>
+<a name="ln553">        pe_rsc_trace((*rsc), &quot;Migration is disabled for resources with versioned parameters&quot;);</a>
+<a name="ln554">    } else if (crm_is_true(value)) {</a>
+<a name="ln555">        set_bit((*rsc)-&gt;flags, pe_rsc_allow_migrate);</a>
+<a name="ln556">    } else if ((value == NULL) &amp;&amp; baremetal_remote_node &amp;&amp; !has_versioned_params) {</a>
+<a name="ln557">        /* by default, we want baremetal remote-nodes to be able</a>
+<a name="ln558">         * to float around the cluster without having to stop all the</a>
+<a name="ln559">         * resources within the remote-node before moving. Allowing</a>
+<a name="ln560">         * migration support enables this feature. If this ever causes</a>
+<a name="ln561">         * problems, migration support can be explicitly turned off with</a>
+<a name="ln562">         * allow-migrate=false.</a>
+<a name="ln563">         * We don't support migration for versioned resources, though. */</a>
+<a name="ln564">        set_bit((*rsc)-&gt;flags, pe_rsc_allow_migrate);</a>
+<a name="ln565">    }</a>
+<a name="ln566"> </a>
+<a name="ln567">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_MANAGED);</a>
+<a name="ln568">    if (value != NULL &amp;&amp; safe_str_neq(&quot;default&quot;, value)) {</a>
+<a name="ln569">        gboolean bool_value = TRUE;</a>
+<a name="ln570"> </a>
+<a name="ln571">        crm_str_to_boolean(value, &amp;bool_value);</a>
+<a name="ln572">        if (bool_value == FALSE) {</a>
+<a name="ln573">            clear_bit((*rsc)-&gt;flags, pe_rsc_managed);</a>
+<a name="ln574">        } else {</a>
+<a name="ln575">            set_bit((*rsc)-&gt;flags, pe_rsc_managed);</a>
+<a name="ln576">        }</a>
+<a name="ln577">    }</a>
+<a name="ln578"> </a>
+<a name="ln579">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_MAINTENANCE);</a>
+<a name="ln580">    if (value != NULL &amp;&amp; safe_str_neq(&quot;default&quot;, value)) {</a>
+<a name="ln581">        gboolean bool_value = FALSE;</a>
+<a name="ln582"> </a>
+<a name="ln583">        crm_str_to_boolean(value, &amp;bool_value);</a>
+<a name="ln584">        if (bool_value == TRUE) {</a>
+<a name="ln585">            clear_bit((*rsc)-&gt;flags, pe_rsc_managed);</a>
+<a name="ln586">            set_bit((*rsc)-&gt;flags, pe_rsc_maintenance);</a>
+<a name="ln587">        }</a>
+<a name="ln588"> </a>
+<a name="ln589">    } else if (is_set(data_set-&gt;flags, pe_flag_maintenance_mode)) {</a>
+<a name="ln590">        clear_bit((*rsc)-&gt;flags, pe_rsc_managed);</a>
+<a name="ln591">        set_bit((*rsc)-&gt;flags, pe_rsc_maintenance);</a>
+<a name="ln592">    }</a>
+<a name="ln593"> </a>
+<a name="ln594">    pe_rsc_trace((*rsc), &quot;Options for %s&quot;, (*rsc)-&gt;id);</a>
+<a name="ln595"> </a>
+<a name="ln596">    handle_rsc_isolation(*rsc);</a>
+<a name="ln597"> </a>
+<a name="ln598">    top = uber_parent(*rsc);</a>
+<a name="ln599">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_UNIQUE);</a>
+<a name="ln600">    if (crm_is_true(value) || pe_rsc_is_clone(top) == FALSE) {</a>
+<a name="ln601">        set_bit((*rsc)-&gt;flags, pe_rsc_unique);</a>
+<a name="ln602">    }</a>
+<a name="ln603"> </a>
+<a name="ln604">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_RESTART);</a>
+<a name="ln605">    if (safe_str_eq(value, &quot;restart&quot;)) {</a>
+<a name="ln606">        (*rsc)-&gt;restart_type = pe_restart_restart;</a>
+<a name="ln607">        pe_rsc_trace((*rsc), &quot;\tDependency restart handling: restart&quot;);</a>
+<a name="ln608"> </a>
+<a name="ln609">    } else {</a>
+<a name="ln610">        (*rsc)-&gt;restart_type = pe_restart_ignore;</a>
+<a name="ln611">        pe_rsc_trace((*rsc), &quot;\tDependency restart handling: ignore&quot;);</a>
+<a name="ln612">    }</a>
+<a name="ln613"> </a>
+<a name="ln614">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_MULTIPLE);</a>
+<a name="ln615">    if (safe_str_eq(value, &quot;stop_only&quot;)) {</a>
+<a name="ln616">        (*rsc)-&gt;recovery_type = recovery_stop_only;</a>
+<a name="ln617">        pe_rsc_trace((*rsc), &quot;\tMultiple running resource recovery: stop only&quot;);</a>
+<a name="ln618"> </a>
+<a name="ln619">    } else if (safe_str_eq(value, &quot;block&quot;)) {</a>
+<a name="ln620">        (*rsc)-&gt;recovery_type = recovery_block;</a>
+<a name="ln621">        pe_rsc_trace((*rsc), &quot;\tMultiple running resource recovery: block&quot;);</a>
+<a name="ln622"> </a>
+<a name="ln623">    } else {</a>
+<a name="ln624">        (*rsc)-&gt;recovery_type = recovery_stop_start;</a>
+<a name="ln625">        pe_rsc_trace((*rsc), &quot;\tMultiple running resource recovery: stop/start&quot;);</a>
+<a name="ln626">    }</a>
+<a name="ln627"> </a>
+<a name="ln628">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_STICKINESS);</a>
+<a name="ln629">    if (value != NULL &amp;&amp; safe_str_neq(&quot;default&quot;, value)) {</a>
+<a name="ln630">        (*rsc)-&gt;stickiness = char2score(value);</a>
+<a name="ln631">    }</a>
+<a name="ln632"> </a>
+<a name="ln633">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_FAIL_STICKINESS);</a>
+<a name="ln634">    if (value != NULL &amp;&amp; safe_str_neq(&quot;default&quot;, value)) {</a>
+<a name="ln635">        (*rsc)-&gt;migration_threshold = char2score(value);</a>
+<a name="ln636"> </a>
+<a name="ln637">    } else if (value == NULL) {</a>
+<a name="ln638">        /* Make a best-effort guess at a migration threshold for people with 0.6 configs</a>
+<a name="ln639">         * try with underscores and hyphens, from both the resource and global defaults section</a>
+<a name="ln640">         */</a>
+<a name="ln641"> </a>
+<a name="ln642">        value = g_hash_table_lookup((*rsc)-&gt;meta, &quot;resource-failure-stickiness&quot;);</a>
+<a name="ln643">        if (value == NULL) {</a>
+<a name="ln644">            value = g_hash_table_lookup((*rsc)-&gt;meta, &quot;resource_failure_stickiness&quot;);</a>
+<a name="ln645">        }</a>
+<a name="ln646">        if (value == NULL) {</a>
+<a name="ln647">            value =</a>
+<a name="ln648">                g_hash_table_lookup(data_set-&gt;config_hash, &quot;default-resource-failure-stickiness&quot;);</a>
+<a name="ln649">        }</a>
+<a name="ln650">        if (value == NULL) {</a>
+<a name="ln651">            value =</a>
+<a name="ln652">                g_hash_table_lookup(data_set-&gt;config_hash, &quot;default_resource_failure_stickiness&quot;);</a>
+<a name="ln653">        }</a>
+<a name="ln654"> </a>
+<a name="ln655">        if (value) {</a>
+<a name="ln656">            int fail_sticky = char2score(value);</a>
+<a name="ln657"> </a>
+<a name="ln658">            if (fail_sticky == -INFINITY) {</a>
+<a name="ln659">                (*rsc)-&gt;migration_threshold = 1;</a>
+<a name="ln660">                pe_rsc_info((*rsc),</a>
+<a name="ln661">                            &quot;Set a migration threshold of %d for %s based on a failure-stickiness of %s&quot;,</a>
+<a name="ln662">                            (*rsc)-&gt;migration_threshold, (*rsc)-&gt;id, value);</a>
+<a name="ln663"> </a>
+<a name="ln664">            } else if ((*rsc)-&gt;stickiness != 0 &amp;&amp; fail_sticky != 0) {</a>
+<a name="ln665">                (*rsc)-&gt;migration_threshold = (*rsc)-&gt;stickiness / fail_sticky;</a>
+<a name="ln666">                if ((*rsc)-&gt;migration_threshold &lt; 0) {</a>
+<a name="ln667">                    /* Make sure it's positive */</a>
+<a name="ln668">                    (*rsc)-&gt;migration_threshold = 0 - (*rsc)-&gt;migration_threshold;</a>
+<a name="ln669">                }</a>
+<a name="ln670">                (*rsc)-&gt;migration_threshold += 1;</a>
+<a name="ln671">                pe_rsc_info((*rsc),</a>
+<a name="ln672">                            &quot;Calculated a migration threshold for %s of %d based on a stickiness of %d/%s&quot;,</a>
+<a name="ln673">                            (*rsc)-&gt;id, (*rsc)-&gt;migration_threshold, (*rsc)-&gt;stickiness, value);</a>
+<a name="ln674">            }</a>
+<a name="ln675">        }</a>
+<a name="ln676">    }</a>
+<a name="ln677"> </a>
+<a name="ln678">    if (safe_str_eq(rclass, PCMK_RESOURCE_CLASS_STONITH)) {</a>
+<a name="ln679">        set_bit(data_set-&gt;flags, pe_flag_have_stonith_resource);</a>
+<a name="ln680">        set_bit((*rsc)-&gt;flags, pe_rsc_fence_device);</a>
+<a name="ln681">    }</a>
+<a name="ln682"> </a>
+<a name="ln683">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_REQUIRES);</a>
+<a name="ln684"> </a>
+<a name="ln685">  handle_requires_pref:</a>
+<a name="ln686">    if (safe_str_eq(value, &quot;nothing&quot;)) {</a>
+<a name="ln687"> </a>
+<a name="ln688">    } else if (safe_str_eq(value, &quot;quorum&quot;)) {</a>
+<a name="ln689">        set_bit((*rsc)-&gt;flags, pe_rsc_needs_quorum);</a>
+<a name="ln690"> </a>
+<a name="ln691">    } else if (safe_str_eq(value, &quot;unfencing&quot;)) {</a>
+<a name="ln692">        if (is_set((*rsc)-&gt;flags, pe_rsc_fence_device)) {</a>
+<a name="ln693">            crm_config_warn(&quot;%s is a fencing device but requires (un)fencing&quot;, (*rsc)-&gt;id);</a>
+<a name="ln694">            value = &quot;quorum&quot;;</a>
+<a name="ln695">            isdefault = TRUE;</a>
+<a name="ln696">            goto handle_requires_pref;</a>
+<a name="ln697"> </a>
+<a name="ln698">        } else if (is_not_set(data_set-&gt;flags, pe_flag_stonith_enabled)) {</a>
+<a name="ln699">            crm_config_warn(&quot;%s requires (un)fencing but fencing is disabled&quot;, (*rsc)-&gt;id);</a>
+<a name="ln700">            value = &quot;quorum&quot;;</a>
+<a name="ln701">            isdefault = TRUE;</a>
+<a name="ln702">            goto handle_requires_pref;</a>
+<a name="ln703"> </a>
+<a name="ln704">        } else {</a>
+<a name="ln705">            set_bit((*rsc)-&gt;flags, pe_rsc_needs_fencing);</a>
+<a name="ln706">            set_bit((*rsc)-&gt;flags, pe_rsc_needs_unfencing);</a>
+<a name="ln707">        }</a>
+<a name="ln708"> </a>
+<a name="ln709">    } else if (safe_str_eq(value, &quot;fencing&quot;)) {</a>
+<a name="ln710">        set_bit((*rsc)-&gt;flags, pe_rsc_needs_fencing);</a>
+<a name="ln711">        if (is_not_set(data_set-&gt;flags, pe_flag_stonith_enabled)) {</a>
+<a name="ln712">            crm_config_warn(&quot;%s requires fencing but fencing is disabled&quot;, (*rsc)-&gt;id);</a>
+<a name="ln713">        }</a>
+<a name="ln714"> </a>
+<a name="ln715">    } else {</a>
+<a name="ln716">        if (value) {</a>
+<a name="ln717">            crm_config_err(&quot;Invalid value for %s-&gt;requires: %s%s&quot;,</a>
+<a name="ln718">                           (*rsc)-&gt;id, value,</a>
+<a name="ln719">                           is_set(data_set-&gt;flags, pe_flag_stonith_enabled) ? &quot;&quot; : &quot; (stonith-enabled=false)&quot;);</a>
+<a name="ln720">        }</a>
+<a name="ln721"> </a>
+<a name="ln722">        isdefault = TRUE;</a>
+<a name="ln723">        if(is_set((*rsc)-&gt;flags, pe_rsc_fence_device)) {</a>
+<a name="ln724">            value = &quot;quorum&quot;;</a>
+<a name="ln725"> </a>
+<a name="ln726">        } else if (is_set(data_set-&gt;flags, pe_flag_enable_unfencing)) {</a>
+<a name="ln727">            value = &quot;unfencing&quot;;</a>
+<a name="ln728"> </a>
+<a name="ln729">        } else if (is_set(data_set-&gt;flags, pe_flag_stonith_enabled)) {</a>
+<a name="ln730">            value = &quot;fencing&quot;;</a>
+<a name="ln731"> </a>
+<a name="ln732">        } else if (data_set-&gt;no_quorum_policy == no_quorum_ignore) {</a>
+<a name="ln733">            value = &quot;nothing&quot;;</a>
+<a name="ln734"> </a>
+<a name="ln735">        } else {</a>
+<a name="ln736">            value = &quot;quorum&quot;;</a>
+<a name="ln737">        }</a>
+<a name="ln738">        goto handle_requires_pref;</a>
+<a name="ln739">    }</a>
+<a name="ln740"> </a>
+<a name="ln741">    pe_rsc_trace((*rsc), &quot;\tRequired to start: %s%s&quot;, value, isdefault?&quot; (default)&quot;:&quot;&quot;);</a>
+<a name="ln742">    value = g_hash_table_lookup((*rsc)-&gt;meta, XML_RSC_ATTR_FAIL_TIMEOUT);</a>
+<a name="ln743">    if (value != NULL) {</a>
+<a name="ln744">        /* call crm_get_msec() and convert back to seconds */</a>
+<a name="ln745">        (*rsc)-&gt;failure_timeout = (crm_get_msec(value) / 1000);</a>
+<a name="ln746">    }</a>
+<a name="ln747"> </a>
+<a name="ln748">    if (baremetal_remote_node) {</a>
+<a name="ln749">        value = g_hash_table_lookup((*rsc)-&gt;parameters, XML_REMOTE_ATTR_RECONNECT_INTERVAL);</a>
+<a name="ln750">        if (value) {</a>
+<a name="ln751">            /* reconnect delay works by setting failure_timeout and preventing the</a>
+<a name="ln752">             * connection from starting until the failure is cleared. */</a>
+<a name="ln753">            (*rsc)-&gt;remote_reconnect_interval = (crm_get_msec(value) / 1000);</a>
+<a name="ln754">            /* we want to override any default failure_timeout in use when remote</a>
+<a name="ln755">             * reconnect_interval is in use. */ </a>
+<a name="ln756">            (*rsc)-&gt;failure_timeout = (*rsc)-&gt;remote_reconnect_interval;</a>
+<a name="ln757">        }</a>
+<a name="ln758">    }</a>
+<a name="ln759"> </a>
+<a name="ln760">    get_target_role(*rsc, &amp;((*rsc)-&gt;next_role));</a>
+<a name="ln761">    pe_rsc_trace((*rsc), &quot;\tDesired next state: %s&quot;,</a>
+<a name="ln762">                 (*rsc)-&gt;next_role != RSC_ROLE_UNKNOWN ? role2text((*rsc)-&gt;next_role) : &quot;default&quot;);</a>
+<a name="ln763"> </a>
+<a name="ln764">    if ((*rsc)-&gt;fns-&gt;unpack(*rsc, data_set) == FALSE) {</a>
+<a name="ln765">        return FALSE;</a>
+<a name="ln766">    }</a>
+<a name="ln767"> </a>
+<a name="ln768">    if (is_set(data_set-&gt;flags, pe_flag_symmetric_cluster)) {</a>
+<a name="ln769">        resource_location(*rsc, NULL, 0, &quot;symmetric_default&quot;, data_set);</a>
+<a name="ln770">    } else if (container_remote_node) {</a>
+<a name="ln771">        /* remote resources tied to a container resource must always be allowed</a>
+<a name="ln772">         * to opt-in to the cluster. Whether the connection resource is actually</a>
+<a name="ln773">         * allowed to be placed on a node is dependent on the container resource */</a>
+<a name="ln774">        resource_location(*rsc, NULL, 0, &quot;remote_connection_default&quot;, data_set);</a>
+<a name="ln775">    }</a>
+<a name="ln776"> </a>
+<a name="ln777">    pe_rsc_trace((*rsc), &quot;\tAction notification: %s&quot;,</a>
+<a name="ln778">                 is_set((*rsc)-&gt;flags, pe_rsc_notify) ? &quot;required&quot; : &quot;not required&quot;);</a>
+<a name="ln779"> </a>
+<a name="ln780">    (*rsc)-&gt;utilization =</a>
+<a name="ln781">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln782"> </a>
+<a name="ln783">    unpack_instance_attributes(data_set-&gt;input, (*rsc)-&gt;xml, XML_TAG_UTILIZATION, NULL,</a>
+<a name="ln784">                               (*rsc)-&gt;utilization, NULL, FALSE, data_set-&gt;now);</a>
+<a name="ln785"> </a>
+<a name="ln786">/* 	data_set-&gt;resources = g_list_append(data_set-&gt;resources, (*rsc)); */</a>
+<a name="ln787"> </a>
+<a name="ln788">    if (expanded_xml) {</a>
+<a name="ln789">        if (add_template_rsc(xml_obj, data_set) == FALSE) {</a>
+<a name="ln790">            return FALSE;</a>
+<a name="ln791">        }</a>
+<a name="ln792">    }</a>
+<a name="ln793">    return TRUE;</a>
+<a name="ln794">}</a>
+<a name="ln795"> </a>
+<a name="ln796">void</a>
+<a name="ln797">common_update_score(resource_t * rsc, const char *id, int score)</a>
+<a name="ln798">{</a>
+<a name="ln799">    node_t *node = NULL;</a>
+<a name="ln800"> </a>
+<a name="ln801">    node = pe_hash_table_lookup(rsc-&gt;allowed_nodes, id);</a>
+<a name="ln802">    if (node != NULL) {</a>
+<a name="ln803">        pe_rsc_trace(rsc, &quot;Updating score for %s on %s: %d + %d&quot;, rsc-&gt;id, id, node-&gt;weight, score);</a>
+<a name="ln804">        node-&gt;weight = merge_weights(node-&gt;weight, score);</a>
+<a name="ln805">    }</a>
+<a name="ln806"> </a>
+<a name="ln807">    if (rsc-&gt;children) {</a>
+<a name="ln808">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln809"> </a>
+<a name="ln810">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln811">            resource_t *child_rsc = (resource_t *) gIter-&gt;data;</a>
+<a name="ln812"> </a>
+<a name="ln813">            common_update_score(child_rsc, id, score);</a>
+<a name="ln814">        }</a>
+<a name="ln815">    }</a>
+<a name="ln816">}</a>
+<a name="ln817"> </a>
+<a name="ln818">gboolean</a>
+<a name="ln819">is_parent(resource_t *child, resource_t *rsc)</a>
+<a name="ln820">{</a>
+<a name="ln821">    resource_t *parent = child;</a>
+<a name="ln822"> </a>
+<a name="ln823">    if (parent == NULL || rsc == NULL) {</a>
+<a name="ln824">        return FALSE;</a>
+<a name="ln825">    }</a>
+<a name="ln826">    while (parent-&gt;parent != NULL) {</a>
+<a name="ln827">        if (parent-&gt;parent == rsc) {</a>
+<a name="ln828">            return TRUE;</a>
+<a name="ln829">        }</a>
+<a name="ln830">        parent = parent-&gt;parent;</a>
+<a name="ln831">    }</a>
+<a name="ln832">    return FALSE;</a>
+<a name="ln833">}</a>
+<a name="ln834"> </a>
+<a name="ln835">resource_t *</a>
+<a name="ln836">uber_parent(resource_t * rsc)</a>
+<a name="ln837">{</a>
+<a name="ln838">    resource_t *parent = rsc;</a>
+<a name="ln839"> </a>
+<a name="ln840">    if (parent == NULL) {</a>
+<a name="ln841">        return NULL;</a>
+<a name="ln842">    }</a>
+<a name="ln843">    while (parent-&gt;parent != NULL &amp;&amp; parent-&gt;parent-&gt;variant != pe_container) {</a>
+<a name="ln844">        parent = parent-&gt;parent;</a>
+<a name="ln845">    }</a>
+<a name="ln846">    return parent;</a>
+<a name="ln847">}</a>
+<a name="ln848"> </a>
+<a name="ln849">void</a>
+<a name="ln850">common_free(resource_t * rsc)</a>
+<a name="ln851">{</a>
+<a name="ln852">    if (rsc == NULL) {</a>
+<a name="ln853">        return;</a>
+<a name="ln854">    }</a>
+<a name="ln855"> </a>
+<a name="ln856">    pe_rsc_trace(rsc, &quot;Freeing %s %d&quot;, rsc-&gt;id, rsc-&gt;variant);</a>
+<a name="ln857"> </a>
+<a name="ln858">    g_list_free(rsc-&gt;rsc_cons);</a>
+<a name="ln859">    g_list_free(rsc-&gt;rsc_cons_lhs);</a>
+<a name="ln860">    g_list_free(rsc-&gt;rsc_tickets);</a>
+<a name="ln861">    g_list_free(rsc-&gt;dangling_migrations);</a>
+<a name="ln862"> </a>
+<a name="ln863">    if (rsc-&gt;parameters != NULL) {</a>
+<a name="ln864">        g_hash_table_destroy(rsc-&gt;parameters);</a>
+<a name="ln865">    }</a>
+<a name="ln866">    if (rsc-&gt;versioned_parameters != NULL) {</a>
+<a name="ln867">        free_xml(rsc-&gt;versioned_parameters);</a>
+<a name="ln868">    }</a>
+<a name="ln869">    if (rsc-&gt;meta != NULL) {</a>
+<a name="ln870">        g_hash_table_destroy(rsc-&gt;meta);</a>
+<a name="ln871">    }</a>
+<a name="ln872">    if (rsc-&gt;utilization != NULL) {</a>
+<a name="ln873">        g_hash_table_destroy(rsc-&gt;utilization);</a>
+<a name="ln874">    }</a>
+<a name="ln875"> </a>
+<a name="ln876">    if (rsc-&gt;parent == NULL &amp;&amp; is_set(rsc-&gt;flags, pe_rsc_orphan)) {</a>
+<a name="ln877">        free_xml(rsc-&gt;xml);</a>
+<a name="ln878">        rsc-&gt;xml = NULL;</a>
+<a name="ln879">        free_xml(rsc-&gt;orig_xml);</a>
+<a name="ln880">        rsc-&gt;orig_xml = NULL;</a>
+<a name="ln881"> </a>
+<a name="ln882">        /* if rsc-&gt;orig_xml, then rsc-&gt;xml is an expanded xml from a template */</a>
+<a name="ln883">    } else if (rsc-&gt;orig_xml) {</a>
+<a name="ln884">        free_xml(rsc-&gt;xml);</a>
+<a name="ln885">        rsc-&gt;xml = NULL;</a>
+<a name="ln886">    }</a>
+<a name="ln887">    if (rsc-&gt;running_on) {</a>
+<a name="ln888">        g_list_free(rsc-&gt;running_on);</a>
+<a name="ln889">        rsc-&gt;running_on = NULL;</a>
+<a name="ln890">    }</a>
+<a name="ln891">    if (rsc-&gt;known_on) {</a>
+<a name="ln892">        g_hash_table_destroy(rsc-&gt;known_on);</a>
+<a name="ln893">        rsc-&gt;known_on = NULL;</a>
+<a name="ln894">    }</a>
+<a name="ln895">    if (rsc-&gt;actions) {</a>
+<a name="ln896">        g_list_free(rsc-&gt;actions);</a>
+<a name="ln897">        rsc-&gt;actions = NULL;</a>
+<a name="ln898">    }</a>
+<a name="ln899">    if (rsc-&gt;allowed_nodes) {</a>
+<a name="ln900">        g_hash_table_destroy(rsc-&gt;allowed_nodes);</a>
+<a name="ln901">        rsc-&gt;allowed_nodes = NULL;</a>
+<a name="ln902">    }</a>
+<a name="ln903">    g_list_free(rsc-&gt;fillers);</a>
+<a name="ln904">    g_list_free(rsc-&gt;rsc_location);</a>
+<a name="ln905">    pe_rsc_trace(rsc, &quot;Resource freed&quot;);</a>
+<a name="ln906">    free(rsc-&gt;id);</a>
+<a name="ln907">    free(rsc-&gt;clone_name);</a>
+<a name="ln908">    free(rsc-&gt;allocated_to);</a>
+<a name="ln909">    free(rsc-&gt;variant_opaque);</a>
+<a name="ln910">    free(rsc-&gt;pending_task);</a>
+<a name="ln911">    free(rsc);</a>
+<a name="ln912">}</a>
+
+</code></pre>
+<div class="balloon" rel="315"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V595/" target="_blank">V595</a> The 'rsc_ops_hash' pointer was utilized before it was verified against nullptr. Check lines: 315, 328.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

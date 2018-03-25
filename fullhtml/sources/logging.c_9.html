@@ -1,0 +1,1315 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;sys/types.h&gt;</a>
+<a name="ln27">#include &lt;sys/wait.h&gt;</a>
+<a name="ln28">#include &lt;sys/stat.h&gt;</a>
+<a name="ln29">#include &lt;sys/utsname.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;stdio.h&gt;</a>
+<a name="ln32">#include &lt;unistd.h&gt;</a>
+<a name="ln33">#include &lt;string.h&gt;</a>
+<a name="ln34">#include &lt;stdlib.h&gt;</a>
+<a name="ln35">#include &lt;limits.h&gt;</a>
+<a name="ln36">#include &lt;ctype.h&gt;</a>
+<a name="ln37">#include &lt;pwd.h&gt;</a>
+<a name="ln38">#include &lt;grp.h&gt;</a>
+<a name="ln39">#include &lt;time.h&gt;</a>
+<a name="ln40">#include &lt;libgen.h&gt;</a>
+<a name="ln41">#include &lt;signal.h&gt;</a>
+<a name="ln42">#include &lt;bzlib.h&gt;</a>
+<a name="ln43"> </a>
+<a name="ln44">#include &lt;qb/qbdefs.h&gt;</a>
+<a name="ln45"> </a>
+<a name="ln46">#include &lt;crm/crm.h&gt;</a>
+<a name="ln47">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln48"> </a>
+<a name="ln49">unsigned int crm_log_priority = LOG_NOTICE;</a>
+<a name="ln50">unsigned int crm_log_level = LOG_INFO;</a>
+<a name="ln51">static gboolean crm_tracing_enabled(void);</a>
+<a name="ln52">unsigned int crm_trace_nonlog = 0;</a>
+<a name="ln53">bool crm_is_daemon = 0;</a>
+<a name="ln54"> </a>
+<a name="ln55">#ifdef HAVE_G_LOG_SET_DEFAULT_HANDLER</a>
+<a name="ln56">GLogFunc glib_log_default;</a>
+<a name="ln57"> </a>
+<a name="ln58">static void</a>
+<a name="ln59">crm_glib_handler(const gchar * log_domain, GLogLevelFlags flags, const gchar * message,</a>
+<a name="ln60">                 gpointer user_data)</a>
+<a name="ln61">{</a>
+<a name="ln62">    int log_level = LOG_WARNING;</a>
+<a name="ln63">    GLogLevelFlags msg_level = (flags &amp; G_LOG_LEVEL_MASK);</a>
+<a name="ln64">    static struct qb_log_callsite *glib_cs = NULL;</a>
+<a name="ln65"> </a>
+<a name="ln66">    if (glib_cs == NULL) {</a>
+<a name="ln67">        glib_cs = qb_log_callsite_get(__FUNCTION__, __FILE__, &quot;glib-handler&quot;, LOG_DEBUG, __LINE__, crm_trace_nonlog);</a>
+<a name="ln68">    }</a>
+<a name="ln69"> </a>
+<a name="ln70"> </a>
+<a name="ln71">    switch (msg_level) {</a>
+<a name="ln72">        case G_LOG_LEVEL_CRITICAL:</a>
+<a name="ln73">            log_level = LOG_CRIT;</a>
+<a name="ln74"> </a>
+<a name="ln75">            if (crm_is_callsite_active(glib_cs, LOG_DEBUG, 0) == FALSE) {</a>
+<a name="ln76">                /* log and record how we got here */</a>
+<a name="ln77">                crm_abort(__FILE__, __FUNCTION__, __LINE__, message, TRUE, TRUE);</a>
+<a name="ln78">            }</a>
+<a name="ln79">            break;</a>
+<a name="ln80"> </a>
+<a name="ln81">        case G_LOG_LEVEL_ERROR:</a>
+<a name="ln82">            log_level = LOG_ERR;</a>
+<a name="ln83">            break;</a>
+<a name="ln84">        case G_LOG_LEVEL_MESSAGE:</a>
+<a name="ln85">            log_level = LOG_NOTICE;</a>
+<a name="ln86">            break;</a>
+<a name="ln87">        case G_LOG_LEVEL_INFO:</a>
+<a name="ln88">            log_level = LOG_INFO;</a>
+<a name="ln89">            break;</a>
+<a name="ln90">        case G_LOG_LEVEL_DEBUG:</a>
+<a name="ln91">            log_level = LOG_DEBUG;</a>
+<a name="ln92">            break;</a>
+<a name="ln93"> </a>
+<a name="ln94">        case G_LOG_LEVEL_WARNING:</a>
+<a name="ln95">        case G_LOG_FLAG_RECURSION:</a>
+<a name="ln96">        case G_LOG_FLAG_FATAL:</a>
+<a name="ln97">        case G_LOG_LEVEL_MASK:</a>
+<a name="ln98">            log_level = LOG_WARNING;</a>
+<a name="ln99">            break;</a>
+<a name="ln100">    }</a>
+<a name="ln101"> </a>
+<a name="ln102">    do_crm_log(log_level, &quot;%s: %s&quot;, log_domain, message);</a>
+<a name="ln103">}</a>
+<a name="ln104">#endif</a>
+<a name="ln105"> </a>
+<a name="ln106">#ifndef NAME_MAX</a>
+<a name="ln107">#  define NAME_MAX 256</a>
+<a name="ln108">#endif</a>
+<a name="ln109"> </a>
+<a name="ln110">static void</a>
+<a name="ln111">crm_trigger_blackbox(int nsig)</a>
+<a name="ln112">{</a>
+<a name="ln113">    if(nsig == SIGTRAP) {</a>
+<a name="ln114">        /* Turn it on if it wasn't already */</a>
+<a name="ln115">        crm_enable_blackbox(nsig);</a>
+<a name="ln116">    }</a>
+<a name="ln117">    crm_write_blackbox(nsig, NULL);</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">const char *</a>
+<a name="ln121">daemon_option(const char *option)</a>
+<a name="ln122">{</a>
+<a name="ln123">    char env_name[NAME_MAX];</a>
+<a name="ln124">    const char *value = NULL;</a>
+<a name="ln125"> </a>
+<a name="ln126">    snprintf(env_name, NAME_MAX, &quot;PCMK_%s&quot;, option);</a>
+<a name="ln127">    value = getenv(env_name);</a>
+<a name="ln128">    if (value != NULL) {</a>
+<a name="ln129">        crm_trace(&quot;Found %s = %s&quot;, env_name, value);</a>
+<a name="ln130">        return value;</a>
+<a name="ln131">    }</a>
+<a name="ln132"> </a>
+<a name="ln133">    snprintf(env_name, NAME_MAX, &quot;HA_%s&quot;, option);</a>
+<a name="ln134">    value = getenv(env_name);</a>
+<a name="ln135">    if (value != NULL) {</a>
+<a name="ln136">        crm_trace(&quot;Found %s = %s&quot;, env_name, value);</a>
+<a name="ln137">        return value;</a>
+<a name="ln138">    }</a>
+<a name="ln139"> </a>
+<a name="ln140">    crm_trace(&quot;Nothing found for %s&quot;, option);</a>
+<a name="ln141">    return NULL;</a>
+<a name="ln142">}</a>
+<a name="ln143"> </a>
+<a name="ln144">void</a>
+<a name="ln145">set_daemon_option(const char *option, const char *value)</a>
+<a name="ln146">{</a>
+<a name="ln147">    char env_name[NAME_MAX];</a>
+<a name="ln148"> </a>
+<a name="ln149">    snprintf(env_name, NAME_MAX, &quot;PCMK_%s&quot;, option);</a>
+<a name="ln150">    if (value) {</a>
+<a name="ln151">        crm_trace(&quot;Setting %s to %s&quot;, env_name, value);</a>
+<a name="ln152">        setenv(env_name, value, 1);</a>
+<a name="ln153">    } else {</a>
+<a name="ln154">        crm_trace(&quot;Unsetting %s&quot;, env_name);</a>
+<a name="ln155">        unsetenv(env_name);</a>
+<a name="ln156">    }</a>
+<a name="ln157"> </a>
+<a name="ln158">    snprintf(env_name, NAME_MAX, &quot;HA_%s&quot;, option);</a>
+<a name="ln159">    if (value) {</a>
+<a name="ln160">        crm_trace(&quot;Setting %s to %s&quot;, env_name, value);</a>
+<a name="ln161">        setenv(env_name, value, 1);</a>
+<a name="ln162">    } else {</a>
+<a name="ln163">        crm_trace(&quot;Unsetting %s&quot;, env_name);</a>
+<a name="ln164">        unsetenv(env_name);</a>
+<a name="ln165">    }</a>
+<a name="ln166">}</a>
+<a name="ln167"> </a>
+<a name="ln168">gboolean</a>
+<a name="ln169">daemon_option_enabled(const char *daemon, const char *option)</a>
+<a name="ln170">{</a>
+<a name="ln171">    const char *value = daemon_option(option);</a>
+<a name="ln172"> </a>
+<a name="ln173">    if (value != NULL &amp;&amp; crm_is_true(value)) {</a>
+<a name="ln174">        return TRUE;</a>
+<a name="ln175"> </a>
+<a name="ln176">    } else if (value != NULL &amp;&amp; strstr(value, daemon)) {</a>
+<a name="ln177">        return TRUE;</a>
+<a name="ln178">    }</a>
+<a name="ln179"> </a>
+<a name="ln180">    return FALSE;</a>
+<a name="ln181">}</a>
+<a name="ln182"> </a>
+<a name="ln183">void</a>
+<a name="ln184">crm_log_deinit(void)</a>
+<a name="ln185">{</a>
+<a name="ln186">#ifdef HAVE_G_LOG_SET_DEFAULT_HANDLER</a>
+<a name="ln187">    g_log_set_default_handler(glib_log_default, NULL);</a>
+<a name="ln188">#endif</a>
+<a name="ln189">}</a>
+<a name="ln190"> </a>
+<a name="ln191">#define FMT_MAX 256</a>
+<a name="ln192">static void</a>
+<a name="ln193">set_format_string(int method, const char *daemon)</a>
+<a name="ln194">{</a>
+<a name="ln195">    int offset = 0;</a>
+<a name="ln196">    char fmt[FMT_MAX];</a>
+<a name="ln197"> </a>
+<a name="ln198">    if (method &gt; QB_LOG_STDERR) {</a>
+<a name="ln199">        /* When logging to a file */</a>
+<a name="ln200">        struct utsname res;</a>
+<a name="ln201"> </a>
+<a name="ln202">        if (uname(&amp;res) == 0) {</a>
+<a name="ln203">            offset +=</a>
+<a name="ln204">                snprintf(fmt + offset, FMT_MAX - offset, &quot;%%t [%d] %s %10s: &quot;, getpid(),</a>
+<a name="ln205">                         res.nodename, daemon);</a>
+<a name="ln206">        } else {</a>
+<a name="ln207">            offset += snprintf(fmt + offset, FMT_MAX - offset, &quot;%%t [%d] %10s: &quot;, getpid(), daemon);</a>
+<a name="ln208">        }</a>
+<a name="ln209">    }</a>
+<a name="ln210"> </a>
+<a name="ln211">    if (method == QB_LOG_SYSLOG) {</a>
+<a name="ln212">        offset += snprintf(fmt + offset, FMT_MAX - offset, &quot;%%g %%-7p: %%b&quot;);</a>
+<a name="ln213">        crm_extended_logging(method, QB_FALSE);</a>
+<a name="ln214">    } else if (crm_tracing_enabled()) {</a>
+<a name="ln215">        offset += snprintf(fmt + offset, FMT_MAX - offset, &quot;(%%-12f:%%5l %%g) %%-7p: %%n:\t%%b&quot;);</a>
+<a name="ln216">    } else {</a>
+<a name="ln217">        offset += snprintf(fmt + offset, FMT_MAX - offset, &quot;%%g %%-7p: %%n:\t%%b&quot;);</a>
+<a name="ln218">    }</a>
+<a name="ln219"> </a>
+<a name="ln220">    CRM_LOG_ASSERT(offset &gt; 0);</a>
+<a name="ln221">    qb_log_format_set(method, fmt);</a>
+<a name="ln222">}</a>
+<a name="ln223"> </a>
+<a name="ln224">gboolean</a>
+<a name="ln225">crm_add_logfile(const char *filename)</a>
+<a name="ln226">{</a>
+<a name="ln227">    bool is_default = false;</a>
+<a name="ln228">    static int default_fd = -1;</a>
+<a name="ln229">    static gboolean have_logfile = FALSE;</a>
+<a name="ln230"> </a>
+<a name="ln231">    /* @COMPAT This should be CRM_LOG_DIR &quot;/pacemaker.log&quot;. We aren't changing</a>
+<a name="ln232">     * it yet because it will be a significant user-visible change to publicize.</a>
+<a name="ln233">     */</a>
+<a name="ln234">    const char *default_logfile = &quot;/var/log/pacemaker.log&quot;;</a>
+<a name="ln235"> </a>
+<a name="ln236">    struct stat parent;</a>
+<a name="ln237">    int fd = 0, rc = 0;</a>
+<a name="ln238">    FILE *logfile = NULL;</a>
+<a name="ln239">    char *parent_dir = NULL;</a>
+<a name="ln240">    char *filename_cp;</a>
+<a name="ln241"> </a>
+<a name="ln242">    if (filename == NULL &amp;&amp; have_logfile == FALSE) {</a>
+<a name="ln243">        filename = default_logfile;</a>
+<a name="ln244">    }</a>
+<a name="ln245"> </a>
+<a name="ln246">    if (filename == NULL) {</a>
+<a name="ln247">        return FALSE;           /* Nothing to do */</a>
+<a name="ln248">    } else if(safe_str_eq(filename, &quot;none&quot;)) {</a>
+<a name="ln249">        return FALSE;           /* Nothing to do */</a>
+<a name="ln250">    } else if(safe_str_eq(filename, &quot;/dev/null&quot;)) {</a>
+<a name="ln251">        return FALSE;           /* Nothing to do */</a>
+<a name="ln252">    } else if(safe_str_eq(filename, default_logfile)) {</a>
+<a name="ln253">        is_default = TRUE;</a>
+<a name="ln254">    }</a>
+<a name="ln255"> </a>
+<a name="ln256">    if(is_default &amp;&amp; default_fd &gt;= 0) {</a>
+<a name="ln257">        return TRUE;           /* Nothing to do */</a>
+<a name="ln258">    }</a>
+<a name="ln259"> </a>
+<a name="ln260">    /* Check the parent directory */</a>
+<a name="ln261">    filename_cp = strdup(filename);</a>
+<a name="ln262">    parent_dir = dirname(filename_cp);</a>
+<a name="ln263">    rc = stat(parent_dir, &amp;parent);</a>
+<a name="ln264"> </a>
+<a name="ln265">    if (rc != 0) {</a>
+<a name="ln266">        crm_err(&quot;Directory '%s' does not exist: logging to '%s' is disabled&quot;, parent_dir, filename);</a>
+<a name="ln267">        free(filename_cp);</a>
+<a name="ln268">        return FALSE;</a>
+<a name="ln269">    }</a>
+<a name="ln270">    free(filename_cp);</a>
+<a name="ln271"> </a>
+<a name="ln272">    errno = 0;</a>
+<a name="ln273">    logfile = fopen(filename, &quot;a&quot;);</a>
+<a name="ln274">    if(logfile == NULL) {</a>
+<a name="ln275">        crm_err(&quot;%s (%d): Logging to '%s' as uid=%u, gid=%u is disabled&quot;,</a>
+<a name="ln276">                pcmk_strerror(errno), errno, filename, geteuid(), getegid());</a>
+<a name="ln277">        return FALSE;</a>
+<a name="ln278">    }</a>
+<a name="ln279"> </a>
+<a name="ln280">    /* Check/Set permissions if we're root */</a>
+<a name="ln281">    if (geteuid() == 0) {</a>
+<a name="ln282">        struct stat st;</a>
+<a name="ln283">        uid_t pcmk_uid = 0;</a>
+<a name="ln284">        gid_t pcmk_gid = 0;</a>
+<a name="ln285">        gboolean fix = FALSE;</a>
+<a name="ln286">        int logfd = fileno(logfile);</a>
+<a name="ln287"> </a>
+<a name="ln288">        rc = fstat(logfd, &amp;st);</a>
+<a name="ln289">        if (rc &lt; 0) {</a>
+<a name="ln290">            crm_perror(LOG_WARNING, &quot;Cannot stat %s&quot;, filename);</a>
+<a name="ln291">            fclose(logfile);</a>
+<a name="ln292">            return FALSE;</a>
+<a name="ln293">        }</a>
+<a name="ln294"> </a>
+<a name="ln295">        if(crm_user_lookup(CRM_DAEMON_USER, &amp;pcmk_uid, &amp;pcmk_gid) == 0) {</a>
+<a name="ln296">            if (st.st_gid != pcmk_gid) {</a>
+<a name="ln297">                /* Wrong group */</a>
+<a name="ln298">                fix = TRUE;</a>
+<a name="ln299">            } else if ((st.st_mode &amp; S_IRWXG) != (S_IRGRP | S_IWGRP)) {</a>
+<a name="ln300">                /* Not read/writable by the correct group */</a>
+<a name="ln301">                fix = TRUE;</a>
+<a name="ln302">            }</a>
+<a name="ln303">        }</a>
+<a name="ln304"> </a>
+<a name="ln305">        if (fix) {</a>
+<a name="ln306">            rc = fchown(logfd, pcmk_uid, pcmk_gid);</a>
+<a name="ln307">            if (rc &lt; 0) {</a>
+<a name="ln308">                crm_warn(&quot;Cannot change the ownership of %s to user %s and gid %d&quot;,</a>
+<a name="ln309">                         filename, CRM_DAEMON_USER, pcmk_gid);</a>
+<a name="ln310">            }</a>
+<a name="ln311"> </a>
+<a name="ln312">            rc = fchmod(logfd, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);</a>
+<a name="ln313">            if (rc &lt; 0) {</a>
+<a name="ln314">                crm_warn(&quot;Cannot change the mode of %s to rw-rw----&quot;, filename);</a>
+<a name="ln315">            }</a>
+<a name="ln316"> </a>
+<a name="ln317">            fprintf(logfile, &quot;Set r/w permissions for uid=%d, gid=%d on %s\n&quot;,</a>
+<a name="ln318">                    pcmk_uid, pcmk_gid, filename);</a>
+<a name="ln319">            if (fflush(logfile) &lt; 0 || fsync(logfd) &lt; 0) {</a>
+<a name="ln320">                crm_err(&quot;Couldn't write out logfile: %s&quot;, filename);</a>
+<a name="ln321">            }</a>
+<a name="ln322">        }</a>
+<a name="ln323">    }</a>
+<a name="ln324"> </a>
+<a name="ln325">    /* Close and reopen with libqb */</a>
+<a name="ln326">    fclose(logfile);</a>
+<a name="ln327">    fd = qb_log_file_open(filename);</a>
+<a name="ln328"> </a>
+<a name="ln329">    if (fd &lt; 0) {</a>
+<a name="ln330">        crm_perror(LOG_WARNING, &quot;Couldn't send additional logging to %s&quot;, filename);</a>
+<a name="ln331">        return FALSE;</a>
+<a name="ln332">    }</a>
+<a name="ln333"> </a>
+<a name="ln334">    if(is_default) {</a>
+<a name="ln335">        default_fd = fd;</a>
+<a name="ln336"> </a>
+<a name="ln337">    } else if(default_fd &gt;= 0) {</a>
+<a name="ln338">        crm_notice(&quot;Switching to %s&quot;, filename);</a>
+<a name="ln339">        qb_log_ctl(default_fd, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln340">    }</a>
+<a name="ln341"> </a>
+<a name="ln342">    crm_notice(&quot;Additional logging available in %s&quot;, filename);</a>
+<a name="ln343">    qb_log_ctl(fd, QB_LOG_CONF_ENABLED, QB_TRUE);</a>
+<a name="ln344">    /* qb_log_ctl(fd, QB_LOG_CONF_FILE_SYNC, 1);  Turn on synchronous writes */</a>
+<a name="ln345"> </a>
+<a name="ln346">    /* Enable callsites */</a>
+<a name="ln347">    crm_update_callsites();</a>
+<a name="ln348">    have_logfile = TRUE;</a>
+<a name="ln349"> </a>
+<a name="ln350">    return TRUE;</a>
+<a name="ln351">}</a>
+<a name="ln352"> </a>
+<a name="ln353">static int blackbox_trigger = 0;</a>
+<a name="ln354">static char *blackbox_file_prefix = NULL;</a>
+<a name="ln355"> </a>
+<a name="ln356">static void</a>
+<a name="ln357">blackbox_logger(int32_t t, struct qb_log_callsite *cs, time_t timestamp, const char *msg)</a>
+<a name="ln358">{</a>
+<a name="ln359">    if(cs &amp;&amp; cs-&gt;priority &lt; LOG_ERR) {</a>
+<a name="ln360">        crm_write_blackbox(SIGTRAP, cs); /* Bypass the over-dumping logic */</a>
+<a name="ln361">    } else {</a>
+<a name="ln362">        crm_write_blackbox(0, cs);</a>
+<a name="ln363">    }</a>
+<a name="ln364">}</a>
+<a name="ln365"> </a>
+<a name="ln366">static void</a>
+<a name="ln367">crm_control_blackbox(int nsig, bool enable)</a>
+<a name="ln368">{</a>
+<a name="ln369">    int lpc = 0;</a>
+<a name="ln370"> </a>
+<a name="ln371">    if (blackbox_file_prefix == NULL) {</a>
+<a name="ln372">        pid_t pid = getpid();</a>
+<a name="ln373"> </a>
+<a name="ln374">        blackbox_file_prefix = malloc(NAME_MAX);</a>
+<a name="ln375">        snprintf(blackbox_file_prefix, NAME_MAX, &quot;%s/%s-%d&quot;, CRM_BLACKBOX_DIR, crm_system_name, pid);</a>
+<a name="ln376">    }</a>
+<a name="ln377"> </a>
+<a name="ln378">    if (enable &amp;&amp; qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_STATE_GET, 0) != QB_LOG_STATE_ENABLED) {</a>
+<a name="ln379">        qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_SIZE, 5 * 1024 * 1024); /* Any size change drops existing entries */</a>
+<a name="ln380">        qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_TRUE);      /* Setting the size seems to disable it */</a>
+<a name="ln381"> </a>
+<a name="ln382">        /* Enable synchronous logging */</a>
+<a name="ln383">        for (lpc = QB_LOG_BLACKBOX; lpc &lt; QB_LOG_TARGET_MAX; lpc++) {</a>
+<a name="ln384">            qb_log_ctl(lpc, QB_LOG_CONF_FILE_SYNC, QB_TRUE);</a>
+<a name="ln385">        }</a>
+<a name="ln386"> </a>
+<a name="ln387">        crm_notice(&quot;Initiated blackbox recorder: %s&quot;, blackbox_file_prefix);</a>
+<a name="ln388"> </a>
+<a name="ln389">        /* Save to disk on abnormal termination */</a>
+<a name="ln390">        crm_signal(SIGSEGV, crm_trigger_blackbox);</a>
+<a name="ln391">        crm_signal(SIGABRT, crm_trigger_blackbox);</a>
+<a name="ln392">        crm_signal(SIGILL,  crm_trigger_blackbox);</a>
+<a name="ln393">        crm_signal(SIGBUS,  crm_trigger_blackbox);</a>
+<a name="ln394"> </a>
+<a name="ln395">        crm_update_callsites();</a>
+<a name="ln396"> </a>
+<a name="ln397">        blackbox_trigger = qb_log_custom_open(blackbox_logger, NULL, NULL, NULL);</a>
+<a name="ln398">        qb_log_ctl(blackbox_trigger, QB_LOG_CONF_ENABLED, QB_TRUE);</a>
+<a name="ln399">        crm_trace(&quot;Trigger: %d is %d %d&quot;, blackbox_trigger,</a>
+<a name="ln400">                  qb_log_ctl(blackbox_trigger, QB_LOG_CONF_STATE_GET, 0), QB_LOG_STATE_ENABLED);</a>
+<a name="ln401"> </a>
+<a name="ln402">        crm_update_callsites();</a>
+<a name="ln403"> </a>
+<a name="ln404">    } else if (!enable &amp;&amp; qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_STATE_GET, 0) == QB_LOG_STATE_ENABLED) {</a>
+<a name="ln405">        qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln406"> </a>
+<a name="ln407">        /* Disable synchronous logging again when the blackbox is disabled */</a>
+<a name="ln408">        for (lpc = QB_LOG_BLACKBOX; lpc &lt; QB_LOG_TARGET_MAX; lpc++) {</a>
+<a name="ln409">            qb_log_ctl(lpc, QB_LOG_CONF_FILE_SYNC, QB_FALSE);</a>
+<a name="ln410">        }</a>
+<a name="ln411">    }</a>
+<a name="ln412">}</a>
+<a name="ln413"> </a>
+<a name="ln414">void</a>
+<a name="ln415">crm_enable_blackbox(int nsig)</a>
+<a name="ln416">{</a>
+<a name="ln417">    crm_control_blackbox(nsig, TRUE);</a>
+<a name="ln418">}</a>
+<a name="ln419"> </a>
+<a name="ln420">void</a>
+<a name="ln421">crm_disable_blackbox(int nsig)</a>
+<a name="ln422">{</a>
+<a name="ln423">    crm_control_blackbox(nsig, FALSE);</a>
+<a name="ln424">}</a>
+<a name="ln425"> </a>
+<a name="ln426">void</a>
+<a name="ln427">crm_write_blackbox(int nsig, struct qb_log_callsite *cs)</a>
+<a name="ln428">{</a>
+<a name="ln429">    static int counter = 1;</a>
+<a name="ln430">    static time_t last = 0;</a>
+<a name="ln431"> </a>
+<a name="ln432">    char buffer[NAME_MAX];</a>
+<a name="ln433">    time_t now = time(NULL);</a>
+<a name="ln434"> </a>
+<a name="ln435">    if (blackbox_file_prefix == NULL) {</a>
+<a name="ln436">        return;</a>
+<a name="ln437">    }</a>
+<a name="ln438"> </a>
+<a name="ln439">    switch (nsig) {</a>
+<a name="ln440">        case 0:</a>
+<a name="ln441">        case SIGTRAP:</a>
+<a name="ln442">            /* The graceful case - such as assertion failure or user request */</a>
+<a name="ln443"> </a>
+<a name="ln444">            if (nsig == 0 &amp;&amp; now == last) {</a>
+<a name="ln445">                /* Prevent over-dumping */</a>
+<a name="ln446">                return;</a>
+<a name="ln447">            }</a>
+<a name="ln448"> </a>
+<a name="ln449">            snprintf(buffer, NAME_MAX, &quot;%s.%d&quot;, blackbox_file_prefix, counter++);</a>
+<a name="ln450">            if (nsig == SIGTRAP) {</a>
+<a name="ln451">                crm_notice(&quot;Blackbox dump requested, please see %s for contents&quot;, buffer);</a>
+<a name="ln452"> </a>
+<a name="ln453">            } else if (cs) {</a>
+<a name="ln454">                syslog(LOG_NOTICE,</a>
+<a name="ln455">                       &quot;Problem detected at %s:%d (%s), please see %s for additional details&quot;,</a>
+<a name="ln456">                       cs-&gt;function, cs-&gt;lineno, cs-&gt;filename, buffer);</a>
+<a name="ln457">            } else {</a>
+<a name="ln458">                crm_notice(&quot;Problem detected, please see %s for additional details&quot;, buffer);</a>
+<a name="ln459">            }</a>
+<a name="ln460"> </a>
+<a name="ln461">            last = now;</a>
+<a name="ln462">            qb_log_blackbox_write_to_file(buffer);</a>
+<a name="ln463"> </a>
+<a name="ln464">            /* Flush the existing contents</a>
+<a name="ln465">             * A size change would also work</a>
+<a name="ln466">             */</a>
+<a name="ln467">            qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln468">            qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_TRUE);</a>
+<a name="ln469">            break;</a>
+<a name="ln470"> </a>
+<a name="ln471">        default:</a>
+<a name="ln472">            /* Do as little as possible, just try to get what we have out</a>
+<a name="ln473">             * We logged the filename when the blackbox was enabled</a>
+<a name="ln474">             */</a>
+<a name="ln475">            crm_signal(nsig, SIG_DFL);</a>
+<a name="ln476">            qb_log_blackbox_write_to_file(blackbox_file_prefix);</a>
+<a name="ln477">            qb_log_ctl(QB_LOG_BLACKBOX, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln478">            raise(nsig);</a>
+<a name="ln479">            break;</a>
+<a name="ln480">    }</a>
+<a name="ln481">}</a>
+<a name="ln482"> </a>
+<a name="ln483">gboolean</a>
+<a name="ln484">crm_log_cli_init(const char *entity)</a>
+<a name="ln485">{</a>
+<a name="ln486">    return crm_log_init(entity, LOG_ERR, FALSE, FALSE, 0, NULL, TRUE);</a>
+<a name="ln487">}</a>
+<a name="ln488"> </a>
+<a name="ln489">static const char *</a>
+<a name="ln490">crm_quark_to_string(uint32_t tag)</a>
+<a name="ln491">{</a>
+<a name="ln492">    const char *text = g_quark_to_string(tag);</a>
+<a name="ln493"> </a>
+<a name="ln494">    if (text) {</a>
+<a name="ln495">        return text;</a>
+<a name="ln496">    }</a>
+<a name="ln497">    return &quot;&quot;;</a>
+<a name="ln498">}</a>
+<a name="ln499"> </a>
+<a name="ln500">static void</a>
+<a name="ln501">crm_log_filter_source(int source, const char *trace_files, const char *trace_fns,</a>
+<a name="ln502">                      const char *trace_fmts, const char *trace_tags, const char *trace_blackbox,</a>
+<a name="ln503">                      struct qb_log_callsite *cs)</a>
+<a name="ln504">{</a>
+<a name="ln505">    if (qb_log_ctl(source, QB_LOG_CONF_STATE_GET, 0) != QB_LOG_STATE_ENABLED) {</a>
+<a name="ln506">        return;</a>
+<a name="ln507">    } else if (cs-&gt;tags != crm_trace_nonlog &amp;&amp; source == QB_LOG_BLACKBOX) {</a>
+<a name="ln508">        /* Blackbox gets everything if enabled */</a>
+<a name="ln509">        qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln510"> </a>
+<a name="ln511">    } else if (source == blackbox_trigger &amp;&amp; blackbox_trigger &gt; 0) {</a>
+<a name="ln512">        /* Should this log message result in the blackbox being dumped */</a>
+<a name="ln513">        if (cs-&gt;priority &lt;= LOG_ERR) {</a>
+<a name="ln514">            qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln515"> </a>
+<a name="ln516">        } else if (trace_blackbox) {</a>
+<a name="ln517">            char *key = crm_strdup_printf(&quot;%s:%d&quot;, cs-&gt;function, cs-&gt;lineno);</a>
+<a name="ln518"> </a>
+<a name="ln519">            if (strstr(trace_blackbox, key) != NULL) {</a>
+<a name="ln520">                qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln521">            }</a>
+<a name="ln522">            free(key);</a>
+<a name="ln523">        }</a>
+<a name="ln524"> </a>
+<a name="ln525">    } else if (source == QB_LOG_SYSLOG) {       /* No tracing to syslog */</a>
+<a name="ln526">        if (cs-&gt;priority &lt;= crm_log_priority &amp;&amp; cs-&gt;priority &lt;= crm_log_level) {</a>
+<a name="ln527">            qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln528">        }</a>
+<a name="ln529">        /* Log file tracing options... */</a>
+<a name="ln530">    } else if (cs-&gt;priority &lt;= crm_log_level) {</a>
+<a name="ln531">        qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln532">    } else if (trace_files &amp;&amp; strstr(trace_files, cs-&gt;filename) != NULL) {</a>
+<a name="ln533">        qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln534">    } else if (trace_fns &amp;&amp; strstr(trace_fns, cs-&gt;function) != NULL) {</a>
+<a name="ln535">        qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln536">    } else if (trace_fmts &amp;&amp; strstr(trace_fmts, cs-&gt;format) != NULL) {</a>
+<a name="ln537">        qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln538">    } else if (trace_tags</a>
+<a name="ln539">               &amp;&amp; cs-&gt;tags != 0</a>
+<a name="ln540">               &amp;&amp; cs-&gt;tags != crm_trace_nonlog &amp;&amp; g_quark_to_string(cs-&gt;tags) != NULL) {</a>
+<a name="ln541">        qb_bit_set(cs-&gt;targets, source);</a>
+<a name="ln542">    }</a>
+<a name="ln543">}</a>
+<a name="ln544"> </a>
+<a name="ln545">static void</a>
+<a name="ln546">crm_log_filter(struct qb_log_callsite *cs)</a>
+<a name="ln547">{</a>
+<a name="ln548">    int lpc = 0;</a>
+<a name="ln549">    static int need_init = 1;</a>
+<a name="ln550">    static const char *trace_fns = NULL;</a>
+<a name="ln551">    static const char *trace_tags = NULL;</a>
+<a name="ln552">    static const char *trace_fmts = NULL;</a>
+<a name="ln553">    static const char *trace_files = NULL;</a>
+<a name="ln554">    static const char *trace_blackbox = NULL;</a>
+<a name="ln555"> </a>
+<a name="ln556">    if (need_init) {</a>
+<a name="ln557">        need_init = 0;</a>
+<a name="ln558">        trace_fns = getenv(&quot;PCMK_trace_functions&quot;);</a>
+<a name="ln559">        trace_fmts = getenv(&quot;PCMK_trace_formats&quot;);</a>
+<a name="ln560">        trace_tags = getenv(&quot;PCMK_trace_tags&quot;);</a>
+<a name="ln561">        trace_files = getenv(&quot;PCMK_trace_files&quot;);</a>
+<a name="ln562">        trace_blackbox = getenv(&quot;PCMK_trace_blackbox&quot;);</a>
+<a name="ln563"> </a>
+<a name="ln564">        if (trace_tags != NULL) {</a>
+<a name="ln565">            uint32_t tag;</a>
+<a name="ln566">            char token[500];</a>
+<a name="ln567">            const char *offset = NULL;</a>
+<a name="ln568">            const char *next = trace_tags;</a>
+<a name="ln569"> </a>
+<a name="ln570">            do {</a>
+<a name="ln571">                offset = next;</a>
+<a name="ln572">                next = strchrnul(offset, ',');</a>
+<a name="ln573">                snprintf(token, 499, &quot;%.*s&quot;, (int)(next - offset), offset);</a>
+<a name="ln574"> </a>
+<a name="ln575">                tag = g_quark_from_string(token);</a>
+<a name="ln576">                crm_info(&quot;Created GQuark %u from token '%s' in '%s'&quot;, tag, token, trace_tags);</a>
+<a name="ln577"> </a>
+<a name="ln578">                if (next[0] != 0) {</a>
+<a name="ln579">                    next++;</a>
+<a name="ln580">                }</a>
+<a name="ln581"> </a>
+<a name="ln582">            } while (next != NULL &amp;&amp; next[0] != 0);</a>
+<a name="ln583">        }</a>
+<a name="ln584">    }</a>
+<a name="ln585"> </a>
+<a name="ln586">    cs-&gt;targets = 0;            /* Reset then find targets to enable */</a>
+<a name="ln587">    for (lpc = QB_LOG_SYSLOG; lpc &lt; QB_LOG_TARGET_MAX; lpc++) {</a>
+<a name="ln588">        crm_log_filter_source(lpc, trace_files, trace_fns, trace_fmts, trace_tags, trace_blackbox,</a>
+<a name="ln589">                              cs);</a>
+<a name="ln590">    }</a>
+<a name="ln591">}</a>
+<a name="ln592"> </a>
+<a name="ln593">gboolean</a>
+<a name="ln594">crm_is_callsite_active(struct qb_log_callsite *cs, uint8_t level, uint32_t tags)</a>
+<a name="ln595">{</a>
+<a name="ln596">    gboolean refilter = FALSE;</a>
+<a name="ln597"> </a>
+<a name="ln598">    if (cs == NULL) {</a>
+<a name="ln599">        return FALSE;</a>
+<a name="ln600">    }</a>
+<a name="ln601"> </a>
+<a name="ln602">    if (cs-&gt;priority != level) {</a>
+<a name="ln603">        cs-&gt;priority = level;</a>
+<a name="ln604">        refilter = TRUE;</a>
+<a name="ln605">    }</a>
+<a name="ln606"> </a>
+<a name="ln607">    if (cs-&gt;tags != tags) {</a>
+<a name="ln608">        cs-&gt;tags = tags;</a>
+<a name="ln609">        refilter = TRUE;</a>
+<a name="ln610">    }</a>
+<a name="ln611"> </a>
+<a name="ln612">    if (refilter) {</a>
+<a name="ln613">        crm_log_filter(cs);</a>
+<a name="ln614">    }</a>
+<a name="ln615"> </a>
+<a name="ln616">    if (cs-&gt;targets == 0) {</a>
+<a name="ln617">        return FALSE;</a>
+<a name="ln618">    }</a>
+<a name="ln619">    return TRUE;</a>
+<a name="ln620">}</a>
+<a name="ln621"> </a>
+<a name="ln622">void</a>
+<a name="ln623">crm_update_callsites(void)</a>
+<a name="ln624">{</a>
+<a name="ln625">    static gboolean log = TRUE;</a>
+<a name="ln626"> </a>
+<a name="ln627">    if (log) {</a>
+<a name="ln628">        log = FALSE;</a>
+<a name="ln629">        crm_debug</a>
+<a name="ln630">            (&quot;Enabling callsites based on priority=%d, files=%s, functions=%s, formats=%s, tags=%s&quot;,</a>
+<a name="ln631">             crm_log_level, getenv(&quot;PCMK_trace_files&quot;), getenv(&quot;PCMK_trace_functions&quot;),</a>
+<a name="ln632">             getenv(&quot;PCMK_trace_formats&quot;), getenv(&quot;PCMK_trace_tags&quot;));</a>
+<a name="ln633">    }</a>
+<a name="ln634">    qb_log_filter_fn_set(crm_log_filter);</a>
+<a name="ln635">}</a>
+<a name="ln636"> </a>
+<a name="ln637">static gboolean</a>
+<a name="ln638">crm_tracing_enabled(void)</a>
+<a name="ln639">{</a>
+<a name="ln640">    if (crm_log_level &gt;= LOG_TRACE) {</a>
+<a name="ln641">        return TRUE;</a>
+<a name="ln642">    } else if (getenv(&quot;PCMK_trace_files&quot;) || getenv(&quot;PCMK_trace_functions&quot;)</a>
+<a name="ln643">               || getenv(&quot;PCMK_trace_formats&quot;) || getenv(&quot;PCMK_trace_tags&quot;)) {</a>
+<a name="ln644">        return TRUE;</a>
+<a name="ln645">    }</a>
+<a name="ln646">    return FALSE;</a>
+<a name="ln647">}</a>
+<a name="ln648"> </a>
+<a name="ln649">static int</a>
+<a name="ln650">crm_priority2int(const char *name)</a>
+<a name="ln651">{</a>
+<a name="ln652">    struct syslog_names {</a>
+<a name="ln653">        const char *name;</a>
+<a name="ln654">        int priority;</a>
+<a name="ln655">    };</a>
+<a name="ln656">    static struct syslog_names p_names[] = {</a>
+<a name="ln657">        {&quot;emerg&quot;, LOG_EMERG},</a>
+<a name="ln658">        {&quot;alert&quot;, LOG_ALERT},</a>
+<a name="ln659">        {&quot;crit&quot;, LOG_CRIT},</a>
+<a name="ln660">        {&quot;error&quot;, LOG_ERR},</a>
+<a name="ln661">        {&quot;warning&quot;, LOG_WARNING},</a>
+<a name="ln662">        {&quot;notice&quot;, LOG_NOTICE},</a>
+<a name="ln663">        {&quot;info&quot;, LOG_INFO},</a>
+<a name="ln664">        {&quot;debug&quot;, LOG_DEBUG},</a>
+<a name="ln665">        {NULL, -1}</a>
+<a name="ln666">    };</a>
+<a name="ln667">    int lpc;</a>
+<a name="ln668"> </a>
+<a name="ln669">    for (lpc = 0; name != NULL &amp;&amp; p_names[lpc].name != NULL; lpc++) {</a>
+<a name="ln670">        if (crm_str_eq(p_names[lpc].name, name, TRUE)) {</a>
+<a name="ln671">            return p_names[lpc].priority;</a>
+<a name="ln672">        }</a>
+<a name="ln673">    }</a>
+<a name="ln674">    return crm_log_priority;</a>
+<a name="ln675">}</a>
+<a name="ln676"> </a>
+<a name="ln677"> </a>
+<a name="ln678">static void</a>
+<a name="ln679">crm_identity(const char *entity, int argc, char **argv) </a>
+<a name="ln680">{</a>
+<a name="ln681">    if(crm_system_name != NULL) {</a>
+<a name="ln682">        /* Nothing to do */</a>
+<a name="ln683"> </a>
+<a name="ln684">    } else if (entity) {</a>
+<a name="ln685">        free(crm_system_name);</a>
+<a name="ln686">        crm_system_name = strdup(entity);</a>
+<a name="ln687"> </a>
+<a name="ln688">    } else if (argc &gt; 0 &amp;&amp; argv != NULL) {</a>
+<a name="ln689">        char *mutable = strdup(argv[0]);</a>
+<a name="ln690">        char *modified = basename(mutable);</a>
+<a name="ln691"> </a>
+<a name="ln692">        if (strstr(modified, &quot;lt-&quot;) == modified) {</a>
+<a name="ln693">            modified += 3;</a>
+<a name="ln694">        }</a>
+<a name="ln695"> </a>
+<a name="ln696">        free(crm_system_name);</a>
+<a name="ln697">        crm_system_name = strdup(modified);</a>
+<a name="ln698">        free(mutable);</a>
+<a name="ln699"> </a>
+<a name="ln700">    } else if (crm_system_name == NULL) {</a>
+<a name="ln701">        crm_system_name = strdup(&quot;Unknown&quot;);</a>
+<a name="ln702">    }</a>
+<a name="ln703"> </a>
+<a name="ln704">    setenv(&quot;PCMK_service&quot;, crm_system_name, 1);</a>
+<a name="ln705">}</a>
+<a name="ln706"> </a>
+<a name="ln707"> </a>
+<a name="ln708">void</a>
+<a name="ln709">crm_log_preinit(const char *entity, int argc, char **argv) </a>
+<a name="ln710">{</a>
+<a name="ln711">    /* Configure libqb logging with nothing turned on */</a>
+<a name="ln712"> </a>
+<a name="ln713">    int lpc = 0;</a>
+<a name="ln714">    int32_t qb_facility = 0;</a>
+<a name="ln715"> </a>
+<a name="ln716">    static bool have_logging = FALSE;</a>
+<a name="ln717"> </a>
+<a name="ln718">    if(have_logging == FALSE) {</a>
+<a name="ln719">        have_logging = TRUE;</a>
+<a name="ln720"> </a>
+<a name="ln721">        crm_xml_init(); /* Sets buffer allocation strategy */</a>
+<a name="ln722"> </a>
+<a name="ln723">        if (crm_trace_nonlog == 0) {</a>
+<a name="ln724">            crm_trace_nonlog = g_quark_from_static_string(&quot;Pacemaker non-logging tracepoint&quot;);</a>
+<a name="ln725">        }</a>
+<a name="ln726"> </a>
+<a name="ln727">        umask(S_IWGRP | S_IWOTH | S_IROTH);</a>
+<a name="ln728"> </a>
+<a name="ln729">        /* Redirect messages from glib functions to our handler */</a>
+<a name="ln730">#ifdef HAVE_G_LOG_SET_DEFAULT_HANDLER</a>
+<a name="ln731">        glib_log_default = g_log_set_default_handler(crm_glib_handler, NULL);</a>
+<a name="ln732">#endif</a>
+<a name="ln733"> </a>
+<a name="ln734">        /* and for good measure... - this enum is a bit field (!) */</a>
+<a name="ln735">        g_log_set_always_fatal((GLogLevelFlags) 0); /*value out of range */</a>
+<a name="ln736"> </a>
+<a name="ln737">        /* Who do we log as */</a>
+<a name="ln738">        crm_identity(entity, argc, argv);</a>
+<a name="ln739"> </a>
+<a name="ln740">        qb_facility = qb_log_facility2int(&quot;local0&quot;);</a>
+<a name="ln741">        qb_log_init(crm_system_name, qb_facility, LOG_ERR);</a>
+<a name="ln742">        crm_log_level = LOG_CRIT;</a>
+<a name="ln743"> </a>
+<a name="ln744">        /* Nuke any syslog activity until it's asked for */</a>
+<a name="ln745">        qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln746"> </a>
+<a name="ln747">        /* Set format strings and disable threading</a>
+<a name="ln748">         * Pacemaker and threads do not mix well (due to the amount of forking)</a>
+<a name="ln749">         */</a>
+<a name="ln750">        qb_log_tags_stringify_fn_set(crm_quark_to_string);</a>
+<a name="ln751">        for (lpc = QB_LOG_SYSLOG; lpc &lt; QB_LOG_TARGET_MAX; lpc++) {</a>
+<a name="ln752">            qb_log_ctl(lpc, QB_LOG_CONF_THREADED, QB_FALSE);</a>
+<a name="ln753">            set_format_string(lpc, crm_system_name);</a>
+<a name="ln754">        }</a>
+<a name="ln755">    }</a>
+<a name="ln756">}</a>
+<a name="ln757"> </a>
+<a name="ln758">gboolean</a>
+<a name="ln759">crm_log_init(const char *entity, uint8_t level, gboolean daemon, gboolean to_stderr,</a>
+<a name="ln760">             int argc, char **argv, gboolean quiet)</a>
+<a name="ln761">{</a>
+<a name="ln762">    const char *syslog_priority = NULL;</a>
+<a name="ln763">    const char *logfile = daemon_option(&quot;logfile&quot;);</a>
+<a name="ln764">    const char *facility = daemon_option(&quot;logfacility&quot;);</a>
+<a name="ln765">    const char *f_copy = facility;</a>
+<a name="ln766"> </a>
+<a name="ln767">    crm_is_daemon = daemon;</a>
+<a name="ln768">    crm_log_preinit(entity, argc, argv);</a>
+<a name="ln769"> </a>
+<a name="ln770">    if(level &gt; crm_log_level) {</a>
+<a name="ln771">        crm_log_level = level;</a>
+<a name="ln772">    }</a>
+<a name="ln773"> </a>
+<a name="ln774">    /* Should we log to syslog */</a>
+<a name="ln775">    if (facility == NULL) {</a>
+<a name="ln776">        if(crm_is_daemon) {</a>
+<a name="ln777">            facility = &quot;daemon&quot;;</a>
+<a name="ln778">        } else {</a>
+<a name="ln779">            facility = &quot;none&quot;;</a>
+<a name="ln780">        }</a>
+<a name="ln781">        set_daemon_option(&quot;logfacility&quot;, facility);</a>
+<a name="ln782">    }</a>
+<a name="ln783"> </a>
+<a name="ln784">    if (safe_str_eq(facility, &quot;none&quot;)) {</a>
+<a name="ln785">        quiet = TRUE;</a>
+<a name="ln786"> </a>
+<a name="ln787"> </a>
+<a name="ln788">    } else {</a>
+<a name="ln789">        qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_FACILITY, qb_log_facility2int(facility));</a>
+<a name="ln790">    }</a>
+<a name="ln791"> </a>
+<a name="ln792">    if (daemon_option_enabled(crm_system_name, &quot;debug&quot;)) {</a>
+<a name="ln793">        /* Override the default setting */</a>
+<a name="ln794">        crm_log_level = LOG_DEBUG;</a>
+<a name="ln795">    }</a>
+<a name="ln796"> </a>
+<a name="ln797">    /* What lower threshold do we have for sending to syslog */</a>
+<a name="ln798">    syslog_priority = daemon_option(&quot;logpriority&quot;);</a>
+<a name="ln799">    if(syslog_priority) {</a>
+<a name="ln800">        int priority = crm_priority2int(syslog_priority);</a>
+<a name="ln801">        crm_log_priority = priority;</a>
+<a name="ln802">	qb_log_filter_ctl(QB_LOG_SYSLOG, QB_LOG_FILTER_ADD, QB_LOG_FILTER_FILE, &quot;*&quot;, priority);</a>
+<a name="ln803">    } else {</a>
+<a name="ln804">	qb_log_filter_ctl(QB_LOG_SYSLOG, QB_LOG_FILTER_ADD, QB_LOG_FILTER_FILE, &quot;*&quot;, LOG_NOTICE);</a>
+<a name="ln805">    }</a>
+<a name="ln806"> </a>
+<a name="ln807">    if (!quiet) {</a>
+<a name="ln808">        /* Nuke any syslog activity */</a>
+<a name="ln809">        qb_log_ctl(QB_LOG_SYSLOG, QB_LOG_CONF_ENABLED, QB_TRUE);</a>
+<a name="ln810">    }</a>
+<a name="ln811"> </a>
+<a name="ln812">    /* Should we log to stderr */ </a>
+<a name="ln813">    if (daemon_option_enabled(crm_system_name, &quot;stderr&quot;)) {</a>
+<a name="ln814">        /* Override the default setting */</a>
+<a name="ln815">        to_stderr = TRUE;</a>
+<a name="ln816">    }</a>
+<a name="ln817">    crm_enable_stderr(to_stderr);</a>
+<a name="ln818"> </a>
+<a name="ln819">    /* Should we log to a file */</a>
+<a name="ln820">    if (safe_str_eq(&quot;none&quot;, logfile)) {</a>
+<a name="ln821">        /* No soup^Hlogs for you! */</a>
+<a name="ln822">    } else if(crm_is_daemon) {</a>
+<a name="ln823">        /* The daemons always get a log file, unless explicitly set to configured 'none' */</a>
+<a name="ln824">        crm_add_logfile(logfile);</a>
+<a name="ln825">    } else if(logfile) {</a>
+<a name="ln826">        crm_add_logfile(logfile);</a>
+<a name="ln827">    }</a>
+<a name="ln828"> </a>
+<a name="ln829">    if (crm_is_daemon &amp;&amp; daemon_option_enabled(crm_system_name, &quot;blackbox&quot;)) {</a>
+<a name="ln830">        crm_enable_blackbox(0);</a>
+<a name="ln831">    }</a>
+<a name="ln832"> </a>
+<a name="ln833">    /* Summary */</a>
+<a name="ln834">    crm_trace(&quot;Quiet: %d, facility %s&quot;, quiet, f_copy);</a>
+<a name="ln835">    daemon_option(&quot;logfile&quot;);</a>
+<a name="ln836">    daemon_option(&quot;logfacility&quot;);</a>
+<a name="ln837"> </a>
+<a name="ln838">    crm_update_callsites();</a>
+<a name="ln839"> </a>
+<a name="ln840">    /* Ok, now we can start logging... */</a>
+<a name="ln841">    if (quiet == FALSE &amp;&amp; crm_is_daemon == FALSE) {</a>
+<a name="ln842">        crm_log_args(argc, argv);</a>
+<a name="ln843">    }</a>
+<a name="ln844"> </a>
+<a name="ln845">    if (crm_is_daemon) {</a>
+<a name="ln846">        const char *user = getenv(&quot;USER&quot;);</a>
+<a name="ln847"> </a>
+<a name="ln848">        if (user != NULL &amp;&amp; safe_str_neq(user, &quot;root&quot;) &amp;&amp; safe_str_neq(user, CRM_DAEMON_USER)) {</a>
+<a name="ln849">            crm_trace(&quot;Not switching to corefile directory for %s&quot;, user);</a>
+<a name="ln850">            crm_is_daemon = FALSE;</a>
+<a name="ln851">        }</a>
+<a name="ln852">    }</a>
+<a name="ln853"> </a>
+<a name="ln854">    if (crm_is_daemon) {</a>
+<a name="ln855">        int user = getuid();</a>
+<a name="ln856">        const char *base = CRM_CORE_DIR;</a>
+<a name="ln857">        struct passwd *pwent = getpwuid(user);</a>
+<a name="ln858"> </a>
+<a name="ln859">        if (pwent == NULL) {</a>
+<a name="ln860">            crm_perror(LOG_ERR, &quot;Cannot get name for uid: %d&quot;, user);</a>
+<a name="ln861"> </a>
+<a name="ln862">        } else if (safe_str_neq(pwent-&gt;pw_name, &quot;root&quot;)</a>
+<a name="ln863">                   &amp;&amp; safe_str_neq(pwent-&gt;pw_name, CRM_DAEMON_USER)) {</a>
+<a name="ln864">            crm_trace(&quot;Don't change active directory for regular user: %s&quot;, pwent-&gt;pw_name);</a>
+<a name="ln865"> </a>
+<a name="ln866">        } else if (chdir(base) &lt; 0) {</a>
+<a name="ln867">            crm_perror(LOG_INFO, &quot;Cannot change active directory to %s&quot;, base);</a>
+<a name="ln868"> </a>
+<a name="ln869">        } else {</a>
+<a name="ln870">            crm_info(&quot;Changed active directory to %s&quot;, base);</a>
+<a name="ln871">#if 0</a>
+<a name="ln872">            {</a>
+<a name="ln873">                char path[512];</a>
+<a name="ln874"> </a>
+<a name="ln875">                snprintf(path, 512, &quot;%s-%d&quot;, crm_system_name, getpid());</a>
+<a name="ln876">                mkdir(path, 0750);</a>
+<a name="ln877">                chdir(path);</a>
+<a name="ln878">                crm_info(&quot;Changed active directory to %s/%s/%s&quot;, base, pwent-&gt;pw_name, path);</a>
+<a name="ln879">            }</a>
+<a name="ln880">#endif</a>
+<a name="ln881">        }</a>
+<a name="ln882"> </a>
+<a name="ln883">        /* Original meanings from signal(7)</a>
+<a name="ln884">         *</a>
+<a name="ln885">         * Signal       Value     Action   Comment</a>
+<a name="ln886">         * SIGTRAP        5        Core    Trace/breakpoint trap</a>
+<a name="ln887">         * SIGUSR1     30,10,16    Term    User-defined signal 1</a>
+<a name="ln888">         * SIGUSR2     31,12,17    Term    User-defined signal 2</a>
+<a name="ln889">         *</a>
+<a name="ln890">         * Our usage is as similar as possible</a>
+<a name="ln891">         */</a>
+<a name="ln892">        mainloop_add_signal(SIGUSR1, crm_enable_blackbox);</a>
+<a name="ln893">        mainloop_add_signal(SIGUSR2, crm_disable_blackbox);</a>
+<a name="ln894">        mainloop_add_signal(SIGTRAP, crm_trigger_blackbox);</a>
+<a name="ln895">    }</a>
+<a name="ln896"> </a>
+<a name="ln897">    return TRUE;</a>
+<a name="ln898">}</a>
+<a name="ln899"> </a>
+<a name="ln900">/* returns the old value */</a>
+<a name="ln901">unsigned int</a>
+<a name="ln902">set_crm_log_level(unsigned int level)</a>
+<a name="ln903">{</a>
+<a name="ln904">    unsigned int old = crm_log_level;</a>
+<a name="ln905"> </a>
+<a name="ln906">    crm_log_level = level;</a>
+<a name="ln907">    crm_update_callsites();</a>
+<a name="ln908">    crm_trace(&quot;New log level: %d&quot;, level);</a>
+<a name="ln909">    return old;</a>
+<a name="ln910">}</a>
+<a name="ln911"> </a>
+<a name="ln912">void</a>
+<a name="ln913">crm_enable_stderr(int enable)</a>
+<a name="ln914">{</a>
+<a name="ln915">    if (enable &amp;&amp; qb_log_ctl(QB_LOG_STDERR, QB_LOG_CONF_STATE_GET, 0) != QB_LOG_STATE_ENABLED) {</a>
+<a name="ln916">        qb_log_ctl(QB_LOG_STDERR, QB_LOG_CONF_ENABLED, QB_TRUE);</a>
+<a name="ln917">        crm_update_callsites();</a>
+<a name="ln918"> </a>
+<a name="ln919">    } else if (enable == FALSE) {</a>
+<a name="ln920">        qb_log_ctl(QB_LOG_STDERR, QB_LOG_CONF_ENABLED, QB_FALSE);</a>
+<a name="ln921">    }</a>
+<a name="ln922">}</a>
+<a name="ln923"> </a>
+<a name="ln924">void</a>
+<a name="ln925">crm_bump_log_level(int argc, char **argv)</a>
+<a name="ln926">{</a>
+<a name="ln927">    static int args = TRUE;</a>
+<a name="ln928">    int level = crm_log_level;</a>
+<a name="ln929"> </a>
+<a name="ln930">    if (args &amp;&amp; argc &gt; 1) {</a>
+<a name="ln931">        crm_log_args(argc, argv);</a>
+<a name="ln932">    }</a>
+<a name="ln933"> </a>
+<a name="ln934">    if (qb_log_ctl(QB_LOG_STDERR, QB_LOG_CONF_STATE_GET, 0) == QB_LOG_STATE_ENABLED) {</a>
+<a name="ln935">        set_crm_log_level(level + 1);</a>
+<a name="ln936">    }</a>
+<a name="ln937"> </a>
+<a name="ln938">    /* Enable after potentially logging the argstring, not before */</a>
+<a name="ln939">    crm_enable_stderr(TRUE);</a>
+<a name="ln940">}</a>
+<a name="ln941"> </a>
+<a name="ln942">unsigned int</a>
+<a name="ln943">get_crm_log_level(void)</a>
+<a name="ln944">{</a>
+<a name="ln945">    return crm_log_level;</a>
+<a name="ln946">}</a>
+<a name="ln947"> </a>
+<a name="ln948">#define ARGS_FMT &quot;Invoked: %s&quot;</a>
+<a name="ln949">void</a>
+<a name="ln950">crm_log_args(int argc, char **argv)</a>
+<a name="ln951">{</a>
+<a name="ln952">    int lpc = 0;</a>
+<a name="ln953">    int len = 0;</a>
+<a name="ln954">    int existing_len = 0;</a>
+<a name="ln955">    int line = __LINE__;</a>
+<a name="ln956">    static int logged = 0;</a>
+<a name="ln957"> </a>
+<a name="ln958">    char *arg_string = NULL;</a>
+<a name="ln959"> </a>
+<a name="ln960">    if (argc == 0 || argv == NULL || logged) {</a>
+<a name="ln961">        return;</a>
+<a name="ln962">    }</a>
+<a name="ln963"> </a>
+<a name="ln964">    logged = 1;</a>
+<a name="ln965"> </a>
+<a name="ln966">    for (; lpc &lt; argc; lpc++) {</a>
+<a name="ln967">        if (argv[lpc] == NULL) {</a>
+<a name="ln968">            break;</a>
+<a name="ln969">        }</a>
+<a name="ln970"> </a>
+<a name="ln971">        len = 2 + strlen(argv[lpc]);    /* +1 space, +1 EOS */</a>
+<a name="ln972">        arg_string = realloc_safe(arg_string, len + existing_len);</a>
+<a name="ln973">        existing_len += sprintf(arg_string + existing_len, &quot;%s &quot;, argv[lpc]);</a>
+<a name="ln974">    }</a>
+<a name="ln975"> </a>
+<a name="ln976">    qb_log_from_external_source(__func__, __FILE__, ARGS_FMT, LOG_NOTICE, line, 0, arg_string);</a>
+<a name="ln977"> </a>
+<a name="ln978">    free(arg_string);</a>
+<a name="ln979">}</a>
+<a name="ln980"> </a>
+<a name="ln981">const char *</a>
+<a name="ln982">pcmk_errorname(int rc) </a>
+<a name="ln983">{</a>
+<a name="ln984">    int error = ABS(rc);</a>
+<a name="ln985"> </a>
+<a name="ln986">    switch (error) {</a>
+<a name="ln987">        case E2BIG: return &quot;E2BIG&quot;;</a>
+<a name="ln988">        case EACCES: return &quot;EACCES&quot;;</a>
+<a name="ln989">        case EADDRINUSE: return &quot;EADDRINUSE&quot;;</a>
+<a name="ln990">        case EADDRNOTAVAIL: return &quot;EADDRNOTAVAIL&quot;;</a>
+<a name="ln991">        case EAFNOSUPPORT: return &quot;EAFNOSUPPORT&quot;;</a>
+<a name="ln992">        case EAGAIN: return &quot;EAGAIN&quot;;</a>
+<a name="ln993">        case EALREADY: return &quot;EALREADY&quot;;</a>
+<a name="ln994">        case EBADF: return &quot;EBADF&quot;;</a>
+<a name="ln995">        case EBADMSG: return &quot;EBADMSG&quot;;</a>
+<a name="ln996">        case EBUSY: return &quot;EBUSY&quot;;</a>
+<a name="ln997">        case ECANCELED: return &quot;ECANCELED&quot;;</a>
+<a name="ln998">        case ECHILD: return &quot;ECHILD&quot;;</a>
+<a name="ln999">        case ECOMM: return &quot;ECOMM&quot;;</a>
+<a name="ln1000">        case ECONNABORTED: return &quot;ECONNABORTED&quot;;</a>
+<a name="ln1001">        case ECONNREFUSED: return &quot;ECONNREFUSED&quot;;</a>
+<a name="ln1002">        case ECONNRESET: return &quot;ECONNRESET&quot;;</a>
+<a name="ln1003">        /* case EDEADLK: return &quot;EDEADLK&quot;; */</a>
+<a name="ln1004">        case EDESTADDRREQ: return &quot;EDESTADDRREQ&quot;;</a>
+<a name="ln1005">        case EDOM: return &quot;EDOM&quot;;</a>
+<a name="ln1006">        case EDQUOT: return &quot;EDQUOT&quot;;</a>
+<a name="ln1007">        case EEXIST: return &quot;EEXIST&quot;;</a>
+<a name="ln1008">        case EFAULT: return &quot;EFAULT&quot;;</a>
+<a name="ln1009">        case EFBIG: return &quot;EFBIG&quot;;</a>
+<a name="ln1010">        case EHOSTDOWN: return &quot;EHOSTDOWN&quot;;</a>
+<a name="ln1011">        case EHOSTUNREACH: return &quot;EHOSTUNREACH&quot;;</a>
+<a name="ln1012">        case EIDRM: return &quot;EIDRM&quot;;</a>
+<a name="ln1013">        case EILSEQ: return &quot;EILSEQ&quot;;</a>
+<a name="ln1014">        case EINPROGRESS: return &quot;EINPROGRESS&quot;;</a>
+<a name="ln1015">        case EINTR: return &quot;EINTR&quot;;</a>
+<a name="ln1016">        case EINVAL: return &quot;EINVAL&quot;;</a>
+<a name="ln1017">        case EIO: return &quot;EIO&quot;;</a>
+<a name="ln1018">        case EISCONN: return &quot;EISCONN&quot;;</a>
+<a name="ln1019">        case EISDIR: return &quot;EISDIR&quot;;</a>
+<a name="ln1020">        case ELIBACC: return &quot;ELIBACC&quot;;</a>
+<a name="ln1021">        case ELOOP: return &quot;ELOOP&quot;;</a>
+<a name="ln1022">        case EMFILE: return &quot;EMFILE&quot;;</a>
+<a name="ln1023">        case EMLINK: return &quot;EMLINK&quot;;</a>
+<a name="ln1024">        case EMSGSIZE: return &quot;EMSGSIZE&quot;;</a>
+<a name="ln1025">        case EMULTIHOP: return &quot;EMULTIHOP&quot;;</a>
+<a name="ln1026">        case ENAMETOOLONG: return &quot;ENAMETOOLONG&quot;;</a>
+<a name="ln1027">        case ENETDOWN: return &quot;ENETDOWN&quot;;</a>
+<a name="ln1028">        case ENETRESET: return &quot;ENETRESET&quot;;</a>
+<a name="ln1029">        case ENETUNREACH: return &quot;ENETUNREACH&quot;;</a>
+<a name="ln1030">        case ENFILE: return &quot;ENFILE&quot;;</a>
+<a name="ln1031">        case ENOBUFS: return &quot;ENOBUFS&quot;;</a>
+<a name="ln1032">        case ENODATA: return &quot;ENODATA&quot;;</a>
+<a name="ln1033">        case ENODEV: return &quot;ENODEV&quot;;</a>
+<a name="ln1034">        case ENOENT: return &quot;ENOENT&quot;;</a>
+<a name="ln1035">        case ENOEXEC: return &quot;ENOEXEC&quot;;</a>
+<a name="ln1036">        case ENOKEY: return &quot;ENOKEY&quot;;</a>
+<a name="ln1037">        case ENOLCK: return &quot;ENOLCK&quot;;</a>
+<a name="ln1038">        case ENOLINK: return &quot;ENOLINK&quot;;</a>
+<a name="ln1039">        case ENOMEM: return &quot;ENOMEM&quot;;</a>
+<a name="ln1040">        case ENOMSG: return &quot;ENOMSG&quot;;</a>
+<a name="ln1041">        case ENOPROTOOPT: return &quot;ENOPROTOOPT&quot;;</a>
+<a name="ln1042">        case ENOSPC: return &quot;ENOSPC&quot;;</a>
+<a name="ln1043">        case ENOSR: return &quot;ENOSR&quot;;</a>
+<a name="ln1044">        case ENOSTR: return &quot;ENOSTR&quot;;</a>
+<a name="ln1045">        case ENOSYS: return &quot;ENOSYS&quot;;</a>
+<a name="ln1046">        case ENOTBLK: return &quot;ENOTBLK&quot;;</a>
+<a name="ln1047">        case ENOTCONN: return &quot;ENOTCONN&quot;;</a>
+<a name="ln1048">        case ENOTDIR: return &quot;ENOTDIR&quot;;</a>
+<a name="ln1049">        case ENOTEMPTY: return &quot;ENOTEMPTY&quot;;</a>
+<a name="ln1050">        case ENOTSOCK: return &quot;ENOTSOCK&quot;;</a>
+<a name="ln1051">        /* case ENOTSUP: return &quot;ENOTSUP&quot;; */</a>
+<a name="ln1052">        case ENOTTY: return &quot;ENOTTY&quot;;</a>
+<a name="ln1053">        case ENOTUNIQ: return &quot;ENOTUNIQ&quot;;</a>
+<a name="ln1054">        case ENXIO: return &quot;ENXIO&quot;;</a>
+<a name="ln1055">        case EOPNOTSUPP: return &quot;EOPNOTSUPP&quot;;</a>
+<a name="ln1056">        case EOVERFLOW: return &quot;EOVERFLOW&quot;;</a>
+<a name="ln1057">        case EPERM: return &quot;EPERM&quot;;</a>
+<a name="ln1058">        case EPFNOSUPPORT: return &quot;EPFNOSUPPORT&quot;;</a>
+<a name="ln1059">        case EPIPE: return &quot;EPIPE&quot;;</a>
+<a name="ln1060">        case EPROTO: return &quot;EPROTO&quot;;</a>
+<a name="ln1061">        case EPROTONOSUPPORT: return &quot;EPROTONOSUPPORT&quot;;</a>
+<a name="ln1062">        case EPROTOTYPE: return &quot;EPROTOTYPE&quot;;</a>
+<a name="ln1063">        case ERANGE: return &quot;ERANGE&quot;;</a>
+<a name="ln1064">        case EREMOTE: return &quot;EREMOTE&quot;;</a>
+<a name="ln1065">        case EREMOTEIO: return &quot;EREMOTEIO&quot;;</a>
+<a name="ln1066"> </a>
+<a name="ln1067">        case EROFS: return &quot;EROFS&quot;;</a>
+<a name="ln1068">        case ESHUTDOWN: return &quot;ESHUTDOWN&quot;;</a>
+<a name="ln1069">        case ESPIPE: return &quot;ESPIPE&quot;;</a>
+<a name="ln1070">        case ESOCKTNOSUPPORT: return &quot;ESOCKTNOSUPPORT&quot;;</a>
+<a name="ln1071">        case ESRCH: return &quot;ESRCH&quot;;</a>
+<a name="ln1072">        case ESTALE: return &quot;ESTALE&quot;;</a>
+<a name="ln1073">        case ETIME: return &quot;ETIME&quot;;</a>
+<a name="ln1074">        case ETIMEDOUT: return &quot;ETIMEDOUT&quot;;</a>
+<a name="ln1075">        case ETXTBSY: return &quot;ETXTBSY&quot;;</a>
+<a name="ln1076">        case EUNATCH: return &quot;EUNATCH&quot;;</a>
+<a name="ln1077">        case EUSERS: return &quot;EUSERS&quot;;</a>
+<a name="ln1078">        /* case EWOULDBLOCK: return &quot;EWOULDBLOCK&quot;; */</a>
+<a name="ln1079">        case EXDEV: return &quot;EXDEV&quot;;</a>
+<a name="ln1080">            </a>
+<a name="ln1081">#ifdef EBADE</a>
+<a name="ln1082">            /* Not available on OSX */</a>
+<a name="ln1083">        case EBADE: return &quot;EBADE&quot;;</a>
+<a name="ln1084">        case EBADFD: return &quot;EBADFD&quot;;</a>
+<a name="ln1085">        case EBADSLT: return &quot;EBADSLT&quot;;</a>
+<a name="ln1086">        case EDEADLOCK: return &quot;EDEADLOCK&quot;;</a>
+<a name="ln1087">        case EBADR: return &quot;EBADR&quot;;</a>
+<a name="ln1088">        case EBADRQC: return &quot;EBADRQC&quot;;</a>
+<a name="ln1089">        case ECHRNG: return &quot;ECHRNG&quot;;</a>
+<a name="ln1090">#ifdef EISNAM /* Not available on Illumos/Solaris */</a>
+<a name="ln1091">        case EISNAM: return &quot;EISNAM&quot;;</a>
+<a name="ln1092">        case EKEYEXPIRED: return &quot;EKEYEXPIRED&quot;;</a>
+<a name="ln1093">        case EKEYREJECTED: return &quot;EKEYREJECTED&quot;;</a>
+<a name="ln1094">        case EKEYREVOKED: return &quot;EKEYREVOKED&quot;;</a>
+<a name="ln1095">#endif</a>
+<a name="ln1096">        case EL2HLT: return &quot;EL2HLT&quot;;</a>
+<a name="ln1097">        case EL2NSYNC: return &quot;EL2NSYNC&quot;;</a>
+<a name="ln1098">        case EL3HLT: return &quot;EL3HLT&quot;;</a>
+<a name="ln1099">        case EL3RST: return &quot;EL3RST&quot;;</a>
+<a name="ln1100">        case ELIBBAD: return &quot;ELIBBAD&quot;;</a>
+<a name="ln1101">        case ELIBMAX: return &quot;ELIBMAX&quot;;</a>
+<a name="ln1102">        case ELIBSCN: return &quot;ELIBSCN&quot;;</a>
+<a name="ln1103">        case ELIBEXEC: return &quot;ELIBEXEC&quot;;</a>
+<a name="ln1104">#ifdef ENOMEDIUM  /* Not available on Illumos/Solaris */</a>
+<a name="ln1105">        case ENOMEDIUM: return &quot;ENOMEDIUM&quot;;</a>
+<a name="ln1106">        case EMEDIUMTYPE: return &quot;EMEDIUMTYPE&quot;;</a>
+<a name="ln1107">#endif</a>
+<a name="ln1108">        case ENONET: return &quot;ENONET&quot;;</a>
+<a name="ln1109">        case ENOPKG: return &quot;ENOPKG&quot;;</a>
+<a name="ln1110">        case EREMCHG: return &quot;EREMCHG&quot;;</a>
+<a name="ln1111">        case ERESTART: return &quot;ERESTART&quot;;</a>
+<a name="ln1112">        case ESTRPIPE: return &quot;ESTRPIPE&quot;;</a>
+<a name="ln1113">#ifdef EUCLEAN  /* Not available on Illumos/Solaris */</a>
+<a name="ln1114">        case EUCLEAN: return &quot;EUCLEAN&quot;;</a>
+<a name="ln1115">#endif</a>
+<a name="ln1116">        case EXFULL: return &quot;EXFULL&quot;;</a>
+<a name="ln1117">#endif</a>
+<a name="ln1118"> </a>
+<a name="ln1119">        case pcmk_err_generic: return &quot;pcmk_err_generic&quot;;</a>
+<a name="ln1120">        case pcmk_err_no_quorum: return &quot;pcmk_err_no_quorum&quot;;</a>
+<a name="ln1121">        case pcmk_err_schema_validation: return &quot;pcmk_err_schema_validation&quot;;</a>
+<a name="ln1122">        case pcmk_err_transform_failed: return &quot;pcmk_err_transform_failed&quot;;</a>
+<a name="ln1123">        case pcmk_err_old_data: return &quot;pcmk_err_old_data&quot;;</a>
+<a name="ln1124">        case pcmk_err_diff_failed: return &quot;pcmk_err_diff_failed&quot;;</a>
+<a name="ln1125">        case pcmk_err_diff_resync: return &quot;pcmk_err_diff_resync&quot;;</a>
+<a name="ln1126">        case pcmk_err_cib_modified: return &quot;pcmk_err_cib_modified&quot;;</a>
+<a name="ln1127">        case pcmk_err_cib_backup: return &quot;pcmk_err_cib_backup&quot;;</a>
+<a name="ln1128">        case pcmk_err_cib_save: return &quot;pcmk_err_cib_save&quot;;</a>
+<a name="ln1129">        case pcmk_err_cib_corrupt: return &quot;pcmk_err_cib_corrupt&quot;;</a>
+<a name="ln1130">    }</a>
+<a name="ln1131">    return &quot;Unknown&quot;;</a>
+<a name="ln1132">}</a>
+<a name="ln1133"> </a>
+<a name="ln1134"> </a>
+<a name="ln1135">const char *</a>
+<a name="ln1136">pcmk_strerror(int rc)</a>
+<a name="ln1137">{</a>
+<a name="ln1138">    int error = abs(rc);</a>
+<a name="ln1139"> </a>
+<a name="ln1140">    if (error == 0) {</a>
+<a name="ln1141">        return &quot;OK&quot;;</a>
+<a name="ln1142">    } else if (error &lt; PCMK_ERROR_OFFSET) {</a>
+<a name="ln1143">        return strerror(error);</a>
+<a name="ln1144">    }</a>
+<a name="ln1145"> </a>
+<a name="ln1146">    switch (error) {</a>
+<a name="ln1147">        case pcmk_err_generic:</a>
+<a name="ln1148">            return &quot;Generic Pacemaker error&quot;;</a>
+<a name="ln1149">        case pcmk_err_no_quorum:</a>
+<a name="ln1150">            return &quot;Operation requires quorum&quot;;</a>
+<a name="ln1151">        case pcmk_err_schema_validation:</a>
+<a name="ln1152">            return &quot;Update does not conform to the configured schema&quot;;</a>
+<a name="ln1153">        case pcmk_err_transform_failed:</a>
+<a name="ln1154">            return &quot;Schema transform failed&quot;;</a>
+<a name="ln1155">        case pcmk_err_old_data:</a>
+<a name="ln1156">            return &quot;Update was older than existing configuration&quot;;</a>
+<a name="ln1157">        case pcmk_err_diff_failed:</a>
+<a name="ln1158">            return &quot;Application of an update diff failed&quot;;</a>
+<a name="ln1159">        case pcmk_err_diff_resync:</a>
+<a name="ln1160">            return &quot;Application of an update diff failed, requesting a full refresh&quot;;</a>
+<a name="ln1161">        case pcmk_err_cib_modified:</a>
+<a name="ln1162">            return &quot;The on-disk configuration was manually modified&quot;;</a>
+<a name="ln1163">        case pcmk_err_cib_backup:</a>
+<a name="ln1164">            return &quot;Could not archive the previous configuration&quot;;</a>
+<a name="ln1165">        case pcmk_err_cib_save:</a>
+<a name="ln1166">            return &quot;Could not save the new configuration to disk&quot;;</a>
+<a name="ln1167">        case pcmk_err_cib_corrupt:</a>
+<a name="ln1168">            return &quot;Could not parse on-disk configuration&quot;;</a>
+<a name="ln1169"> </a>
+<a name="ln1170">        case pcmk_err_schema_unchanged:</a>
+<a name="ln1171">            return &quot;Schema is already the latest available&quot;;</a>
+<a name="ln1172"> </a>
+<a name="ln1173">            /* The following cases will only be hit on systems for which they are non-standard */</a>
+<a name="ln1174">            /* coverity[dead_error_condition] False positive on non-Linux */</a>
+<a name="ln1175">        case ENOTUNIQ:</a>
+<a name="ln1176">            return &quot;Name not unique on network&quot;;</a>
+<a name="ln1177">            /* coverity[dead_error_condition] False positive on non-Linux */</a>
+<a name="ln1178">        case ECOMM:</a>
+<a name="ln1179">            return &quot;Communication error on send&quot;;</a>
+<a name="ln1180">            /* coverity[dead_error_condition] False positive on non-Linux */</a>
+<a name="ln1181">        case ELIBACC:</a>
+<a name="ln1182">            return &quot;Can not access a needed shared library&quot;;</a>
+<a name="ln1183">            /* coverity[dead_error_condition] False positive on non-Linux */</a>
+<a name="ln1184">        case EREMOTEIO:</a>
+<a name="ln1185">            return &quot;Remote I/O error&quot;;</a>
+<a name="ln1186">            /* coverity[dead_error_condition] False positive on non-Linux */</a>
+<a name="ln1187">        case EUNATCH:</a>
+<a name="ln1188">            return &quot;Protocol driver not attached&quot;;</a>
+<a name="ln1189">            /* coverity[dead_error_condition] False positive on non-Linux */</a>
+<a name="ln1190">        case ENOKEY:</a>
+<a name="ln1191">            return &quot;Required key not available&quot;;</a>
+<a name="ln1192">    }</a>
+<a name="ln1193"> </a>
+<a name="ln1194">    crm_err(&quot;Unknown error code: %d&quot;, rc);</a>
+<a name="ln1195">    return &quot;Unknown error&quot;;</a>
+<a name="ln1196">}</a>
+<a name="ln1197"> </a>
+<a name="ln1198">const char *</a>
+<a name="ln1199">bz2_strerror(int rc)</a>
+<a name="ln1200">{</a>
+<a name="ln1201">    /* http://www.bzip.org/1.0.3/html/err-handling.html */</a>
+<a name="ln1202">    switch (rc) {</a>
+<a name="ln1203">        case BZ_OK:</a>
+<a name="ln1204">        case BZ_RUN_OK:</a>
+<a name="ln1205">        case BZ_FLUSH_OK:</a>
+<a name="ln1206">        case BZ_FINISH_OK:</a>
+<a name="ln1207">        case BZ_STREAM_END:</a>
+<a name="ln1208">            return &quot;Ok&quot;;</a>
+<a name="ln1209">        case BZ_CONFIG_ERROR:</a>
+<a name="ln1210">            return &quot;libbz2 has been improperly compiled on your platform&quot;;</a>
+<a name="ln1211">        case BZ_SEQUENCE_ERROR:</a>
+<a name="ln1212">            return &quot;library functions called in the wrong order&quot;;</a>
+<a name="ln1213">        case BZ_PARAM_ERROR:</a>
+<a name="ln1214">            return &quot;parameter is out of range or otherwise incorrect&quot;;</a>
+<a name="ln1215">        case BZ_MEM_ERROR:</a>
+<a name="ln1216">            return &quot;memory allocation failed&quot;;</a>
+<a name="ln1217">        case BZ_DATA_ERROR:</a>
+<a name="ln1218">            return &quot;data integrity error is detected during decompression&quot;;</a>
+<a name="ln1219">        case BZ_DATA_ERROR_MAGIC:</a>
+<a name="ln1220">            return &quot;the compressed stream does not start with the correct magic bytes&quot;;</a>
+<a name="ln1221">        case BZ_IO_ERROR:</a>
+<a name="ln1222">            return &quot;error reading or writing in the compressed file&quot;;</a>
+<a name="ln1223">        case BZ_UNEXPECTED_EOF:</a>
+<a name="ln1224">            return &quot;compressed file finishes before the logical end of stream is detected&quot;;</a>
+<a name="ln1225">        case BZ_OUTBUFF_FULL:</a>
+<a name="ln1226">            return &quot;output data will not fit into the buffer provided&quot;;</a>
+<a name="ln1227">    }</a>
+<a name="ln1228">    return &quot;Unknown error&quot;;</a>
+<a name="ln1229">}</a>
+<a name="ln1230"> </a>
+<a name="ln1231">void</a>
+<a name="ln1232">crm_log_output_fn(const char *file, const char *function, int line, int level, const char *prefix,</a>
+<a name="ln1233">                  const char *output)</a>
+<a name="ln1234">{</a>
+<a name="ln1235">    const char *next = NULL;</a>
+<a name="ln1236">    const char *offset = NULL;</a>
+<a name="ln1237"> </a>
+<a name="ln1238">    if (output == NULL) {</a>
+<a name="ln1239">        level = LOG_DEBUG;</a>
+<a name="ln1240">        output = &quot;-- empty --&quot;;</a>
+<a name="ln1241">    }</a>
+<a name="ln1242"> </a>
+<a name="ln1243">    next = output;</a>
+<a name="ln1244">    do {</a>
+<a name="ln1245">        offset = next;</a>
+<a name="ln1246">        next = strchrnul(offset, '\n');</a>
+<a name="ln1247">        do_crm_log_alias(level, file, function, line, &quot;%s [ %.*s ]&quot;, prefix,</a>
+<a name="ln1248">                         (int)(next - offset), offset);</a>
+<a name="ln1249">        if (next[0] != 0) {</a>
+<a name="ln1250">            next++;</a>
+<a name="ln1251">        }</a>
+<a name="ln1252"> </a>
+<a name="ln1253">    } while (next != NULL &amp;&amp; next[0] != 0);</a>
+<a name="ln1254">}</a>
+<a name="ln1255"> </a>
+<a name="ln1256">char *</a>
+<a name="ln1257">crm_strdup_printf (char const *format, ...)</a>
+<a name="ln1258">{</a>
+<a name="ln1259">    va_list ap;</a>
+<a name="ln1260">    int len = 0;</a>
+<a name="ln1261">    char *string = NULL;</a>
+<a name="ln1262"> </a>
+<a name="ln1263">    va_start(ap, format);</a>
+<a name="ln1264"> </a>
+<a name="ln1265">    len = vasprintf (&amp;string, format, ap);</a>
+<a name="ln1266">    CRM_ASSERT(len &gt; 0);</a>
+<a name="ln1267"> </a>
+<a name="ln1268">    va_end(ap);</a>
+<a name="ln1269">    return string;</a>
+<a name="ln1270">}</a>
+
+</code></pre>
+<div class="balloon" rel="220"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (offset > 0) == (0).</p></div>
+<div class="balloon" rel="262"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'dirname' function. Inspect the first argument. Check lines: 262, 261.</p></div>
+<div class="balloon" rel="685"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'free' function. Inspect the first argument.</p></div>
+<div class="balloon" rel="700"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'crm_system_name == NULL' is always true.</p></div>
+<div class="balloon" rel="1266"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (len > 0) == (0).</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

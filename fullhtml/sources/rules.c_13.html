@@ -1,0 +1,1061 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;crm/crm.h&gt;</a>
+<a name="ln25">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln26">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;glib.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln31">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">#include &lt;sys/types.h&gt;</a>
+<a name="ln34">#include &lt;regex.h&gt;</a>
+<a name="ln35">#include &lt;ctype.h&gt;</a>
+<a name="ln36"> </a>
+<a name="ln37">CRM_TRACE_INIT_DATA(pe_rules);</a>
+<a name="ln38"> </a>
+<a name="ln39">crm_time_t *parse_xml_duration(crm_time_t * start, xmlNode * duration_spec);</a>
+<a name="ln40"> </a>
+<a name="ln41">gboolean test_date_expression(xmlNode * time_expr, crm_time_t * now);</a>
+<a name="ln42">gboolean cron_range_satisfied(crm_time_t * now, xmlNode * cron_spec);</a>
+<a name="ln43">gboolean test_attr_expression(xmlNode * expr, GHashTable * hash, crm_time_t * now);</a>
+<a name="ln44">gboolean pe_test_attr_expression_full(xmlNode * expr, GHashTable * hash, crm_time_t * now, pe_match_data_t * match_data);</a>
+<a name="ln45">gboolean test_role_expression(xmlNode * expr, enum rsc_role_e role, crm_time_t * now);</a>
+<a name="ln46"> </a>
+<a name="ln47">gboolean</a>
+<a name="ln48">test_ruleset(xmlNode * ruleset, GHashTable * node_hash, crm_time_t * now)</a>
+<a name="ln49">{</a>
+<a name="ln50">    gboolean ruleset_default = TRUE;</a>
+<a name="ln51">    xmlNode *rule = NULL;</a>
+<a name="ln52"> </a>
+<a name="ln53">    for (rule = __xml_first_child(ruleset); rule != NULL; rule = __xml_next_element(rule)) {</a>
+<a name="ln54">        if (crm_str_eq((const char *)rule-&gt;name, XML_TAG_RULE, TRUE)) {</a>
+<a name="ln55">            ruleset_default = FALSE;</a>
+<a name="ln56">            if (test_rule(rule, node_hash, RSC_ROLE_UNKNOWN, now)) {</a>
+<a name="ln57">                return TRUE;</a>
+<a name="ln58">            }</a>
+<a name="ln59">        }</a>
+<a name="ln60">    }</a>
+<a name="ln61"> </a>
+<a name="ln62">    return ruleset_default;</a>
+<a name="ln63">}</a>
+<a name="ln64"> </a>
+<a name="ln65">gboolean</a>
+<a name="ln66">test_rule(xmlNode * rule, GHashTable * node_hash, enum rsc_role_e role, crm_time_t * now)</a>
+<a name="ln67">{</a>
+<a name="ln68">    return pe_test_rule_full(rule, node_hash, role, now, NULL);</a>
+<a name="ln69">}</a>
+<a name="ln70"> </a>
+<a name="ln71">gboolean</a>
+<a name="ln72">pe_test_rule_re(xmlNode * rule, GHashTable * node_hash, enum rsc_role_e role, crm_time_t * now, pe_re_match_data_t * re_match_data)</a>
+<a name="ln73">{</a>
+<a name="ln74">    pe_match_data_t match_data = {</a>
+<a name="ln75">                                    .re = re_match_data,</a>
+<a name="ln76">                                    .params = NULL,</a>
+<a name="ln77">                                    .meta = NULL,</a>
+<a name="ln78">                                 };</a>
+<a name="ln79">    return pe_test_rule_full(rule, node_hash, role, now, &amp;match_data);</a>
+<a name="ln80">}</a>
+<a name="ln81"> </a>
+<a name="ln82">gboolean</a>
+<a name="ln83">pe_test_rule_full(xmlNode * rule, GHashTable * node_hash, enum rsc_role_e role, crm_time_t * now, pe_match_data_t * match_data)</a>
+<a name="ln84">{</a>
+<a name="ln85">    xmlNode *expr = NULL;</a>
+<a name="ln86">    gboolean test = TRUE;</a>
+<a name="ln87">    gboolean empty = TRUE;</a>
+<a name="ln88">    gboolean passed = TRUE;</a>
+<a name="ln89">    gboolean do_and = TRUE;</a>
+<a name="ln90">    const char *value = NULL;</a>
+<a name="ln91"> </a>
+<a name="ln92">    rule = expand_idref(rule, NULL);</a>
+<a name="ln93">    value = crm_element_value(rule, XML_RULE_ATTR_BOOLEAN_OP);</a>
+<a name="ln94">    if (safe_str_eq(value, &quot;or&quot;)) {</a>
+<a name="ln95">        do_and = FALSE;</a>
+<a name="ln96">        passed = FALSE;</a>
+<a name="ln97">    }</a>
+<a name="ln98"> </a>
+<a name="ln99">    crm_trace(&quot;Testing rule %s&quot;, ID(rule));</a>
+<a name="ln100">    for (expr = __xml_first_child(rule); expr != NULL; expr = __xml_next_element(expr)) {</a>
+<a name="ln101">        test = pe_test_expression_full(expr, node_hash, role, now, match_data);</a>
+<a name="ln102">        empty = FALSE;</a>
+<a name="ln103"> </a>
+<a name="ln104">        if (test &amp;&amp; do_and == FALSE) {</a>
+<a name="ln105">            crm_trace(&quot;Expression %s/%s passed&quot;, ID(rule), ID(expr));</a>
+<a name="ln106">            return TRUE;</a>
+<a name="ln107"> </a>
+<a name="ln108">        } else if (test == FALSE &amp;&amp; do_and) {</a>
+<a name="ln109">            crm_trace(&quot;Expression %s/%s failed&quot;, ID(rule), ID(expr));</a>
+<a name="ln110">            return FALSE;</a>
+<a name="ln111">        }</a>
+<a name="ln112">    }</a>
+<a name="ln113"> </a>
+<a name="ln114">    if (empty) {</a>
+<a name="ln115">        crm_err(&quot;Invalid Rule %s: rules must contain at least one expression&quot;, ID(rule));</a>
+<a name="ln116">    }</a>
+<a name="ln117"> </a>
+<a name="ln118">    crm_trace(&quot;Rule %s %s&quot;, ID(rule), passed ? &quot;passed&quot; : &quot;failed&quot;);</a>
+<a name="ln119">    return passed;</a>
+<a name="ln120">}</a>
+<a name="ln121"> </a>
+<a name="ln122">gboolean</a>
+<a name="ln123">test_expression(xmlNode * expr, GHashTable * node_hash, enum rsc_role_e role, crm_time_t * now)</a>
+<a name="ln124">{</a>
+<a name="ln125">    return pe_test_expression_full(expr, node_hash, role, now, NULL);</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">gboolean</a>
+<a name="ln129">pe_test_expression_re(xmlNode * expr, GHashTable * node_hash, enum rsc_role_e role, crm_time_t * now, pe_re_match_data_t * re_match_data)</a>
+<a name="ln130">{</a>
+<a name="ln131">    pe_match_data_t match_data = {</a>
+<a name="ln132">                                    .re = re_match_data,</a>
+<a name="ln133">                                    .params = NULL,</a>
+<a name="ln134">                                    .meta = NULL,</a>
+<a name="ln135">                                 };</a>
+<a name="ln136">    return pe_test_expression_full(expr, node_hash, role, now, &amp;match_data);</a>
+<a name="ln137">}</a>
+<a name="ln138"> </a>
+<a name="ln139">gboolean</a>
+<a name="ln140">pe_test_expression_full(xmlNode * expr, GHashTable * node_hash, enum rsc_role_e role, crm_time_t * now, pe_match_data_t * match_data)</a>
+<a name="ln141">{</a>
+<a name="ln142">    gboolean accept = FALSE;</a>
+<a name="ln143">    const char *uname = NULL;</a>
+<a name="ln144"> </a>
+<a name="ln145">    switch (find_expression_type(expr)) {</a>
+<a name="ln146">        case nested_rule:</a>
+<a name="ln147">            accept = pe_test_rule_full(expr, node_hash, role, now, match_data);</a>
+<a name="ln148">            break;</a>
+<a name="ln149">        case attr_expr:</a>
+<a name="ln150">        case loc_expr:</a>
+<a name="ln151">            /* these expressions can never succeed if there is</a>
+<a name="ln152">             * no node to compare with</a>
+<a name="ln153">             */</a>
+<a name="ln154">            if (node_hash != NULL) {</a>
+<a name="ln155">                accept = pe_test_attr_expression_full(expr, node_hash, now, match_data);</a>
+<a name="ln156">            }</a>
+<a name="ln157">            break;</a>
+<a name="ln158"> </a>
+<a name="ln159">        case time_expr:</a>
+<a name="ln160">            accept = test_date_expression(expr, now);</a>
+<a name="ln161">            break;</a>
+<a name="ln162"> </a>
+<a name="ln163">        case role_expr:</a>
+<a name="ln164">            accept = test_role_expression(expr, role, now);</a>
+<a name="ln165">            break;</a>
+<a name="ln166"> </a>
+<a name="ln167">        case version_expr:</a>
+<a name="ln168">            if (node_hash &amp;&amp;</a>
+<a name="ln169">                g_hash_table_lookup_extended(node_hash, &quot;#ra-version&quot;, NULL, NULL)) {</a>
+<a name="ln170">                accept = test_attr_expression(expr, node_hash, now);</a>
+<a name="ln171">            } else {</a>
+<a name="ln172">                // we are going to test it when we have ra-version</a>
+<a name="ln173">                accept = TRUE;</a>
+<a name="ln174">            }</a>
+<a name="ln175">            break;</a>
+<a name="ln176"> </a>
+<a name="ln177">        default:</a>
+<a name="ln178">            CRM_CHECK(FALSE /* bad type */ , return FALSE);</a>
+<a name="ln179">            accept = FALSE;</a>
+<a name="ln180">    }</a>
+<a name="ln181">    if (node_hash) {</a>
+<a name="ln182">        uname = g_hash_table_lookup(node_hash, &quot;#uname&quot;);</a>
+<a name="ln183">    }</a>
+<a name="ln184"> </a>
+<a name="ln185">    crm_trace(&quot;Expression %s %s on %s&quot;,</a>
+<a name="ln186">              ID(expr), accept ? &quot;passed&quot; : &quot;failed&quot;, uname ? uname : &quot;all nodes&quot;);</a>
+<a name="ln187">    return accept;</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">enum expression_type</a>
+<a name="ln191">find_expression_type(xmlNode * expr)</a>
+<a name="ln192">{</a>
+<a name="ln193">    const char *tag = NULL;</a>
+<a name="ln194">    const char *attr = NULL;</a>
+<a name="ln195"> </a>
+<a name="ln196">    attr = crm_element_value(expr, XML_EXPR_ATTR_ATTRIBUTE);</a>
+<a name="ln197">    tag = crm_element_name(expr);</a>
+<a name="ln198"> </a>
+<a name="ln199">    if (safe_str_eq(tag, &quot;date_expression&quot;)) {</a>
+<a name="ln200">        return time_expr;</a>
+<a name="ln201"> </a>
+<a name="ln202">    } else if (safe_str_eq(tag, XML_TAG_RULE)) {</a>
+<a name="ln203">        return nested_rule;</a>
+<a name="ln204"> </a>
+<a name="ln205">    } else if (safe_str_neq(tag, &quot;expression&quot;)) {</a>
+<a name="ln206">        return not_expr;</a>
+<a name="ln207"> </a>
+<a name="ln208">    } else if (safe_str_eq(attr, &quot;#uname&quot;) || safe_str_eq(attr, &quot;#kind&quot;) || safe_str_eq(attr, &quot;#id&quot;)) {</a>
+<a name="ln209">        return loc_expr;</a>
+<a name="ln210"> </a>
+<a name="ln211">    } else if (safe_str_eq(attr, &quot;#role&quot;)) {</a>
+<a name="ln212">        return role_expr;</a>
+<a name="ln213"> </a>
+<a name="ln214">    } else if (safe_str_eq(attr, &quot;#ra-version&quot;)) {</a>
+<a name="ln215">        return version_expr;</a>
+<a name="ln216">    }</a>
+<a name="ln217"> </a>
+<a name="ln218">    return attr_expr;</a>
+<a name="ln219">}</a>
+<a name="ln220"> </a>
+<a name="ln221">gboolean</a>
+<a name="ln222">test_role_expression(xmlNode * expr, enum rsc_role_e role, crm_time_t * now)</a>
+<a name="ln223">{</a>
+<a name="ln224">    gboolean accept = FALSE;</a>
+<a name="ln225">    const char *op = NULL;</a>
+<a name="ln226">    const char *value = NULL;</a>
+<a name="ln227"> </a>
+<a name="ln228">    if (role == RSC_ROLE_UNKNOWN) {</a>
+<a name="ln229">        return accept;</a>
+<a name="ln230">    }</a>
+<a name="ln231"> </a>
+<a name="ln232">    value = crm_element_value(expr, XML_EXPR_ATTR_VALUE);</a>
+<a name="ln233">    op = crm_element_value(expr, XML_EXPR_ATTR_OPERATION);</a>
+<a name="ln234"> </a>
+<a name="ln235">    if (safe_str_eq(op, &quot;defined&quot;)) {</a>
+<a name="ln236">        if (role &gt; RSC_ROLE_STARTED) {</a>
+<a name="ln237">            accept = TRUE;</a>
+<a name="ln238">        }</a>
+<a name="ln239"> </a>
+<a name="ln240">    } else if (safe_str_eq(op, &quot;not_defined&quot;)) {</a>
+<a name="ln241">        if (role &lt; RSC_ROLE_SLAVE &amp;&amp; role &gt; RSC_ROLE_UNKNOWN) {</a>
+<a name="ln242">            accept = TRUE;</a>
+<a name="ln243">        }</a>
+<a name="ln244"> </a>
+<a name="ln245">    } else if (safe_str_eq(op, &quot;eq&quot;)) {</a>
+<a name="ln246">        if (text2role(value) == role) {</a>
+<a name="ln247">            accept = TRUE;</a>
+<a name="ln248">        }</a>
+<a name="ln249"> </a>
+<a name="ln250">    } else if (safe_str_eq(op, &quot;ne&quot;)) {</a>
+<a name="ln251">        /* we will only test &quot;ne&quot; wtih master/slave roles style */</a>
+<a name="ln252">        if (role &lt; RSC_ROLE_SLAVE &amp;&amp; role &gt; RSC_ROLE_UNKNOWN) {</a>
+<a name="ln253">            accept = FALSE;</a>
+<a name="ln254"> </a>
+<a name="ln255">        } else if (text2role(value) != role) {</a>
+<a name="ln256">            accept = TRUE;</a>
+<a name="ln257">        }</a>
+<a name="ln258">    }</a>
+<a name="ln259">    return accept;</a>
+<a name="ln260">}</a>
+<a name="ln261"> </a>
+<a name="ln262">gboolean</a>
+<a name="ln263">test_attr_expression(xmlNode * expr, GHashTable * hash, crm_time_t * now)</a>
+<a name="ln264">{</a>
+<a name="ln265">    return pe_test_attr_expression_full(expr, hash, now, NULL);</a>
+<a name="ln266">}</a>
+<a name="ln267"> </a>
+<a name="ln268">gboolean</a>
+<a name="ln269">pe_test_attr_expression_full(xmlNode * expr, GHashTable * hash, crm_time_t * now, pe_match_data_t * match_data)</a>
+<a name="ln270">{</a>
+<a name="ln271">    gboolean accept = FALSE;</a>
+<a name="ln272">    gboolean attr_allocated = FALSE;</a>
+<a name="ln273">    int cmp = 0;</a>
+<a name="ln274">    const char *h_val = NULL;</a>
+<a name="ln275">    GHashTable *table = NULL;</a>
+<a name="ln276"> </a>
+<a name="ln277">    const char *op = NULL;</a>
+<a name="ln278">    const char *type = NULL;</a>
+<a name="ln279">    const char *attr = NULL;</a>
+<a name="ln280">    const char *value = NULL;</a>
+<a name="ln281">    const char *value_source = NULL;</a>
+<a name="ln282"> </a>
+<a name="ln283">    attr = crm_element_value(expr, XML_EXPR_ATTR_ATTRIBUTE);</a>
+<a name="ln284">    op = crm_element_value(expr, XML_EXPR_ATTR_OPERATION);</a>
+<a name="ln285">    value = crm_element_value(expr, XML_EXPR_ATTR_VALUE);</a>
+<a name="ln286">    type = crm_element_value(expr, XML_EXPR_ATTR_TYPE);</a>
+<a name="ln287">    value_source = crm_element_value(expr, XML_EXPR_ATTR_VALUE_SOURCE);</a>
+<a name="ln288"> </a>
+<a name="ln289">    if (attr == NULL || op == NULL) {</a>
+<a name="ln290">        pe_err(&quot;Invalid attribute or operation in expression&quot;</a>
+<a name="ln291">               &quot; (\'%s\' \'%s\' \'%s\')&quot;, crm_str(attr), crm_str(op), crm_str(value));</a>
+<a name="ln292">        return FALSE;</a>
+<a name="ln293">    }</a>
+<a name="ln294"> </a>
+<a name="ln295">    if (match_data) {</a>
+<a name="ln296">        if (match_data-&gt;re) {</a>
+<a name="ln297">            char *resolved_attr = pe_expand_re_matches(attr, match_data-&gt;re);</a>
+<a name="ln298"> </a>
+<a name="ln299">            if (resolved_attr) {</a>
+<a name="ln300">                attr = (const char *) resolved_attr;</a>
+<a name="ln301">                attr_allocated = TRUE;</a>
+<a name="ln302">            }</a>
+<a name="ln303">        }</a>
+<a name="ln304"> </a>
+<a name="ln305">        if (safe_str_eq(value_source, &quot;param&quot;)) {</a>
+<a name="ln306">            table = match_data-&gt;params;</a>
+<a name="ln307">        } else if (safe_str_eq(value_source, &quot;meta&quot;)) {</a>
+<a name="ln308">            table = match_data-&gt;meta;</a>
+<a name="ln309">        }</a>
+<a name="ln310">    }</a>
+<a name="ln311"> </a>
+<a name="ln312">    if (table) {</a>
+<a name="ln313">        const char *param_name = value;</a>
+<a name="ln314">        const char *param_value = NULL;</a>
+<a name="ln315"> </a>
+<a name="ln316">        if (param_name &amp;&amp; param_name[0]) {</a>
+<a name="ln317">            if ((param_value = (const char *)g_hash_table_lookup(table, param_name))) {</a>
+<a name="ln318">                value = param_value;</a>
+<a name="ln319">            }</a>
+<a name="ln320">        }</a>
+<a name="ln321">    }</a>
+<a name="ln322"> </a>
+<a name="ln323">    if (hash != NULL) {</a>
+<a name="ln324">        h_val = (const char *)g_hash_table_lookup(hash, attr);</a>
+<a name="ln325">    }</a>
+<a name="ln326"> </a>
+<a name="ln327">    if (attr_allocated) {</a>
+<a name="ln328">        free((char *)attr);</a>
+<a name="ln329">        attr = NULL;</a>
+<a name="ln330">    }</a>
+<a name="ln331"> </a>
+<a name="ln332">    if (value != NULL &amp;&amp; h_val != NULL) {</a>
+<a name="ln333">        if (type == NULL) {</a>
+<a name="ln334">            if (safe_str_eq(op, &quot;lt&quot;)</a>
+<a name="ln335">                || safe_str_eq(op, &quot;lte&quot;)</a>
+<a name="ln336">                || safe_str_eq(op, &quot;gt&quot;)</a>
+<a name="ln337">                || safe_str_eq(op, &quot;gte&quot;)) {</a>
+<a name="ln338">                type = &quot;number&quot;;</a>
+<a name="ln339"> </a>
+<a name="ln340">            } else {</a>
+<a name="ln341">                type = &quot;string&quot;;</a>
+<a name="ln342">            }</a>
+<a name="ln343">            crm_trace(&quot;Defaulting to %s based comparison for '%s' op&quot;, type, op);</a>
+<a name="ln344">        }</a>
+<a name="ln345"> </a>
+<a name="ln346">        if (safe_str_eq(type, &quot;string&quot;)) {</a>
+<a name="ln347">            cmp = strcasecmp(h_val, value);</a>
+<a name="ln348"> </a>
+<a name="ln349">        } else if (safe_str_eq(type, &quot;number&quot;)) {</a>
+<a name="ln350">            int h_val_f = crm_parse_int(h_val, NULL);</a>
+<a name="ln351">            int value_f = crm_parse_int(value, NULL);</a>
+<a name="ln352"> </a>
+<a name="ln353">            if (h_val_f &lt; value_f) {</a>
+<a name="ln354">                cmp = -1;</a>
+<a name="ln355">            } else if (h_val_f &gt; value_f) {</a>
+<a name="ln356">                cmp = 1;</a>
+<a name="ln357">            } else {</a>
+<a name="ln358">                cmp = 0;</a>
+<a name="ln359">            }</a>
+<a name="ln360"> </a>
+<a name="ln361">        } else if (safe_str_eq(type, &quot;version&quot;)) {</a>
+<a name="ln362">            cmp = compare_version(h_val, value);</a>
+<a name="ln363"> </a>
+<a name="ln364">        }</a>
+<a name="ln365"> </a>
+<a name="ln366">    } else if (value == NULL &amp;&amp; h_val == NULL) {</a>
+<a name="ln367">        cmp = 0;</a>
+<a name="ln368">    } else if (value == NULL) {</a>
+<a name="ln369">        cmp = 1;</a>
+<a name="ln370">    } else {</a>
+<a name="ln371">        cmp = -1;</a>
+<a name="ln372">    }</a>
+<a name="ln373"> </a>
+<a name="ln374">    if (safe_str_eq(op, &quot;defined&quot;)) {</a>
+<a name="ln375">        if (h_val != NULL) {</a>
+<a name="ln376">            accept = TRUE;</a>
+<a name="ln377">        }</a>
+<a name="ln378"> </a>
+<a name="ln379">    } else if (safe_str_eq(op, &quot;not_defined&quot;)) {</a>
+<a name="ln380">        if (h_val == NULL) {</a>
+<a name="ln381">            accept = TRUE;</a>
+<a name="ln382">        }</a>
+<a name="ln383"> </a>
+<a name="ln384">    } else if (safe_str_eq(op, &quot;eq&quot;)) {</a>
+<a name="ln385">        if ((h_val == value) || cmp == 0) {</a>
+<a name="ln386">            accept = TRUE;</a>
+<a name="ln387">        }</a>
+<a name="ln388"> </a>
+<a name="ln389">    } else if (safe_str_eq(op, &quot;ne&quot;)) {</a>
+<a name="ln390">        if ((h_val == NULL &amp;&amp; value != NULL)</a>
+<a name="ln391">            || (h_val != NULL &amp;&amp; value == NULL)</a>
+<a name="ln392">            || cmp != 0) {</a>
+<a name="ln393">            accept = TRUE;</a>
+<a name="ln394">        }</a>
+<a name="ln395"> </a>
+<a name="ln396">    } else if (value == NULL || h_val == NULL) {</a>
+<a name="ln397">        /* the comparision is meaningless from this point on */</a>
+<a name="ln398">        accept = FALSE;</a>
+<a name="ln399"> </a>
+<a name="ln400">    } else if (safe_str_eq(op, &quot;lt&quot;)) {</a>
+<a name="ln401">        if (cmp &lt; 0) {</a>
+<a name="ln402">            accept = TRUE;</a>
+<a name="ln403">        }</a>
+<a name="ln404"> </a>
+<a name="ln405">    } else if (safe_str_eq(op, &quot;lte&quot;)) {</a>
+<a name="ln406">        if (cmp &lt;= 0) {</a>
+<a name="ln407">            accept = TRUE;</a>
+<a name="ln408">        }</a>
+<a name="ln409"> </a>
+<a name="ln410">    } else if (safe_str_eq(op, &quot;gt&quot;)) {</a>
+<a name="ln411">        if (cmp &gt; 0) {</a>
+<a name="ln412">            accept = TRUE;</a>
+<a name="ln413">        }</a>
+<a name="ln414"> </a>
+<a name="ln415">    } else if (safe_str_eq(op, &quot;gte&quot;)) {</a>
+<a name="ln416">        if (cmp &gt;= 0) {</a>
+<a name="ln417">            accept = TRUE;</a>
+<a name="ln418">        }</a>
+<a name="ln419">    }</a>
+<a name="ln420"> </a>
+<a name="ln421">    return accept;</a>
+<a name="ln422">}</a>
+<a name="ln423"> </a>
+<a name="ln424">/* As per the nethack rules:</a>
+<a name="ln425"> *</a>
+<a name="ln426"> * moon period = 29.53058 days ~= 30, year = 365.2422 days</a>
+<a name="ln427"> * days moon phase advances on first day of year compared to preceding year</a>
+<a name="ln428"> *      = 365.2422 - 12*29.53058 ~= 11</a>
+<a name="ln429"> * years in Metonic cycle (time until same phases fall on the same days of</a>
+<a name="ln430"> *      the month) = 18.6 ~= 19</a>
+<a name="ln431"> * moon phase on first day of year (epact) ~= (11*(year%19) + 29) % 30</a>
+<a name="ln432"> *      (29 as initial condition)</a>
+<a name="ln433"> * current phase in days = first day phase + days elapsed in year</a>
+<a name="ln434"> * 6 moons ~= 177 days</a>
+<a name="ln435"> * 177 ~= 8 reported phases * 22</a>
+<a name="ln436"> * + 11/22 for rounding</a>
+<a name="ln437"> *</a>
+<a name="ln438"> * 0-7, with 0: new, 4: full</a>
+<a name="ln439"> */</a>
+<a name="ln440"> </a>
+<a name="ln441">static int</a>
+<a name="ln442">phase_of_the_moon(crm_time_t * now)</a>
+<a name="ln443">{</a>
+<a name="ln444">    uint32_t epact, diy, goldn;</a>
+<a name="ln445">    uint32_t y;</a>
+<a name="ln446"> </a>
+<a name="ln447">    crm_time_get_ordinal(now, &amp;y, &amp;diy);</a>
+<a name="ln448"> </a>
+<a name="ln449">    goldn = (y % 19) + 1;</a>
+<a name="ln450">    epact = (11 * goldn + 18) % 30;</a>
+<a name="ln451">    if ((epact == 25 &amp;&amp; goldn &gt; 11) || epact == 24)</a>
+<a name="ln452">        epact++;</a>
+<a name="ln453"> </a>
+<a name="ln454">    return ((((((diy + epact) * 6) + 11) % 177) / 22) &amp; 7);</a>
+<a name="ln455">}</a>
+<a name="ln456"> </a>
+<a name="ln457">static gboolean</a>
+<a name="ln458">decodeNVpair(const char *srcstring, char separator, char **name, char **value)</a>
+<a name="ln459">{</a>
+<a name="ln460">    int lpc = 0;</a>
+<a name="ln461">    int len = 0;</a>
+<a name="ln462">    const char *temp = NULL;</a>
+<a name="ln463"> </a>
+<a name="ln464">    CRM_ASSERT(name != NULL &amp;&amp; value != NULL);</a>
+<a name="ln465">    *name = NULL;</a>
+<a name="ln466">    *value = NULL;</a>
+<a name="ln467"> </a>
+<a name="ln468">    crm_trace(&quot;Attempting to decode: [%s]&quot;, srcstring);</a>
+<a name="ln469">    if (srcstring != NULL) {</a>
+<a name="ln470">        len = strlen(srcstring);</a>
+<a name="ln471">        while (lpc &lt;= len) {</a>
+<a name="ln472">            if (srcstring[lpc] == separator) {</a>
+<a name="ln473">                *name = calloc(1, lpc + 1);</a>
+<a name="ln474">                if (*name == NULL) {</a>
+<a name="ln475">                    break;      /* and return FALSE */</a>
+<a name="ln476">                }</a>
+<a name="ln477">                memcpy(*name, srcstring, lpc);</a>
+<a name="ln478">                (*name)[lpc] = '\0';</a>
+<a name="ln479"> </a>
+<a name="ln480">/* this sucks but as the strtok manpage says..</a>
+<a name="ln481"> * it *is* a bug</a>
+<a name="ln482"> */</a>
+<a name="ln483">                len = len - lpc;</a>
+<a name="ln484">                len--;</a>
+<a name="ln485">                if (len &lt;= 0) {</a>
+<a name="ln486">                    *value = NULL;</a>
+<a name="ln487">                } else {</a>
+<a name="ln488"> </a>
+<a name="ln489">                    *value = calloc(1, len + 1);</a>
+<a name="ln490">                    if (*value == NULL) {</a>
+<a name="ln491">                        break;  /* and return FALSE */</a>
+<a name="ln492">                    }</a>
+<a name="ln493">                    temp = srcstring + lpc + 1;</a>
+<a name="ln494">                    memcpy(*value, temp, len);</a>
+<a name="ln495">                    (*value)[len] = '\0';</a>
+<a name="ln496">                }</a>
+<a name="ln497">                return TRUE;</a>
+<a name="ln498">            }</a>
+<a name="ln499">            lpc++;</a>
+<a name="ln500">        }</a>
+<a name="ln501">    }</a>
+<a name="ln502"> </a>
+<a name="ln503">    if (*name != NULL) {</a>
+<a name="ln504">        free(*name);</a>
+<a name="ln505">        *name = NULL;</a>
+<a name="ln506">    }</a>
+<a name="ln507">    *name = NULL;</a>
+<a name="ln508">    *value = NULL;</a>
+<a name="ln509"> </a>
+<a name="ln510">    return FALSE;</a>
+<a name="ln511">}</a>
+<a name="ln512"> </a>
+<a name="ln513">#define cron_check(xml_field, time_field)				\</a>
+<a name="ln514">    value = crm_element_value(cron_spec, xml_field);			\</a>
+<a name="ln515">    if(value != NULL) {							\</a>
+<a name="ln516">	gboolean pass = TRUE;						\</a>
+<a name="ln517">	decodeNVpair(value, '-', &amp;value_low, &amp;value_high);		\</a>
+<a name="ln518">	if(value_low == NULL) {						\</a>
+<a name="ln519">	    value_low = strdup(value);				\</a>
+<a name="ln520">	}								\</a>
+<a name="ln521">	value_low_i = crm_parse_int(value_low, &quot;0&quot;);			\</a>
+<a name="ln522">	value_high_i = crm_parse_int(value_high, &quot;-1&quot;);			\</a>
+<a name="ln523">	if(value_high_i &lt; 0) {						\</a>
+<a name="ln524">	    if(value_low_i != time_field) {				\</a>
+<a name="ln525">		pass = FALSE;						\</a>
+<a name="ln526">	    }								\</a>
+<a name="ln527">	} else if(value_low_i &gt; time_field) {				\</a>
+<a name="ln528">	    pass = FALSE;						\</a>
+<a name="ln529">	} else if(value_high_i &lt; time_field) {				\</a>
+<a name="ln530">	    pass = FALSE;						\</a>
+<a name="ln531">	}								\</a>
+<a name="ln532">	free(value_low);						\</a>
+<a name="ln533">	free(value_high);						\</a>
+<a name="ln534">	if(pass == FALSE) {						\</a>
+<a name="ln535">	    crm_debug(&quot;Condition '%s' in %s: failed&quot;, value, xml_field); \</a>
+<a name="ln536">	    return pass;						\</a>
+<a name="ln537">	}								\</a>
+<a name="ln538">	crm_debug(&quot;Condition '%s' in %s: passed&quot;, value, xml_field);	\</a>
+<a name="ln539">    }</a>
+<a name="ln540"> </a>
+<a name="ln541">gboolean</a>
+<a name="ln542">cron_range_satisfied(crm_time_t * now, xmlNode * cron_spec)</a>
+<a name="ln543">{</a>
+<a name="ln544">    const char *value = NULL;</a>
+<a name="ln545">    char *value_low = NULL;</a>
+<a name="ln546">    char *value_high = NULL;</a>
+<a name="ln547"> </a>
+<a name="ln548">    int value_low_i = 0;</a>
+<a name="ln549">    int value_high_i = 0;</a>
+<a name="ln550"> </a>
+<a name="ln551">    uint32_t h, m, s, y, d, w;</a>
+<a name="ln552"> </a>
+<a name="ln553">    CRM_CHECK(now != NULL, return FALSE);</a>
+<a name="ln554"> </a>
+<a name="ln555">    crm_time_get_timeofday(now, &amp;h, &amp;m, &amp;s);</a>
+<a name="ln556"> </a>
+<a name="ln557">    cron_check(&quot;seconds&quot;, s);</a>
+<a name="ln558">    cron_check(&quot;minutes&quot;, m);</a>
+<a name="ln559">    cron_check(&quot;hours&quot;, h);</a>
+<a name="ln560"> </a>
+<a name="ln561">    crm_time_get_gregorian(now, &amp;y, &amp;m, &amp;d);</a>
+<a name="ln562"> </a>
+<a name="ln563">    cron_check(&quot;monthdays&quot;, d);</a>
+<a name="ln564">    cron_check(&quot;months&quot;, m);</a>
+<a name="ln565">    cron_check(&quot;years&quot;, y);</a>
+<a name="ln566"> </a>
+<a name="ln567">    crm_time_get_ordinal(now, &amp;y, &amp;d);</a>
+<a name="ln568"> </a>
+<a name="ln569">    cron_check(&quot;yeardays&quot;, d);</a>
+<a name="ln570"> </a>
+<a name="ln571">    crm_time_get_isoweek(now, &amp;y, &amp;w, &amp;d);</a>
+<a name="ln572"> </a>
+<a name="ln573">    cron_check(&quot;weekyears&quot;, y);</a>
+<a name="ln574">    cron_check(&quot;weeks&quot;, w);</a>
+<a name="ln575">    cron_check(&quot;weekdays&quot;, d);</a>
+<a name="ln576"> </a>
+<a name="ln577">    cron_check(&quot;moon&quot;, phase_of_the_moon(now));</a>
+<a name="ln578"> </a>
+<a name="ln579">    return TRUE;</a>
+<a name="ln580">}</a>
+<a name="ln581"> </a>
+<a name="ln582">#define update_field(xml_field, time_fn)			\</a>
+<a name="ln583">    value = crm_element_value(duration_spec, xml_field);	\</a>
+<a name="ln584">    if(value != NULL) {						\</a>
+<a name="ln585">	int value_i = crm_parse_int(value, &quot;0&quot;);		\</a>
+<a name="ln586">	time_fn(end, value_i);					\</a>
+<a name="ln587">    }</a>
+<a name="ln588"> </a>
+<a name="ln589">crm_time_t *</a>
+<a name="ln590">parse_xml_duration(crm_time_t * start, xmlNode * duration_spec)</a>
+<a name="ln591">{</a>
+<a name="ln592">    crm_time_t *end = NULL;</a>
+<a name="ln593">    const char *value = NULL;</a>
+<a name="ln594"> </a>
+<a name="ln595">    end = crm_time_new(NULL);</a>
+<a name="ln596">    crm_time_set(end, start);</a>
+<a name="ln597"> </a>
+<a name="ln598">    update_field(&quot;years&quot;, crm_time_add_years);</a>
+<a name="ln599">    update_field(&quot;months&quot;, crm_time_add_months);</a>
+<a name="ln600">    update_field(&quot;weeks&quot;, crm_time_add_weeks);</a>
+<a name="ln601">    update_field(&quot;days&quot;, crm_time_add_days);</a>
+<a name="ln602">    update_field(&quot;hours&quot;, crm_time_add_hours);</a>
+<a name="ln603">    update_field(&quot;minutes&quot;, crm_time_add_minutes);</a>
+<a name="ln604">    update_field(&quot;seconds&quot;, crm_time_add_seconds);</a>
+<a name="ln605"> </a>
+<a name="ln606">    return end;</a>
+<a name="ln607">}</a>
+<a name="ln608"> </a>
+<a name="ln609">gboolean</a>
+<a name="ln610">test_date_expression(xmlNode * time_expr, crm_time_t * now)</a>
+<a name="ln611">{</a>
+<a name="ln612">    crm_time_t *start = NULL;</a>
+<a name="ln613">    crm_time_t *end = NULL;</a>
+<a name="ln614">    const char *value = NULL;</a>
+<a name="ln615">    const char *op = crm_element_value(time_expr, &quot;operation&quot;);</a>
+<a name="ln616"> </a>
+<a name="ln617">    xmlNode *duration_spec = NULL;</a>
+<a name="ln618">    xmlNode *date_spec = NULL;</a>
+<a name="ln619"> </a>
+<a name="ln620">    gboolean passed = FALSE;</a>
+<a name="ln621"> </a>
+<a name="ln622">    crm_trace(&quot;Testing expression: %s&quot;, ID(time_expr));</a>
+<a name="ln623"> </a>
+<a name="ln624">    duration_spec = first_named_child(time_expr, &quot;duration&quot;);</a>
+<a name="ln625">    date_spec = first_named_child(time_expr, &quot;date_spec&quot;);</a>
+<a name="ln626"> </a>
+<a name="ln627">    value = crm_element_value(time_expr, &quot;start&quot;);</a>
+<a name="ln628">    if (value != NULL) {</a>
+<a name="ln629">        start = crm_time_new(value);</a>
+<a name="ln630">    }</a>
+<a name="ln631">    value = crm_element_value(time_expr, &quot;end&quot;);</a>
+<a name="ln632">    if (value != NULL) {</a>
+<a name="ln633">        end = crm_time_new(value);</a>
+<a name="ln634">    }</a>
+<a name="ln635"> </a>
+<a name="ln636">    if (start != NULL &amp;&amp; end == NULL &amp;&amp; duration_spec != NULL) {</a>
+<a name="ln637">        end = parse_xml_duration(start, duration_spec);</a>
+<a name="ln638">    }</a>
+<a name="ln639">    if (op == NULL) {</a>
+<a name="ln640">        op = &quot;in_range&quot;;</a>
+<a name="ln641">    }</a>
+<a name="ln642"> </a>
+<a name="ln643">    if (safe_str_eq(op, &quot;date_spec&quot;) || safe_str_eq(op, &quot;in_range&quot;)) {</a>
+<a name="ln644">        if (start != NULL &amp;&amp; crm_time_compare(start, now) &gt; 0) {</a>
+<a name="ln645">            passed = FALSE;</a>
+<a name="ln646">        } else if (end != NULL &amp;&amp; crm_time_compare(end, now) &lt; 0) {</a>
+<a name="ln647">            passed = FALSE;</a>
+<a name="ln648">        } else if (safe_str_eq(op, &quot;in_range&quot;)) {</a>
+<a name="ln649">            passed = TRUE;</a>
+<a name="ln650">        } else {</a>
+<a name="ln651">            passed = cron_range_satisfied(now, date_spec);</a>
+<a name="ln652">        }</a>
+<a name="ln653"> </a>
+<a name="ln654">    } else if (safe_str_eq(op, &quot;gt&quot;) &amp;&amp; crm_time_compare(start, now) &lt; 0) {</a>
+<a name="ln655">        passed = TRUE;</a>
+<a name="ln656"> </a>
+<a name="ln657">    } else if (safe_str_eq(op, &quot;lt&quot;) &amp;&amp; crm_time_compare(end, now) &gt; 0) {</a>
+<a name="ln658">        passed = TRUE;</a>
+<a name="ln659"> </a>
+<a name="ln660">    } else if (safe_str_eq(op, &quot;eq&quot;) &amp;&amp; crm_time_compare(start, now) == 0) {</a>
+<a name="ln661">        passed = TRUE;</a>
+<a name="ln662"> </a>
+<a name="ln663">    } else if (safe_str_eq(op, &quot;neq&quot;) &amp;&amp; crm_time_compare(start, now) != 0) {</a>
+<a name="ln664">        passed = TRUE;</a>
+<a name="ln665">    }</a>
+<a name="ln666"> </a>
+<a name="ln667">    crm_time_free(start);</a>
+<a name="ln668">    crm_time_free(end);</a>
+<a name="ln669">    return passed;</a>
+<a name="ln670">}</a>
+<a name="ln671"> </a>
+<a name="ln672">typedef struct sorted_set_s {</a>
+<a name="ln673">    int score;</a>
+<a name="ln674">    const char *name;</a>
+<a name="ln675">    const char *special_name;</a>
+<a name="ln676">    xmlNode *attr_set;</a>
+<a name="ln677">} sorted_set_t;</a>
+<a name="ln678"> </a>
+<a name="ln679">static gint</a>
+<a name="ln680">sort_pairs(gconstpointer a, gconstpointer b)</a>
+<a name="ln681">{</a>
+<a name="ln682">    const sorted_set_t *pair_a = a;</a>
+<a name="ln683">    const sorted_set_t *pair_b = b;</a>
+<a name="ln684"> </a>
+<a name="ln685">    if (a == NULL &amp;&amp; b == NULL) {</a>
+<a name="ln686">        return 0;</a>
+<a name="ln687">    } else if (a == NULL) {</a>
+<a name="ln688">        return 1;</a>
+<a name="ln689">    } else if (b == NULL) {</a>
+<a name="ln690">        return -1;</a>
+<a name="ln691">    }</a>
+<a name="ln692"> </a>
+<a name="ln693">    if (safe_str_eq(pair_a-&gt;name, pair_a-&gt;special_name)) {</a>
+<a name="ln694">        return -1;</a>
+<a name="ln695"> </a>
+<a name="ln696">    } else if (safe_str_eq(pair_b-&gt;name, pair_a-&gt;special_name)) {</a>
+<a name="ln697">        return 1;</a>
+<a name="ln698">    }</a>
+<a name="ln699"> </a>
+<a name="ln700">    if (pair_a-&gt;score &lt; pair_b-&gt;score) {</a>
+<a name="ln701">        return 1;</a>
+<a name="ln702">    } else if (pair_a-&gt;score &gt; pair_b-&gt;score) {</a>
+<a name="ln703">        return -1;</a>
+<a name="ln704">    }</a>
+<a name="ln705">    return 0;</a>
+<a name="ln706">}</a>
+<a name="ln707"> </a>
+<a name="ln708">static void</a>
+<a name="ln709">populate_hash(xmlNode * nvpair_list, GHashTable * hash, gboolean overwrite, xmlNode * top)</a>
+<a name="ln710">{</a>
+<a name="ln711">    const char *name = NULL;</a>
+<a name="ln712">    const char *value = NULL;</a>
+<a name="ln713">    const char *old_value = NULL;</a>
+<a name="ln714">    xmlNode *list = nvpair_list;</a>
+<a name="ln715">    xmlNode *an_attr = NULL;</a>
+<a name="ln716"> </a>
+<a name="ln717">    name = crm_element_name(list-&gt;children);</a>
+<a name="ln718">    if (safe_str_eq(XML_TAG_ATTRS, name)) {</a>
+<a name="ln719">        list = list-&gt;children;</a>
+<a name="ln720">    }</a>
+<a name="ln721"> </a>
+<a name="ln722">    for (an_attr = __xml_first_child(list); an_attr != NULL; an_attr = __xml_next_element(an_attr)) {</a>
+<a name="ln723">        if (crm_str_eq((const char *)an_attr-&gt;name, XML_CIB_TAG_NVPAIR, TRUE)) {</a>
+<a name="ln724">            xmlNode *ref_nvpair = expand_idref(an_attr, top);</a>
+<a name="ln725"> </a>
+<a name="ln726">            name = crm_element_value(an_attr, XML_NVPAIR_ATTR_NAME);</a>
+<a name="ln727">            if (name == NULL) {</a>
+<a name="ln728">                name = crm_element_value(ref_nvpair, XML_NVPAIR_ATTR_NAME);</a>
+<a name="ln729">            }</a>
+<a name="ln730"> </a>
+<a name="ln731">            crm_trace(&quot;Setting attribute: %s&quot;, name);</a>
+<a name="ln732">            value = crm_element_value(an_attr, XML_NVPAIR_ATTR_VALUE);</a>
+<a name="ln733">            if (value == NULL) {</a>
+<a name="ln734">                value = crm_element_value(ref_nvpair, XML_NVPAIR_ATTR_VALUE);</a>
+<a name="ln735">            }</a>
+<a name="ln736"> </a>
+<a name="ln737">            if (name == NULL || value == NULL) {</a>
+<a name="ln738">                continue;</a>
+<a name="ln739"> </a>
+<a name="ln740">            }</a>
+<a name="ln741"> </a>
+<a name="ln742">            old_value = g_hash_table_lookup(hash, name);</a>
+<a name="ln743"> </a>
+<a name="ln744">            if (safe_str_eq(value, &quot;#default&quot;)) {</a>
+<a name="ln745">                if (old_value) {</a>
+<a name="ln746">                    crm_trace(&quot;Removing value for %s (%s)&quot;, name, value);</a>
+<a name="ln747">                    g_hash_table_remove(hash, name);</a>
+<a name="ln748">                }</a>
+<a name="ln749">                continue;</a>
+<a name="ln750"> </a>
+<a name="ln751">            } else if (old_value == NULL) {</a>
+<a name="ln752">                g_hash_table_insert(hash, strdup(name), strdup(value));</a>
+<a name="ln753"> </a>
+<a name="ln754">            } else if (overwrite) {</a>
+<a name="ln755">                crm_debug(&quot;Overwriting value of %s: %s -&gt; %s&quot;, name, old_value, value);</a>
+<a name="ln756">                g_hash_table_replace(hash, strdup(name), strdup(value));</a>
+<a name="ln757">            }</a>
+<a name="ln758">        }</a>
+<a name="ln759">    }</a>
+<a name="ln760">}</a>
+<a name="ln761"> </a>
+<a name="ln762">static xmlNode*</a>
+<a name="ln763">get_versioned_rule(xmlNode * attr_set)</a>
+<a name="ln764">{</a>
+<a name="ln765">    xmlNode * rule = NULL;</a>
+<a name="ln766">    xmlNode * expr = NULL;</a>
+<a name="ln767"> </a>
+<a name="ln768">    for (rule = __xml_first_child(attr_set); rule != NULL; rule = __xml_next_element(rule)) {</a>
+<a name="ln769">        if (crm_str_eq((const char *)rule-&gt;name, XML_TAG_RULE, TRUE)) {</a>
+<a name="ln770">            for (expr = __xml_first_child(rule); expr != NULL; expr = __xml_next_element(expr)) {</a>
+<a name="ln771">                if (find_expression_type(expr) == version_expr) {</a>
+<a name="ln772">                    return rule;</a>
+<a name="ln773">                }</a>
+<a name="ln774">            }</a>
+<a name="ln775">        }</a>
+<a name="ln776">    }</a>
+<a name="ln777"> </a>
+<a name="ln778">    return NULL;</a>
+<a name="ln779">}</a>
+<a name="ln780"> </a>
+<a name="ln781">static void</a>
+<a name="ln782">add_versioned_attributes(xmlNode * attr_set, xmlNode * versioned_attrs)</a>
+<a name="ln783">{</a>
+<a name="ln784">    xmlNode *attr_set_copy = NULL;</a>
+<a name="ln785">    xmlNode *rule = NULL;</a>
+<a name="ln786">    xmlNode *expr = NULL;</a>
+<a name="ln787"> </a>
+<a name="ln788">    if (!attr_set || !versioned_attrs) {</a>
+<a name="ln789">        return;</a>
+<a name="ln790">    }</a>
+<a name="ln791"> </a>
+<a name="ln792">    attr_set_copy = copy_xml(attr_set);</a>
+<a name="ln793"> </a>
+<a name="ln794">    rule = get_versioned_rule(attr_set_copy);</a>
+<a name="ln795">    if (!rule) {</a>
+<a name="ln796">        free_xml(attr_set_copy);</a>
+<a name="ln797">        return;</a>
+<a name="ln798">    }</a>
+<a name="ln799"> </a>
+<a name="ln800">    expr = __xml_first_child(rule);</a>
+<a name="ln801">    while (expr != NULL) {</a>
+<a name="ln802">        if (find_expression_type(expr) != version_expr) {</a>
+<a name="ln803">            xmlNode *node = expr;</a>
+<a name="ln804"> </a>
+<a name="ln805">            expr = __xml_next_element(expr);</a>
+<a name="ln806">            free_xml(node);</a>
+<a name="ln807">        } else {</a>
+<a name="ln808">            expr = __xml_next_element(expr);</a>
+<a name="ln809">        }</a>
+<a name="ln810">    }</a>
+<a name="ln811"> </a>
+<a name="ln812">    add_node_nocopy(versioned_attrs, NULL, attr_set_copy);</a>
+<a name="ln813">}</a>
+<a name="ln814"> </a>
+<a name="ln815">typedef struct unpack_data_s {</a>
+<a name="ln816">    gboolean overwrite;</a>
+<a name="ln817">    GHashTable *node_hash;</a>
+<a name="ln818">    void *hash;</a>
+<a name="ln819">    crm_time_t *now;</a>
+<a name="ln820">    xmlNode *top;</a>
+<a name="ln821">} unpack_data_t;</a>
+<a name="ln822"> </a>
+<a name="ln823">static void</a>
+<a name="ln824">unpack_attr_set(gpointer data, gpointer user_data)</a>
+<a name="ln825">{</a>
+<a name="ln826">    sorted_set_t *pair = data;</a>
+<a name="ln827">    unpack_data_t *unpack_data = user_data;</a>
+<a name="ln828"> </a>
+<a name="ln829">    if (test_ruleset(pair-&gt;attr_set, unpack_data-&gt;node_hash, unpack_data-&gt;now) == FALSE) {</a>
+<a name="ln830">        return;</a>
+<a name="ln831">    }</a>
+<a name="ln832"> </a>
+<a name="ln833">    if (get_versioned_rule(pair-&gt;attr_set) &amp;&amp; !(unpack_data-&gt;node_hash &amp;&amp;</a>
+<a name="ln834">        g_hash_table_lookup_extended(unpack_data-&gt;node_hash, &quot;#ra-version&quot;, NULL, NULL))) {</a>
+<a name="ln835">        // we haven't actually tested versioned expressions yet</a>
+<a name="ln836">        return;</a>
+<a name="ln837">    }</a>
+<a name="ln838"> </a>
+<a name="ln839">    crm_trace(&quot;Adding attributes from %s&quot;, pair-&gt;name);</a>
+<a name="ln840">    populate_hash(pair-&gt;attr_set, unpack_data-&gt;hash, unpack_data-&gt;overwrite, unpack_data-&gt;top);</a>
+<a name="ln841">}</a>
+<a name="ln842"> </a>
+<a name="ln843">static void</a>
+<a name="ln844">unpack_versioned_attr_set(gpointer data, gpointer user_data)</a>
+<a name="ln845">{</a>
+<a name="ln846">    sorted_set_t *pair = data;</a>
+<a name="ln847">    unpack_data_t *unpack_data = user_data;</a>
+<a name="ln848"> </a>
+<a name="ln849">    if (test_ruleset(pair-&gt;attr_set, unpack_data-&gt;node_hash, unpack_data-&gt;now) == FALSE) {</a>
+<a name="ln850">        return;</a>
+<a name="ln851">    }</a>
+<a name="ln852"> </a>
+<a name="ln853">    add_versioned_attributes(pair-&gt;attr_set, unpack_data-&gt;hash);</a>
+<a name="ln854">}</a>
+<a name="ln855"> </a>
+<a name="ln856">static GListPtr</a>
+<a name="ln857">make_pairs_and_populate_data(xmlNode * top, xmlNode * xml_obj, const char *set_name,</a>
+<a name="ln858">                             GHashTable * node_hash, void * hash, const char *always_first,</a>
+<a name="ln859">                             gboolean overwrite, crm_time_t * now, unpack_data_t * data)</a>
+<a name="ln860">{</a>
+<a name="ln861">    GListPtr unsorted = NULL;</a>
+<a name="ln862">    const char *score = NULL;</a>
+<a name="ln863">    sorted_set_t *pair = NULL;</a>
+<a name="ln864">    xmlNode *attr_set = NULL;</a>
+<a name="ln865"> </a>
+<a name="ln866">    if (xml_obj == NULL) {</a>
+<a name="ln867">        crm_trace(&quot;No instance attributes&quot;);</a>
+<a name="ln868">        return NULL;</a>
+<a name="ln869">    }</a>
+<a name="ln870"> </a>
+<a name="ln871">    crm_trace(&quot;Checking for attributes&quot;);</a>
+<a name="ln872">    for (attr_set = __xml_first_child(xml_obj); attr_set != NULL; attr_set = __xml_next_element(attr_set)) {</a>
+<a name="ln873">        /* Uncertain if set_name == NULL check is strictly necessary here */</a>
+<a name="ln874">        if (set_name == NULL || crm_str_eq((const char *)attr_set-&gt;name, set_name, TRUE)) {</a>
+<a name="ln875">            pair = NULL;</a>
+<a name="ln876">            attr_set = expand_idref(attr_set, top);</a>
+<a name="ln877">            if (attr_set == NULL) {</a>
+<a name="ln878">                continue;</a>
+<a name="ln879">            }</a>
+<a name="ln880"> </a>
+<a name="ln881">            pair = calloc(1, sizeof(sorted_set_t));</a>
+<a name="ln882">            pair-&gt;name = ID(attr_set);</a>
+<a name="ln883">            pair-&gt;special_name = always_first;</a>
+<a name="ln884">            pair-&gt;attr_set = attr_set;</a>
+<a name="ln885"> </a>
+<a name="ln886">            score = crm_element_value(attr_set, XML_RULE_ATTR_SCORE);</a>
+<a name="ln887">            pair-&gt;score = char2score(score);</a>
+<a name="ln888"> </a>
+<a name="ln889">            unsorted = g_list_prepend(unsorted, pair);</a>
+<a name="ln890">        }</a>
+<a name="ln891">    }</a>
+<a name="ln892"> </a>
+<a name="ln893">    if (pair != NULL) {</a>
+<a name="ln894">        data-&gt;hash = hash;</a>
+<a name="ln895">        data-&gt;node_hash = node_hash;</a>
+<a name="ln896">        data-&gt;now = now;</a>
+<a name="ln897">        data-&gt;overwrite = overwrite;</a>
+<a name="ln898">        data-&gt;top = top;</a>
+<a name="ln899">    }</a>
+<a name="ln900"> </a>
+<a name="ln901">    if (unsorted) {</a>
+<a name="ln902">        return g_list_sort(unsorted, sort_pairs);</a>
+<a name="ln903">    }</a>
+<a name="ln904"> </a>
+<a name="ln905">    return NULL;</a>
+<a name="ln906">}</a>
+<a name="ln907"> </a>
+<a name="ln908">void</a>
+<a name="ln909">unpack_instance_attributes(xmlNode * top, xmlNode * xml_obj, const char *set_name,</a>
+<a name="ln910">                           GHashTable * node_hash, GHashTable * hash, const char *always_first,</a>
+<a name="ln911">                           gboolean overwrite, crm_time_t * now)</a>
+<a name="ln912">{</a>
+<a name="ln913">    unpack_data_t data;</a>
+<a name="ln914">    GListPtr pairs = make_pairs_and_populate_data(top, xml_obj, set_name, node_hash, hash,</a>
+<a name="ln915">                                                  always_first, overwrite, now, &amp;data);</a>
+<a name="ln916"> </a>
+<a name="ln917">    if (pairs) {</a>
+<a name="ln918">        g_list_foreach(pairs, unpack_attr_set, &amp;data);</a>
+<a name="ln919">        g_list_free_full(pairs, free);</a>
+<a name="ln920">    }</a>
+<a name="ln921">}</a>
+<a name="ln922"> </a>
+<a name="ln923">void</a>
+<a name="ln924">pe_unpack_versioned_attributes(xmlNode * top, xmlNode * xml_obj, const char *set_name,</a>
+<a name="ln925">                               GHashTable * node_hash, xmlNode * hash, crm_time_t * now)</a>
+<a name="ln926">{</a>
+<a name="ln927">    unpack_data_t data;</a>
+<a name="ln928">    GListPtr pairs = make_pairs_and_populate_data(top, xml_obj, set_name, node_hash, hash,</a>
+<a name="ln929">                                                  NULL, FALSE, now, &amp;data);</a>
+<a name="ln930"> </a>
+<a name="ln931">    if (pairs) {</a>
+<a name="ln932">        g_list_foreach(pairs, unpack_versioned_attr_set, &amp;data);</a>
+<a name="ln933">        g_list_free_full(pairs, free);</a>
+<a name="ln934">    }</a>
+<a name="ln935">}</a>
+<a name="ln936"> </a>
+<a name="ln937">char *</a>
+<a name="ln938">pe_expand_re_matches(const char *string, pe_re_match_data_t *match_data)</a>
+<a name="ln939">{</a>
+<a name="ln940">    size_t len = 0;</a>
+<a name="ln941">    int i;</a>
+<a name="ln942">    const char *p, *last_match_index;</a>
+<a name="ln943">    char *p_dst, *result = NULL;</a>
+<a name="ln944"> </a>
+<a name="ln945">    if (!string || string[0] == '\0' || !match_data) {</a>
+<a name="ln946">        return NULL;</a>
+<a name="ln947">    }</a>
+<a name="ln948"> </a>
+<a name="ln949">    p = last_match_index = string;</a>
+<a name="ln950"> </a>
+<a name="ln951">    while (*p) {</a>
+<a name="ln952">        if (*p == '%' &amp;&amp; *(p + 1) &amp;&amp; isdigit(*(p + 1))) {</a>
+<a name="ln953">            i = *(p + 1) - '0';</a>
+<a name="ln954">            if (match_data-&gt;nregs &gt;= i &amp;&amp; match_data-&gt;pmatch[i].rm_so != -1 &amp;&amp;</a>
+<a name="ln955">                match_data-&gt;pmatch[i].rm_eo &gt; match_data-&gt;pmatch[i].rm_so) {</a>
+<a name="ln956">                len += p - last_match_index + (match_data-&gt;pmatch[i].rm_eo - match_data-&gt;pmatch[i].rm_so);</a>
+<a name="ln957">                last_match_index = p + 2;</a>
+<a name="ln958">            }</a>
+<a name="ln959">            p++;</a>
+<a name="ln960">        }</a>
+<a name="ln961">        p++;</a>
+<a name="ln962">    }</a>
+<a name="ln963">    len += p - last_match_index + 1;</a>
+<a name="ln964"> </a>
+<a name="ln965">    /* FIXME: Excessive? */</a>
+<a name="ln966">    if (len - 1 &lt;= 0) {</a>
+<a name="ln967">        return NULL;</a>
+<a name="ln968">    }</a>
+<a name="ln969"> </a>
+<a name="ln970">    p_dst = result = calloc(1, len);</a>
+<a name="ln971">    p = string;</a>
+<a name="ln972"> </a>
+<a name="ln973">    while (*p) {</a>
+<a name="ln974">        if (*p == '%' &amp;&amp; *(p + 1) &amp;&amp; isdigit(*(p + 1))) {</a>
+<a name="ln975">            i = *(p + 1) - '0';</a>
+<a name="ln976">            if (match_data-&gt;nregs &gt;= i &amp;&amp; match_data-&gt;pmatch[i].rm_so != -1 &amp;&amp;</a>
+<a name="ln977">                match_data-&gt;pmatch[i].rm_eo &gt; match_data-&gt;pmatch[i].rm_so) {</a>
+<a name="ln978">                /* rm_eo can be equal to rm_so, but then there is nothing to do */</a>
+<a name="ln979">                int match_len = match_data-&gt;pmatch[i].rm_eo - match_data-&gt;pmatch[i].rm_so;</a>
+<a name="ln980">                memcpy(p_dst, match_data-&gt;string + match_data-&gt;pmatch[i].rm_so, match_len);</a>
+<a name="ln981">                p_dst += match_len;</a>
+<a name="ln982">            }</a>
+<a name="ln983">            p++;</a>
+<a name="ln984">        } else {</a>
+<a name="ln985">            *(p_dst) = *(p);</a>
+<a name="ln986">            p_dst++;</a>
+<a name="ln987">        }</a>
+<a name="ln988">        p++;</a>
+<a name="ln989">    }</a>
+<a name="ln990"> </a>
+<a name="ln991">    return result;</a>
+<a name="ln992">}</a>
+<a name="ln993"> </a>
+<a name="ln994">GHashTable*</a>
+<a name="ln995">pe_unpack_versioned_parameters(xmlNode *versioned_params, const char *ra_version)</a>
+<a name="ln996">{</a>
+<a name="ln997">    GHashTable *hash = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln998">                               g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln999"> </a>
+<a name="ln1000">    if (versioned_params &amp;&amp; ra_version) {</a>
+<a name="ln1001">        GHashTable *node_hash = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln1002">                                        g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln1003">        xmlNode *attr_set = __xml_first_child(versioned_params);</a>
+<a name="ln1004"> </a>
+<a name="ln1005">        if (attr_set) {</a>
+<a name="ln1006">            g_hash_table_insert(node_hash, strdup(&quot;#&quot; XML_ATTR_RA_VERSION), strdup(ra_version));</a>
+<a name="ln1007">            unpack_instance_attributes(NULL, versioned_params, crm_element_name(attr_set),</a>
+<a name="ln1008">                                       node_hash, hash, NULL, FALSE, NULL);</a>
+<a name="ln1009">        }</a>
+<a name="ln1010"> </a>
+<a name="ln1011">        g_hash_table_destroy(node_hash);</a>
+<a name="ln1012">    }</a>
+<a name="ln1013"> </a>
+<a name="ln1014">    return hash;</a>
+<a name="ln1015">}</a>
+
+</code></pre>
+<div class="balloon" rel="179"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V779/" target="_blank">V779</a> Unreachable code detected. It is possible that an error is present.</p></div>
+<div class="balloon" rel="752"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 752, 752.</p></div>
+<div class="balloon" rel="756"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_replace' function. Inspect the second argument. Check lines: 756, 756.</p></div>
+<div class="balloon" rel="882"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'pair'. Check lines: 882, 881.</p></div>
+<div class="balloon" rel="980"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'memcpy' function. Inspect the first argument. Check lines: 980, 970.</p></div>
+<div class="balloon" rel="1006"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 1006, 1006.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

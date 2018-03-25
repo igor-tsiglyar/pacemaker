@@ -1,0 +1,478 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22">#include &lt;crm_internal.h&gt;</a>
+<a name="ln23">#include &lt;crm/crm.h&gt;</a>
+<a name="ln24">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln25">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln26">#include &lt;crm/common/util.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">#include &lt;glib.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln31"> </a>
+<a name="ln32">gboolean was_processing_error = FALSE;</a>
+<a name="ln33">gboolean was_processing_warning = FALSE;</a>
+<a name="ln34"> </a>
+<a name="ln35">static gboolean</a>
+<a name="ln36">check_health(const char *value)</a>
+<a name="ln37">{</a>
+<a name="ln38">    if (safe_str_eq(value, &quot;none&quot;)) {</a>
+<a name="ln39">        return TRUE;</a>
+<a name="ln40"> </a>
+<a name="ln41">    } else if (safe_str_eq(value, &quot;custom&quot;)) {</a>
+<a name="ln42">        return TRUE;</a>
+<a name="ln43"> </a>
+<a name="ln44">    } else if (safe_str_eq(value, &quot;only-green&quot;)) {</a>
+<a name="ln45">        return TRUE;</a>
+<a name="ln46"> </a>
+<a name="ln47">    } else if (safe_str_eq(value, &quot;progressive&quot;)) {</a>
+<a name="ln48">        return TRUE;</a>
+<a name="ln49"> </a>
+<a name="ln50">    } else if (safe_str_eq(value, &quot;migrate-on-red&quot;)) {</a>
+<a name="ln51">        return TRUE;</a>
+<a name="ln52">    }</a>
+<a name="ln53">    return FALSE;</a>
+<a name="ln54">}</a>
+<a name="ln55"> </a>
+<a name="ln56">static gboolean</a>
+<a name="ln57">check_stonith_action(const char *value)</a>
+<a name="ln58">{</a>
+<a name="ln59">    if (safe_str_eq(value, &quot;reboot&quot;)) {</a>
+<a name="ln60">        return TRUE;</a>
+<a name="ln61"> </a>
+<a name="ln62">    } else if (safe_str_eq(value, &quot;poweroff&quot;)) {</a>
+<a name="ln63">        return TRUE;</a>
+<a name="ln64"> </a>
+<a name="ln65">    } else if (safe_str_eq(value, &quot;off&quot;)) {</a>
+<a name="ln66">        return TRUE;</a>
+<a name="ln67">    }</a>
+<a name="ln68">    return FALSE;</a>
+<a name="ln69">}</a>
+<a name="ln70"> </a>
+<a name="ln71">static gboolean</a>
+<a name="ln72">check_placement_strategy(const char *value)</a>
+<a name="ln73">{</a>
+<a name="ln74">    if (safe_str_eq(value, &quot;default&quot;)) {</a>
+<a name="ln75">        return TRUE;</a>
+<a name="ln76"> </a>
+<a name="ln77">    } else if (safe_str_eq(value, &quot;utilization&quot;)) {</a>
+<a name="ln78">        return TRUE;</a>
+<a name="ln79"> </a>
+<a name="ln80">    } else if (safe_str_eq(value, &quot;minimal&quot;)) {</a>
+<a name="ln81">        return TRUE;</a>
+<a name="ln82"> </a>
+<a name="ln83">    } else if (safe_str_eq(value, &quot;balanced&quot;)) {</a>
+<a name="ln84">        return TRUE;</a>
+<a name="ln85">    }</a>
+<a name="ln86">    return FALSE;</a>
+<a name="ln87">}</a>
+<a name="ln88"> </a>
+<a name="ln89">/* *INDENT-OFF* */</a>
+<a name="ln90">pe_cluster_option pe_opts[] = {</a>
+<a name="ln91">	/* name, old-name, validate, default, description */</a>
+<a name="ln92">	{ &quot;no-quorum-policy&quot;, &quot;no_quorum_policy&quot;, &quot;enum&quot;, &quot;stop, freeze, ignore, suicide&quot;, &quot;stop&quot;, &amp;check_quorum,</a>
+<a name="ln93">	  &quot;What to do when the cluster does not have quorum&quot;, NULL },</a>
+<a name="ln94">	{ &quot;symmetric-cluster&quot;, &quot;symmetric_cluster&quot;, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln95">	  &quot;All resources can run anywhere by default&quot;, NULL },</a>
+<a name="ln96">	{ &quot;default-resource-stickiness&quot;, &quot;default_resource_stickiness&quot;, &quot;integer&quot;, NULL, &quot;0&quot;, &amp;check_number, &quot;&quot;, NULL },</a>
+<a name="ln97">	{ &quot;is-managed-default&quot;, &quot;is_managed_default&quot;, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln98">	  &quot;Should the cluster start/stop resources as required&quot;, NULL },</a>
+<a name="ln99">	{ &quot;maintenance-mode&quot;, NULL, &quot;boolean&quot;, NULL, &quot;false&quot;, &amp;check_boolean,</a>
+<a name="ln100">	  &quot;Should the cluster monitor resources and start/stop them as required&quot;, NULL },</a>
+<a name="ln101">	{ &quot;start-failure-is-fatal&quot;, NULL, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean, &quot;Always treat start failures as fatal&quot;,</a>
+<a name="ln102">	  &quot;This was the old default.  However when set to FALSE, the cluster will instead use the resource's failcount and value for resource-failure-stickiness&quot; },</a>
+<a name="ln103">	{ &quot;enable-startup-probes&quot;, NULL, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln104">	  &quot;Should the cluster check for active resources during startup&quot;, NULL },</a>
+<a name="ln105"> </a>
+<a name="ln106">	/* Stonith Options */</a>
+<a name="ln107">	{ &quot;stonith-enabled&quot;, &quot;stonith_enabled&quot;, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln108">	  &quot;Failed nodes are STONITH'd&quot;, NULL },</a>
+<a name="ln109">	{ &quot;stonith-action&quot;, &quot;stonith_action&quot;, &quot;enum&quot;, &quot;reboot, poweroff, off&quot;, &quot;reboot&quot;, &amp;check_stonith_action,</a>
+<a name="ln110">	  &quot;Action to send to STONITH device&quot;, NULL },</a>
+<a name="ln111">	{ &quot;stonith-timeout&quot;, NULL, &quot;time&quot;, NULL, &quot;60s&quot;, &amp;check_timer,</a>
+<a name="ln112">	  &quot;How long to wait for the STONITH action (reboot,on,off) to complete&quot;, NULL },</a>
+<a name="ln113">	{ XML_ATTR_HAVE_WATCHDOG, NULL, &quot;boolean&quot;, NULL, &quot;false&quot;, &amp;check_boolean,</a>
+<a name="ln114">	  &quot;Enable watchdog integration&quot;, &quot;Set automatically by the cluster if SBD is detected.  User configured values are ignored.&quot; },</a>
+<a name="ln115">	{ &quot;concurrent-fencing&quot;, NULL, &quot;boolean&quot;, NULL, &quot;false&quot;, &amp;check_boolean,</a>
+<a name="ln116">	  &quot;Allow performing fencing operations in parallel&quot;, NULL },</a>
+<a name="ln117">	{ &quot;startup-fencing&quot;, &quot;startup_fencing&quot;, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln118">	  &quot;STONITH unseen nodes&quot;, &quot;Advanced Use Only!  Not using the default is very unsafe!&quot; },</a>
+<a name="ln119"> </a>
+<a name="ln120">	/* Timeouts etc */</a>
+<a name="ln121">	{ &quot;cluster-delay&quot;, &quot;transition_idle_timeout&quot;, &quot;time&quot;, NULL, &quot;60s&quot;, &amp;check_time,</a>
+<a name="ln122">	  &quot;Round trip delay over the network (excluding action execution)&quot;,</a>
+<a name="ln123">	  &quot;The \&quot;correct\&quot; value will depend on the speed and load of your network and cluster nodes.&quot; },</a>
+<a name="ln124">	{ &quot;batch-limit&quot;, NULL, &quot;integer&quot;, NULL, &quot;0&quot;, &amp;check_number,</a>
+<a name="ln125">	  &quot;The number of jobs that the TE is allowed to execute in parallel&quot;,</a>
+<a name="ln126">	  &quot;The \&quot;correct\&quot; value will depend on the speed and load of your network and cluster nodes.&quot; },</a>
+<a name="ln127">	{ &quot;migration-limit&quot;, NULL, &quot;integer&quot;, NULL, &quot;-1&quot;, &amp;check_number,</a>
+<a name="ln128">	  &quot;The number of migration jobs that the TE is allowed to execute in parallel on a node&quot;},</a>
+<a name="ln129">	{ &quot;default-action-timeout&quot;, &quot;default_action_timeout&quot;, &quot;time&quot;, NULL, &quot;20s&quot;, &amp;check_time,</a>
+<a name="ln130">	  &quot;How long to wait for actions to complete&quot;, NULL },</a>
+<a name="ln131"> </a>
+<a name="ln132">	/* Orphans and stopping */</a>
+<a name="ln133">	{ &quot;stop-all-resources&quot;, NULL, &quot;boolean&quot;, NULL, &quot;false&quot;, &amp;check_boolean,</a>
+<a name="ln134">	  &quot;Should the cluster stop all active resources (except those needed for fencing)&quot;, NULL },</a>
+<a name="ln135">	{ &quot;stop-orphan-resources&quot;, &quot;stop_orphan_resources&quot;, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln136">	  &quot;Should deleted resources be stopped&quot;, NULL },</a>
+<a name="ln137">	{ &quot;stop-orphan-actions&quot;, &quot;stop_orphan_actions&quot;, &quot;boolean&quot;, NULL, &quot;true&quot;, &amp;check_boolean,</a>
+<a name="ln138">	  &quot;Should deleted actions be cancelled&quot;, NULL },</a>
+<a name="ln139"> 	{ &quot;remove-after-stop&quot;, &quot;remove_after_stop&quot;, &quot;boolean&quot;, NULL, &quot;false&quot;, &amp;check_boolean,</a>
+<a name="ln140">	  &quot;Remove resources from the LRM after they are stopped&quot;,</a>
+<a name="ln141">	  &quot;Always set this to false.  Other values are, at best, poorly tested and potentially dangerous.&quot; },</a>
+<a name="ln142">/* 	{ &quot;&quot;, &quot;&quot;, , &quot;0&quot;, &quot;&quot;, NULL }, */</a>
+<a name="ln143"> </a>
+<a name="ln144">	/* Storing inputs */</a>
+<a name="ln145">	{ &quot;pe-error-series-max&quot;, NULL, &quot;integer&quot;, NULL, &quot;-1&quot;, &amp;check_number,</a>
+<a name="ln146">	  &quot;The number of PE inputs resulting in ERRORs to save&quot;, &quot;Zero to disable, -1 to store unlimited.&quot; },</a>
+<a name="ln147">	{ &quot;pe-warn-series-max&quot;,  NULL, &quot;integer&quot;, NULL, &quot;5000&quot;, &amp;check_number,</a>
+<a name="ln148">	  &quot;The number of PE inputs resulting in WARNINGs to save&quot;, &quot;Zero to disable, -1 to store unlimited.&quot; },</a>
+<a name="ln149">	{ &quot;pe-input-series-max&quot;, NULL, &quot;integer&quot;, NULL, &quot;4000&quot;, &amp;check_number,</a>
+<a name="ln150">	  &quot;The number of other PE inputs to save&quot;, &quot;Zero to disable, -1 to store unlimited.&quot; },</a>
+<a name="ln151"> </a>
+<a name="ln152">	/* Node health */</a>
+<a name="ln153">	{ &quot;node-health-strategy&quot;, NULL, &quot;enum&quot;, &quot;none, migrate-on-red, only-green, progressive, custom&quot;, &quot;none&quot;, &amp;check_health,</a>
+<a name="ln154">	  &quot;The strategy combining node attributes to determine overall node health.&quot;,</a>
+<a name="ln155">	  &quot;Requires external entities to create node attributes (named with the prefix '#health') with values: 'red', 'yellow' or 'green'.&quot;},</a>
+<a name="ln156">	{ &quot;node-health-base&quot;, NULL, &quot;integer&quot;, NULL, &quot;0&quot;, &amp;check_number,</a>
+<a name="ln157">	  &quot;The base score assigned to a node&quot;,</a>
+<a name="ln158">	  &quot;Only used when node-health-strategy is set to progressive.&quot; },</a>
+<a name="ln159">	{ &quot;node-health-green&quot;, NULL, &quot;integer&quot;, NULL, &quot;0&quot;, &amp;check_number,</a>
+<a name="ln160">	  &quot;The score 'green' translates to in rsc_location constraints&quot;,</a>
+<a name="ln161">	  &quot;Only used when node-health-strategy is set to custom or progressive.&quot; },</a>
+<a name="ln162">	{ &quot;node-health-yellow&quot;, NULL, &quot;integer&quot;, NULL, &quot;0&quot;, &amp;check_number,</a>
+<a name="ln163">	  &quot;The score 'yellow' translates to in rsc_location constraints&quot;,</a>
+<a name="ln164">	  &quot;Only used when node-health-strategy is set to custom or progressive.&quot; },</a>
+<a name="ln165">	{ &quot;node-health-red&quot;, NULL, &quot;integer&quot;, NULL, &quot;-INFINITY&quot;, &amp;check_number,</a>
+<a name="ln166">	  &quot;The score 'red' translates to in rsc_location constraints&quot;,</a>
+<a name="ln167">	  &quot;Only used when node-health-strategy is set to custom or progressive.&quot; },</a>
+<a name="ln168"> </a>
+<a name="ln169">	/*Placement Strategy*/</a>
+<a name="ln170">	{ &quot;placement-strategy&quot;, NULL, &quot;enum&quot;, &quot;default, utilization, minimal, balanced&quot;, &quot;default&quot;, &amp;check_placement_strategy,</a>
+<a name="ln171">	  &quot;The strategy to determine resource placement&quot;, NULL},</a>
+<a name="ln172">};</a>
+<a name="ln173">/* *INDENT-ON* */</a>
+<a name="ln174"> </a>
+<a name="ln175">void</a>
+<a name="ln176">pe_metadata(void)</a>
+<a name="ln177">{</a>
+<a name="ln178">    config_metadata(&quot;Policy Engine&quot;, &quot;1.0&quot;,</a>
+<a name="ln179">                    &quot;Policy Engine Options&quot;,</a>
+<a name="ln180">                    &quot;This is a fake resource that details the options that can be configured for the Policy Engine.&quot;,</a>
+<a name="ln181">                    pe_opts, DIMOF(pe_opts));</a>
+<a name="ln182">}</a>
+<a name="ln183"> </a>
+<a name="ln184">void</a>
+<a name="ln185">verify_pe_options(GHashTable * options)</a>
+<a name="ln186">{</a>
+<a name="ln187">    verify_all_options(options, pe_opts, DIMOF(pe_opts));</a>
+<a name="ln188">}</a>
+<a name="ln189"> </a>
+<a name="ln190">const char *</a>
+<a name="ln191">pe_pref(GHashTable * options, const char *name)</a>
+<a name="ln192">{</a>
+<a name="ln193">    return get_cluster_pref(options, pe_opts, DIMOF(pe_opts), name);</a>
+<a name="ln194">}</a>
+<a name="ln195"> </a>
+<a name="ln196">const char *</a>
+<a name="ln197">fail2text(enum action_fail_response fail)</a>
+<a name="ln198">{</a>
+<a name="ln199">    const char *result = &quot;&lt;unknown&gt;&quot;;</a>
+<a name="ln200"> </a>
+<a name="ln201">    switch (fail) {</a>
+<a name="ln202">        case action_fail_ignore:</a>
+<a name="ln203">            result = &quot;ignore&quot;;</a>
+<a name="ln204">            break;</a>
+<a name="ln205">        case action_fail_block:</a>
+<a name="ln206">            result = &quot;block&quot;;</a>
+<a name="ln207">            break;</a>
+<a name="ln208">        case action_fail_recover:</a>
+<a name="ln209">            result = &quot;recover&quot;;</a>
+<a name="ln210">            break;</a>
+<a name="ln211">        case action_fail_migrate:</a>
+<a name="ln212">            result = &quot;migrate&quot;;</a>
+<a name="ln213">            break;</a>
+<a name="ln214">        case action_fail_stop:</a>
+<a name="ln215">            result = &quot;stop&quot;;</a>
+<a name="ln216">            break;</a>
+<a name="ln217">        case action_fail_fence:</a>
+<a name="ln218">            result = &quot;fence&quot;;</a>
+<a name="ln219">            break;</a>
+<a name="ln220">        case action_fail_standby:</a>
+<a name="ln221">            result = &quot;standby&quot;;</a>
+<a name="ln222">            break;</a>
+<a name="ln223">        case action_fail_restart_container:</a>
+<a name="ln224">            result = &quot;restart-container&quot;;</a>
+<a name="ln225">            break;</a>
+<a name="ln226">        case action_fail_reset_remote:</a>
+<a name="ln227">            result = &quot;reset-remote&quot;;</a>
+<a name="ln228">            break;</a>
+<a name="ln229">    }</a>
+<a name="ln230">    return result;</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">enum action_tasks</a>
+<a name="ln234">text2task(const char *task)</a>
+<a name="ln235">{</a>
+<a name="ln236">    if (safe_str_eq(task, CRMD_ACTION_STOP)) {</a>
+<a name="ln237">        return stop_rsc;</a>
+<a name="ln238">    } else if (safe_str_eq(task, CRMD_ACTION_STOPPED)) {</a>
+<a name="ln239">        return stopped_rsc;</a>
+<a name="ln240">    } else if (safe_str_eq(task, CRMD_ACTION_START)) {</a>
+<a name="ln241">        return start_rsc;</a>
+<a name="ln242">    } else if (safe_str_eq(task, CRMD_ACTION_STARTED)) {</a>
+<a name="ln243">        return started_rsc;</a>
+<a name="ln244">    } else if (safe_str_eq(task, CRM_OP_SHUTDOWN)) {</a>
+<a name="ln245">        return shutdown_crm;</a>
+<a name="ln246">    } else if (safe_str_eq(task, CRM_OP_FENCE)) {</a>
+<a name="ln247">        return stonith_node;</a>
+<a name="ln248">    } else if (safe_str_eq(task, CRMD_ACTION_STATUS)) {</a>
+<a name="ln249">        return monitor_rsc;</a>
+<a name="ln250">    } else if (safe_str_eq(task, CRMD_ACTION_NOTIFY)) {</a>
+<a name="ln251">        return action_notify;</a>
+<a name="ln252">    } else if (safe_str_eq(task, CRMD_ACTION_NOTIFIED)) {</a>
+<a name="ln253">        return action_notified;</a>
+<a name="ln254">    } else if (safe_str_eq(task, CRMD_ACTION_PROMOTE)) {</a>
+<a name="ln255">        return action_promote;</a>
+<a name="ln256">    } else if (safe_str_eq(task, CRMD_ACTION_DEMOTE)) {</a>
+<a name="ln257">        return action_demote;</a>
+<a name="ln258">    } else if (safe_str_eq(task, CRMD_ACTION_PROMOTED)) {</a>
+<a name="ln259">        return action_promoted;</a>
+<a name="ln260">    } else if (safe_str_eq(task, CRMD_ACTION_DEMOTED)) {</a>
+<a name="ln261">        return action_demoted;</a>
+<a name="ln262">    }</a>
+<a name="ln263">#if SUPPORT_TRACING</a>
+<a name="ln264">    if (safe_str_eq(task, CRMD_ACTION_CANCEL)) {</a>
+<a name="ln265">        return no_action;</a>
+<a name="ln266">    } else if (safe_str_eq(task, CRMD_ACTION_DELETE)) {</a>
+<a name="ln267">        return no_action;</a>
+<a name="ln268">    } else if (safe_str_eq(task, CRMD_ACTION_STATUS)) {</a>
+<a name="ln269">        return no_action;</a>
+<a name="ln270">    } else if (safe_str_eq(task, CRM_OP_PROBED)) {</a>
+<a name="ln271">        return no_action;</a>
+<a name="ln272">    } else if (safe_str_eq(task, CRM_OP_LRM_REFRESH)) {</a>
+<a name="ln273">        return no_action;</a>
+<a name="ln274">    } else if (safe_str_eq(task, CRMD_ACTION_MIGRATE)) {</a>
+<a name="ln275">        return no_action;</a>
+<a name="ln276">    } else if (safe_str_eq(task, CRMD_ACTION_MIGRATED)) {</a>
+<a name="ln277">        return no_action;</a>
+<a name="ln278">    } else if (safe_str_eq(task, &quot;fail&quot;)) {</a>
+<a name="ln279">        return no_action;</a>
+<a name="ln280">    } else if (safe_str_eq(task, &quot;stonith_up&quot;)) {</a>
+<a name="ln281">        return no_action;</a>
+<a name="ln282">    } else if (safe_str_eq(task, &quot;stonith_complete&quot;)) {</a>
+<a name="ln283">        return no_action;</a>
+<a name="ln284">    } else if (safe_str_eq(task, &quot;all_stopped&quot;)) {</a>
+<a name="ln285">        return no_action;</a>
+<a name="ln286">    }</a>
+<a name="ln287">    crm_trace(&quot;Unsupported action: %s&quot;, task);</a>
+<a name="ln288">#endif</a>
+<a name="ln289"> </a>
+<a name="ln290">    return no_action;</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293">const char *</a>
+<a name="ln294">task2text(enum action_tasks task)</a>
+<a name="ln295">{</a>
+<a name="ln296">    const char *result = &quot;&lt;unknown&gt;&quot;;</a>
+<a name="ln297"> </a>
+<a name="ln298">    switch (task) {</a>
+<a name="ln299">        case no_action:</a>
+<a name="ln300">            result = &quot;no_action&quot;;</a>
+<a name="ln301">            break;</a>
+<a name="ln302">        case stop_rsc:</a>
+<a name="ln303">            result = CRMD_ACTION_STOP;</a>
+<a name="ln304">            break;</a>
+<a name="ln305">        case stopped_rsc:</a>
+<a name="ln306">            result = CRMD_ACTION_STOPPED;</a>
+<a name="ln307">            break;</a>
+<a name="ln308">        case start_rsc:</a>
+<a name="ln309">            result = CRMD_ACTION_START;</a>
+<a name="ln310">            break;</a>
+<a name="ln311">        case started_rsc:</a>
+<a name="ln312">            result = CRMD_ACTION_STARTED;</a>
+<a name="ln313">            break;</a>
+<a name="ln314">        case shutdown_crm:</a>
+<a name="ln315">            result = CRM_OP_SHUTDOWN;</a>
+<a name="ln316">            break;</a>
+<a name="ln317">        case stonith_node:</a>
+<a name="ln318">            result = CRM_OP_FENCE;</a>
+<a name="ln319">            break;</a>
+<a name="ln320">        case monitor_rsc:</a>
+<a name="ln321">            result = CRMD_ACTION_STATUS;</a>
+<a name="ln322">            break;</a>
+<a name="ln323">        case action_notify:</a>
+<a name="ln324">            result = CRMD_ACTION_NOTIFY;</a>
+<a name="ln325">            break;</a>
+<a name="ln326">        case action_notified:</a>
+<a name="ln327">            result = CRMD_ACTION_NOTIFIED;</a>
+<a name="ln328">            break;</a>
+<a name="ln329">        case action_promote:</a>
+<a name="ln330">            result = CRMD_ACTION_PROMOTE;</a>
+<a name="ln331">            break;</a>
+<a name="ln332">        case action_promoted:</a>
+<a name="ln333">            result = CRMD_ACTION_PROMOTED;</a>
+<a name="ln334">            break;</a>
+<a name="ln335">        case action_demote:</a>
+<a name="ln336">            result = CRMD_ACTION_DEMOTE;</a>
+<a name="ln337">            break;</a>
+<a name="ln338">        case action_demoted:</a>
+<a name="ln339">            result = CRMD_ACTION_DEMOTED;</a>
+<a name="ln340">            break;</a>
+<a name="ln341">    }</a>
+<a name="ln342"> </a>
+<a name="ln343">    return result;</a>
+<a name="ln344">}</a>
+<a name="ln345"> </a>
+<a name="ln346">const char *</a>
+<a name="ln347">role2text(enum rsc_role_e role)</a>
+<a name="ln348">{</a>
+<a name="ln349">    switch (role) {</a>
+<a name="ln350">        case RSC_ROLE_UNKNOWN:</a>
+<a name="ln351">            return RSC_ROLE_UNKNOWN_S;</a>
+<a name="ln352">        case RSC_ROLE_STOPPED:</a>
+<a name="ln353">            return RSC_ROLE_STOPPED_S;</a>
+<a name="ln354">        case RSC_ROLE_STARTED:</a>
+<a name="ln355">            return RSC_ROLE_STARTED_S;</a>
+<a name="ln356">        case RSC_ROLE_SLAVE:</a>
+<a name="ln357">            return RSC_ROLE_SLAVE_S;</a>
+<a name="ln358">        case RSC_ROLE_MASTER:</a>
+<a name="ln359">            return RSC_ROLE_MASTER_S;</a>
+<a name="ln360">    }</a>
+<a name="ln361">    CRM_CHECK(role &gt;= RSC_ROLE_UNKNOWN, return RSC_ROLE_UNKNOWN_S);</a>
+<a name="ln362">    CRM_CHECK(role &lt; RSC_ROLE_MAX, return RSC_ROLE_UNKNOWN_S);</a>
+<a name="ln363">    return RSC_ROLE_UNKNOWN_S;</a>
+<a name="ln364">}</a>
+<a name="ln365"> </a>
+<a name="ln366">enum rsc_role_e</a>
+<a name="ln367">text2role(const char *role)</a>
+<a name="ln368">{</a>
+<a name="ln369">    CRM_ASSERT(role != NULL);</a>
+<a name="ln370">    if (safe_str_eq(role, RSC_ROLE_STOPPED_S)) {</a>
+<a name="ln371">        return RSC_ROLE_STOPPED;</a>
+<a name="ln372">    } else if (safe_str_eq(role, RSC_ROLE_STARTED_S)) {</a>
+<a name="ln373">        return RSC_ROLE_STARTED;</a>
+<a name="ln374">    } else if (safe_str_eq(role, RSC_ROLE_SLAVE_S)) {</a>
+<a name="ln375">        return RSC_ROLE_SLAVE;</a>
+<a name="ln376">    } else if (safe_str_eq(role, RSC_ROLE_MASTER_S)) {</a>
+<a name="ln377">        return RSC_ROLE_MASTER;</a>
+<a name="ln378">    } else if (safe_str_eq(role, RSC_ROLE_UNKNOWN_S)) {</a>
+<a name="ln379">        return RSC_ROLE_UNKNOWN;</a>
+<a name="ln380">    }</a>
+<a name="ln381">    crm_err(&quot;Unknown role: %s&quot;, role);</a>
+<a name="ln382">    return RSC_ROLE_UNKNOWN;</a>
+<a name="ln383">}</a>
+<a name="ln384"> </a>
+<a name="ln385">int</a>
+<a name="ln386">merge_weights(int w1, int w2)</a>
+<a name="ln387">{</a>
+<a name="ln388">    int result = w1 + w2;</a>
+<a name="ln389"> </a>
+<a name="ln390">    if (w1 &lt;= -INFINITY || w2 &lt;= -INFINITY) {</a>
+<a name="ln391">        if (w1 &gt;= INFINITY || w2 &gt;= INFINITY) {</a>
+<a name="ln392">            crm_trace(&quot;-INFINITY + INFINITY == -INFINITY&quot;);</a>
+<a name="ln393">        }</a>
+<a name="ln394">        return -INFINITY;</a>
+<a name="ln395"> </a>
+<a name="ln396">    } else if (w1 &gt;= INFINITY || w2 &gt;= INFINITY) {</a>
+<a name="ln397">        return INFINITY;</a>
+<a name="ln398">    }</a>
+<a name="ln399"> </a>
+<a name="ln400">    /* detect wrap-around */</a>
+<a name="ln401">    if (result &gt; 0) {</a>
+<a name="ln402">        if (w1 &lt;= 0 &amp;&amp; w2 &lt; 0) {</a>
+<a name="ln403">            result = -INFINITY;</a>
+<a name="ln404">        }</a>
+<a name="ln405"> </a>
+<a name="ln406">    } else if (w1 &gt; 0 &amp;&amp; w2 &gt; 0) {</a>
+<a name="ln407">        result = INFINITY;</a>
+<a name="ln408">    }</a>
+<a name="ln409"> </a>
+<a name="ln410">    /* detect +/- INFINITY */</a>
+<a name="ln411">    if (result &gt;= INFINITY) {</a>
+<a name="ln412">        result = INFINITY;</a>
+<a name="ln413"> </a>
+<a name="ln414">    } else if (result &lt;= -INFINITY) {</a>
+<a name="ln415">        result = -INFINITY;</a>
+<a name="ln416">    }</a>
+<a name="ln417"> </a>
+<a name="ln418">    crm_trace(&quot;%d + %d = %d&quot;, w1, w2, result);</a>
+<a name="ln419">    return result;</a>
+<a name="ln420">}</a>
+<a name="ln421"> </a>
+<a name="ln422">void</a>
+<a name="ln423">add_hash_param(GHashTable * hash, const char *name, const char *value)</a>
+<a name="ln424">{</a>
+<a name="ln425">    CRM_CHECK(hash != NULL, return);</a>
+<a name="ln426"> </a>
+<a name="ln427">    crm_trace(&quot;adding: name=%s value=%s&quot;, crm_str(name), crm_str(value));</a>
+<a name="ln428">    if (name == NULL || value == NULL) {</a>
+<a name="ln429">        return;</a>
+<a name="ln430"> </a>
+<a name="ln431">    } else if (safe_str_eq(value, &quot;#default&quot;)) {</a>
+<a name="ln432">        return;</a>
+<a name="ln433"> </a>
+<a name="ln434">    } else if (g_hash_table_lookup(hash, name) == NULL) {</a>
+<a name="ln435">        g_hash_table_insert(hash, strdup(name), strdup(value));</a>
+<a name="ln436">    }</a>
+<a name="ln437">}</a>
+
+</code></pre>
+<div class="balloon" rel="435"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 435, 435.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

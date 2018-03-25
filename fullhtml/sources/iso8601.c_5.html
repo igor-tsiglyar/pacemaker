@@ -1,0 +1,1519 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2005 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">/*</a>
+<a name="ln24"> * Primary reference:</a>
+<a name="ln25"> *	http://en.wikipedia.org/wiki/ISO_8601 (as at 2005-08-01)</a>
+<a name="ln26"> *</a>
+<a name="ln27"> * Secondary references:</a>
+<a name="ln28"> *	http://hydracen.com/dx/iso8601.htm</a>
+<a name="ln29"> *	http://www.personal.ecu.edu/mccartyr/ISOwdALG.txt</a>
+<a name="ln30"> *	http://www.personal.ecu.edu/mccartyr/isowdcal.html</a>
+<a name="ln31"> *	http://www.phys.uu.nl/~vgent/calendar/isocalendar.htm</a>
+<a name="ln32"> *</a>
+<a name="ln33"> */</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;crm_internal.h&gt;</a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;time.h&gt;</a>
+<a name="ln38">#include &lt;ctype.h&gt;</a>
+<a name="ln39">#include &lt;crm/common/iso8601.h&gt;</a>
+<a name="ln40">#include &lt;crm/common/iso8601_internal.h&gt;</a>
+<a name="ln41"> </a>
+<a name="ln42">/*</a>
+<a name="ln43"> * Andrew's code was originally written for OSes whose &quot;struct tm&quot; contains:</a>
+<a name="ln44"> *	long tm_gmtoff;		:: Seconds east of UTC</a>
+<a name="ln45"> *	const char *tm_zone;	:: Timezone abbreviation</a>
+<a name="ln46"> * Some OSes lack these, instead having:</a>
+<a name="ln47"> *	time_t (or long) timezone;</a>
+<a name="ln48">		:: &quot;difference between UTC and local standard time&quot;</a>
+<a name="ln49"> *	char *tzname[2] = { &quot;...&quot;, &quot;...&quot; };</a>
+<a name="ln50"> * I (David Lee) confess to not understanding the details.  So my attempted</a>
+<a name="ln51"> * generalisations for where their use is necessary may be flawed.</a>
+<a name="ln52"> *</a>
+<a name="ln53"> * 1. Does &quot;difference between ...&quot; subtract the same or opposite way?</a>
+<a name="ln54"> * 2. Should it use &quot;altzone&quot; instead of &quot;timezone&quot;?</a>
+<a name="ln55"> * 3. Should it use tzname[0] or tzname[1]?  Interaction with timezone/altzone?</a>
+<a name="ln56"> */</a>
+<a name="ln57">#if defined(HAVE_STRUCT_TM_TM_GMTOFF)</a>
+<a name="ln58">#  define GMTOFF(tm) ((tm)-&gt;tm_gmtoff)</a>
+<a name="ln59">#else</a>
+<a name="ln60">/* Note: extern variable; macro argument not actually used.  */</a>
+<a name="ln61">#  define GMTOFF(tm) (-timezone+daylight)</a>
+<a name="ln62">#endif</a>
+<a name="ln63"> </a>
+<a name="ln64">struct crm_time_s {</a>
+<a name="ln65">    int years;</a>
+<a name="ln66">    int months;                 /* Only for durations */</a>
+<a name="ln67">    int days;</a>
+<a name="ln68">    int seconds;</a>
+<a name="ln69">    int offset;                 /* Seconds */</a>
+<a name="ln70">    bool duration;</a>
+<a name="ln71">};</a>
+<a name="ln72"> </a>
+<a name="ln73">char *crm_time_as_string(crm_time_t * date_time, int flags);</a>
+<a name="ln74">crm_time_t *parse_date(const char *date_str);</a>
+<a name="ln75"> </a>
+<a name="ln76">gboolean check_for_ordinal(const char *str);</a>
+<a name="ln77"> </a>
+<a name="ln78">static crm_time_t *</a>
+<a name="ln79">crm_get_utc_time(crm_time_t * dt)</a>
+<a name="ln80">{</a>
+<a name="ln81">    crm_time_t *utc = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln82"> </a>
+<a name="ln83">    utc-&gt;years = dt-&gt;years;</a>
+<a name="ln84">    utc-&gt;days = dt-&gt;days;</a>
+<a name="ln85">    utc-&gt;seconds = dt-&gt;seconds;</a>
+<a name="ln86">    utc-&gt;offset = 0;</a>
+<a name="ln87"> </a>
+<a name="ln88">    if (dt-&gt;offset) {</a>
+<a name="ln89">        crm_time_add_seconds(utc, -dt-&gt;offset);</a>
+<a name="ln90">    } else {</a>
+<a name="ln91">        /* Durations (which are the only things that can include months, never have a timezone */</a>
+<a name="ln92">        utc-&gt;months = dt-&gt;months;</a>
+<a name="ln93">    }</a>
+<a name="ln94"> </a>
+<a name="ln95">    crm_time_log(LOG_TRACE, &quot;utc-source&quot;, dt,</a>
+<a name="ln96">                 crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);</a>
+<a name="ln97">    crm_time_log(LOG_TRACE, &quot;utc-target&quot;, utc,</a>
+<a name="ln98">                 crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);</a>
+<a name="ln99">    return utc;</a>
+<a name="ln100">}</a>
+<a name="ln101"> </a>
+<a name="ln102">crm_time_t *</a>
+<a name="ln103">crm_time_new(const char *date_time)</a>
+<a name="ln104">{</a>
+<a name="ln105">    time_t tm_now;</a>
+<a name="ln106">    crm_time_t *dt = NULL;</a>
+<a name="ln107"> </a>
+<a name="ln108">    tzset();</a>
+<a name="ln109">    if (date_time == NULL) {</a>
+<a name="ln110">        tm_now = time(NULL);</a>
+<a name="ln111">        dt = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln112">        crm_time_set_timet(dt, &amp;tm_now);</a>
+<a name="ln113">    } else {</a>
+<a name="ln114">        dt = parse_date(date_time);</a>
+<a name="ln115">    }</a>
+<a name="ln116">    return dt;</a>
+<a name="ln117">}</a>
+<a name="ln118"> </a>
+<a name="ln119">void</a>
+<a name="ln120">crm_time_free(crm_time_t * dt)</a>
+<a name="ln121">{</a>
+<a name="ln122">    if (dt == NULL) {</a>
+<a name="ln123">        return;</a>
+<a name="ln124">    }</a>
+<a name="ln125">    free(dt);</a>
+<a name="ln126">}</a>
+<a name="ln127"> </a>
+<a name="ln128">static int</a>
+<a name="ln129">year_days(int year)</a>
+<a name="ln130">{</a>
+<a name="ln131">    int d = 365;</a>
+<a name="ln132"> </a>
+<a name="ln133">    if (crm_time_leapyear(year)) {</a>
+<a name="ln134">        d++;</a>
+<a name="ln135">    }</a>
+<a name="ln136">    return d;</a>
+<a name="ln137">}</a>
+<a name="ln138"> </a>
+<a name="ln139">/* http://www.personal.ecu.edu/mccartyr/ISOwdALG.txt</a>
+<a name="ln140"> *</a>
+<a name="ln141"> * 5. Find the Jan1Weekday for Y (Monday=1, Sunday=7)</a>
+<a name="ln142"> *  YY = (Y-1) % 100</a>
+<a name="ln143"> *  C = (Y-1) - YY</a>
+<a name="ln144"> *  G = YY + YY/4</a>
+<a name="ln145"> *  Jan1Weekday = 1 + (((((C / 100) % 4) x 5) + G) % 7)</a>
+<a name="ln146"> */</a>
+<a name="ln147">int</a>
+<a name="ln148">crm_time_january1_weekday(int year)</a>
+<a name="ln149">{</a>
+<a name="ln150">    int YY = (year - 1) % 100;</a>
+<a name="ln151">    int C = (year - 1) - YY;</a>
+<a name="ln152">    int G = YY + YY / 4;</a>
+<a name="ln153">    int jan1 = 1 + (((((C / 100) % 4) * 5) + G) % 7);</a>
+<a name="ln154"> </a>
+<a name="ln155">    crm_trace(&quot;YY=%d, C=%d, G=%d&quot;, YY, C, G);</a>
+<a name="ln156">    crm_trace(&quot;January 1 %.4d: %d&quot;, year, jan1);</a>
+<a name="ln157">    return jan1;</a>
+<a name="ln158">}</a>
+<a name="ln159"> </a>
+<a name="ln160">int</a>
+<a name="ln161">crm_time_weeks_in_year(int year)</a>
+<a name="ln162">{</a>
+<a name="ln163">    int weeks = 52;</a>
+<a name="ln164">    int jan1 = crm_time_january1_weekday(year);</a>
+<a name="ln165"> </a>
+<a name="ln166">    /* if jan1 == thursday */</a>
+<a name="ln167">    if (jan1 == 4) {</a>
+<a name="ln168">        weeks++;</a>
+<a name="ln169">    } else {</a>
+<a name="ln170">        jan1 = crm_time_january1_weekday(year + 1);</a>
+<a name="ln171">        /* if dec31 == thursday aka. jan1 of next year is a friday */</a>
+<a name="ln172">        if (jan1 == 5) {</a>
+<a name="ln173">            weeks++;</a>
+<a name="ln174">        }</a>
+<a name="ln175"> </a>
+<a name="ln176">    }</a>
+<a name="ln177">    return weeks;</a>
+<a name="ln178">}</a>
+<a name="ln179"> </a>
+<a name="ln180">int month_days[14] = { 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 29 };</a>
+<a name="ln181"> </a>
+<a name="ln182">int</a>
+<a name="ln183">crm_time_days_in_month(int month, int year)</a>
+<a name="ln184">{</a>
+<a name="ln185">    if (month == 2 &amp;&amp; crm_time_leapyear(year)) {</a>
+<a name="ln186">        month = 13;</a>
+<a name="ln187">    }</a>
+<a name="ln188">    return month_days[month];</a>
+<a name="ln189">}</a>
+<a name="ln190"> </a>
+<a name="ln191">bool</a>
+<a name="ln192">crm_time_leapyear(int year)</a>
+<a name="ln193">{</a>
+<a name="ln194">    gboolean is_leap = FALSE;</a>
+<a name="ln195"> </a>
+<a name="ln196">    if (year % 4 == 0) {</a>
+<a name="ln197">        is_leap = TRUE;</a>
+<a name="ln198">    }</a>
+<a name="ln199">    if (year % 100 == 0 &amp;&amp; year % 400 != 0) {</a>
+<a name="ln200">        is_leap = FALSE;</a>
+<a name="ln201">    }</a>
+<a name="ln202">    return is_leap;</a>
+<a name="ln203">}</a>
+<a name="ln204"> </a>
+<a name="ln205">static uint32_t</a>
+<a name="ln206">get_ordinal_days(uint32_t y, uint32_t m, uint32_t d)</a>
+<a name="ln207">{</a>
+<a name="ln208">    int lpc;</a>
+<a name="ln209"> </a>
+<a name="ln210">    for (lpc = 1; lpc &lt; m; lpc++) {</a>
+<a name="ln211">        d += crm_time_days_in_month(lpc, y);</a>
+<a name="ln212">    }</a>
+<a name="ln213">    return d;</a>
+<a name="ln214">}</a>
+<a name="ln215"> </a>
+<a name="ln216">void</a>
+<a name="ln217">crm_time_log_alias(int log_level, const char *file, const char *function, int line,</a>
+<a name="ln218">                   const char *prefix, crm_time_t * date_time, int flags)</a>
+<a name="ln219">{</a>
+<a name="ln220">    char *date_s = crm_time_as_string(date_time, flags);</a>
+<a name="ln221"> </a>
+<a name="ln222">    if (log_level &lt; LOG_CRIT) {</a>
+<a name="ln223">        printf(&quot;%s%s%s\n&quot;,</a>
+<a name="ln224">               prefix ? prefix : &quot;&quot;, prefix ? &quot;: &quot; : &quot;&quot;, date_s ? date_s : &quot;__invalid_date__&quot;);</a>
+<a name="ln225">    } else {</a>
+<a name="ln226">        do_crm_log_alias(log_level, file, function, line, &quot;%s%s%s&quot;,</a>
+<a name="ln227">                         prefix ? prefix : &quot;&quot;, prefix ? &quot;: &quot; : &quot;&quot;,</a>
+<a name="ln228">                         date_s ? date_s : &quot;__invalid_date__&quot;);</a>
+<a name="ln229">    }</a>
+<a name="ln230">    free(date_s);</a>
+<a name="ln231">}</a>
+<a name="ln232"> </a>
+<a name="ln233">static int</a>
+<a name="ln234">crm_time_get_sec(int sec, uint * h, uint * m, uint * s)</a>
+<a name="ln235">{</a>
+<a name="ln236">    uint hours, minutes, seconds;</a>
+<a name="ln237"> </a>
+<a name="ln238">    if (sec &lt; 0) {</a>
+<a name="ln239">        seconds = 0 - sec;</a>
+<a name="ln240">    } else {</a>
+<a name="ln241">        seconds = sec;</a>
+<a name="ln242">    }</a>
+<a name="ln243"> </a>
+<a name="ln244">    hours = seconds / (60 * 60);</a>
+<a name="ln245">    seconds -= 60 * 60 * hours;</a>
+<a name="ln246"> </a>
+<a name="ln247">    minutes = seconds / (60);</a>
+<a name="ln248">    seconds -= 60 * minutes;</a>
+<a name="ln249"> </a>
+<a name="ln250">    crm_trace(&quot;%d == %.2d:%.2d:%.2d&quot;, sec, hours, minutes, seconds);</a>
+<a name="ln251"> </a>
+<a name="ln252">    *h = hours;</a>
+<a name="ln253">    *m = minutes;</a>
+<a name="ln254">    *s = seconds;</a>
+<a name="ln255"> </a>
+<a name="ln256">    return TRUE;</a>
+<a name="ln257">}</a>
+<a name="ln258"> </a>
+<a name="ln259">int</a>
+<a name="ln260">crm_time_get_timeofday(crm_time_t * dt, uint * h, uint * m, uint * s)</a>
+<a name="ln261">{</a>
+<a name="ln262">    return crm_time_get_sec(dt-&gt;seconds, h, m, s);</a>
+<a name="ln263">}</a>
+<a name="ln264"> </a>
+<a name="ln265">int</a>
+<a name="ln266">crm_time_get_timezone(crm_time_t * dt, uint * h, uint * m)</a>
+<a name="ln267">{</a>
+<a name="ln268">    uint s;</a>
+<a name="ln269"> </a>
+<a name="ln270">    return crm_time_get_sec(dt-&gt;seconds, h, m, &amp;s);</a>
+<a name="ln271">}</a>
+<a name="ln272"> </a>
+<a name="ln273">long long</a>
+<a name="ln274">crm_time_get_seconds(crm_time_t * dt)</a>
+<a name="ln275">{</a>
+<a name="ln276">    int lpc;</a>
+<a name="ln277">    crm_time_t *utc = NULL;</a>
+<a name="ln278">    long long in_seconds = 0;</a>
+<a name="ln279"> </a>
+<a name="ln280">    utc = crm_get_utc_time(dt);</a>
+<a name="ln281"> </a>
+<a name="ln282">    for (lpc = 1; lpc &lt; utc-&gt;years; lpc++) {</a>
+<a name="ln283">        int dmax = year_days(lpc);</a>
+<a name="ln284"> </a>
+<a name="ln285">        in_seconds += 60 * 60 * 24 * dmax;</a>
+<a name="ln286">    }</a>
+<a name="ln287"> </a>
+<a name="ln288">    /* utc-&gt;months is an offset that can only be set for a duration</a>
+<a name="ln289">     * By definiton, the value is variable depending on the date to</a>
+<a name="ln290">     * which it is applied</a>
+<a name="ln291">     *</a>
+<a name="ln292">     * Force 30-day months so that something vaguely sane happens</a>
+<a name="ln293">     * for anyone that tries to use a month in this way</a>
+<a name="ln294">     */</a>
+<a name="ln295">    if (utc-&gt;months &gt; 0) {</a>
+<a name="ln296">        in_seconds += 60 * 60 * 24 * 30 * utc-&gt;months;</a>
+<a name="ln297">    }</a>
+<a name="ln298"> </a>
+<a name="ln299">    if (utc-&gt;days &gt; 0) {</a>
+<a name="ln300">        in_seconds += 60 * 60 * 24 * (utc-&gt;days - 1);</a>
+<a name="ln301">    }</a>
+<a name="ln302">    in_seconds += utc-&gt;seconds;</a>
+<a name="ln303"> </a>
+<a name="ln304">    crm_time_free(utc);</a>
+<a name="ln305">    return in_seconds;</a>
+<a name="ln306">}</a>
+<a name="ln307"> </a>
+<a name="ln308">#define EPOCH_SECONDS 62135596800ULL    /* Calculated using crm_time_get_seconds() */</a>
+<a name="ln309">long long</a>
+<a name="ln310">crm_time_get_seconds_since_epoch(crm_time_t * dt)</a>
+<a name="ln311">{</a>
+<a name="ln312">    return crm_time_get_seconds(dt) - EPOCH_SECONDS;</a>
+<a name="ln313">}</a>
+<a name="ln314"> </a>
+<a name="ln315">int</a>
+<a name="ln316">crm_time_get_gregorian(crm_time_t * dt, uint * y, uint * m, uint * d)</a>
+<a name="ln317">{</a>
+<a name="ln318">    int months = 0;</a>
+<a name="ln319">    int days = dt-&gt;days;</a>
+<a name="ln320"> </a>
+<a name="ln321">    if(dt-&gt;years != 0) {</a>
+<a name="ln322">        for (months = 1; months &lt;= 12 &amp;&amp; days &gt; 0; months++) {</a>
+<a name="ln323">            int mdays = crm_time_days_in_month(months, dt-&gt;years);</a>
+<a name="ln324"> </a>
+<a name="ln325">            if (mdays &gt;= days) {</a>
+<a name="ln326">                break;</a>
+<a name="ln327">            } else {</a>
+<a name="ln328">                days -= mdays;</a>
+<a name="ln329">            }</a>
+<a name="ln330">        }</a>
+<a name="ln331"> </a>
+<a name="ln332">    } else if (dt-&gt;months) {</a>
+<a name="ln333">        /* This is a duration including months, don't convert the days field */</a>
+<a name="ln334">        months = dt-&gt;months;</a>
+<a name="ln335"> </a>
+<a name="ln336">    } else {</a>
+<a name="ln337">        /* This is a duration not including months, still don't convert the days field */</a>
+<a name="ln338">    }</a>
+<a name="ln339"> </a>
+<a name="ln340">    *y = dt-&gt;years;</a>
+<a name="ln341">    *m = months;</a>
+<a name="ln342">    *d = days;</a>
+<a name="ln343">    crm_trace(&quot;%.4d-%.3d -&gt; %.4d-%.2d-%.2d&quot;, dt-&gt;years, dt-&gt;days, dt-&gt;years, months, days);</a>
+<a name="ln344">    return TRUE;</a>
+<a name="ln345">}</a>
+<a name="ln346"> </a>
+<a name="ln347">int</a>
+<a name="ln348">crm_time_get_ordinal(crm_time_t * dt, uint * y, uint * d)</a>
+<a name="ln349">{</a>
+<a name="ln350">    *y = dt-&gt;years;</a>
+<a name="ln351">    *d = dt-&gt;days;</a>
+<a name="ln352">    return TRUE;</a>
+<a name="ln353">}</a>
+<a name="ln354"> </a>
+<a name="ln355">int</a>
+<a name="ln356">crm_time_get_isoweek(crm_time_t * dt, uint * y, uint * w, uint * d)</a>
+<a name="ln357">{</a>
+<a name="ln358">    /*</a>
+<a name="ln359">     * Monday 29 December 2008 is written &quot;2009-W01-1&quot;</a>
+<a name="ln360">     * Sunday 3 January 2010 is written &quot;2009-W53-7&quot;</a>
+<a name="ln361">     */</a>
+<a name="ln362">    int year_num = 0;</a>
+<a name="ln363">    int jan1 = crm_time_january1_weekday(dt-&gt;years);</a>
+<a name="ln364">    int h = -1;</a>
+<a name="ln365"> </a>
+<a name="ln366">    CRM_CHECK(dt-&gt;days &gt; 0, return FALSE);</a>
+<a name="ln367"> </a>
+<a name="ln368">/* 6. Find the Weekday for Y M D */</a>
+<a name="ln369">    h = dt-&gt;days + jan1 - 1;</a>
+<a name="ln370">    *d = 1 + ((h - 1) % 7);</a>
+<a name="ln371"> </a>
+<a name="ln372">/* 7. Find if Y M D falls in YearNumber Y-1, WeekNumber 52 or 53 */</a>
+<a name="ln373">    if (dt-&gt;days &lt;= (8 - jan1) &amp;&amp; jan1 &gt; 4) {</a>
+<a name="ln374">        crm_trace(&quot;year--, jan1=%d&quot;, jan1);</a>
+<a name="ln375">        year_num = dt-&gt;years - 1;</a>
+<a name="ln376">        *w = crm_time_weeks_in_year(year_num);</a>
+<a name="ln377"> </a>
+<a name="ln378">    } else {</a>
+<a name="ln379">        year_num = dt-&gt;years;</a>
+<a name="ln380">    }</a>
+<a name="ln381"> </a>
+<a name="ln382">/* 8. Find if Y M D falls in YearNumber Y+1, WeekNumber 1 */</a>
+<a name="ln383">    if (year_num == dt-&gt;years) {</a>
+<a name="ln384">        int dmax = year_days(year_num);</a>
+<a name="ln385">        int correction = 4 - *d;</a>
+<a name="ln386"> </a>
+<a name="ln387">        if ((dmax - dt-&gt;days) &lt; correction) {</a>
+<a name="ln388">            crm_trace(&quot;year++, jan1=%d, i=%d vs. %d&quot;, jan1, dmax - dt-&gt;days, correction);</a>
+<a name="ln389">            year_num = dt-&gt;years + 1;</a>
+<a name="ln390">            *w = 1;</a>
+<a name="ln391">        }</a>
+<a name="ln392">    }</a>
+<a name="ln393"> </a>
+<a name="ln394">/* 9. Find if Y M D falls in YearNumber Y, WeekNumber 1 through 53 */</a>
+<a name="ln395">    if (year_num == dt-&gt;years) {</a>
+<a name="ln396">        int j = dt-&gt;days + (7 - *d) + (jan1 - 1);</a>
+<a name="ln397"> </a>
+<a name="ln398">        *w = j / 7;</a>
+<a name="ln399">        if (jan1 &gt; 4) {</a>
+<a name="ln400">            *w -= 1;</a>
+<a name="ln401">        }</a>
+<a name="ln402">    }</a>
+<a name="ln403"> </a>
+<a name="ln404">    *y = year_num;</a>
+<a name="ln405">    crm_trace(&quot;Converted %.4d-%.3d to %.4d-W%.2d-%d&quot;, dt-&gt;years, dt-&gt;days, *y, *w, *d);</a>
+<a name="ln406">    return TRUE;</a>
+<a name="ln407">}</a>
+<a name="ln408"> </a>
+<a name="ln409">char *</a>
+<a name="ln410">crm_time_as_string(crm_time_t * date_time, int flags)</a>
+<a name="ln411">{</a>
+<a name="ln412">    char *date_s = NULL;</a>
+<a name="ln413">    char *time_s = NULL;</a>
+<a name="ln414">    char *offset_s = NULL;</a>
+<a name="ln415">    char *result_s = NULL;</a>
+<a name="ln416">    crm_time_t *dt = NULL;</a>
+<a name="ln417">    crm_time_t *utc = NULL;</a>
+<a name="ln418"> </a>
+<a name="ln419">    if (date_time == NULL) {</a>
+<a name="ln420">        return strdup(&quot;&quot;);</a>
+<a name="ln421"> </a>
+<a name="ln422">    } else if (date_time-&gt;offset &amp;&amp; (flags &amp; crm_time_log_with_timezone) == 0) {</a>
+<a name="ln423">        crm_trace(&quot;UTC conversion&quot;);</a>
+<a name="ln424">        utc = crm_get_utc_time(date_time);</a>
+<a name="ln425">        dt = utc;</a>
+<a name="ln426">    } else {</a>
+<a name="ln427">        dt = date_time;</a>
+<a name="ln428">    }</a>
+<a name="ln429"> </a>
+<a name="ln430">    CRM_CHECK(dt != NULL, return NULL);</a>
+<a name="ln431">    if (flags &amp; crm_time_log_duration) {</a>
+<a name="ln432">        uint h = 0, m = 0, s = 0;</a>
+<a name="ln433">        int offset = 0, max = 128;</a>
+<a name="ln434"> </a>
+<a name="ln435">        date_s = calloc(1, max+1);</a>
+<a name="ln436">        crm_time_get_sec(dt-&gt;seconds, &amp;h, &amp;m, &amp;s);</a>
+<a name="ln437"> </a>
+<a name="ln438">        if (date_s == NULL) {</a>
+<a name="ln439">            goto done;</a>
+<a name="ln440">        }</a>
+<a name="ln441"> </a>
+<a name="ln442">        if(dt-&gt;years) {</a>
+<a name="ln443">            offset += snprintf(date_s+offset, max-offset, &quot;%4d year%s &quot;, dt-&gt;years, dt-&gt;years&gt;1?&quot;s&quot;:&quot;&quot;);</a>
+<a name="ln444">        }</a>
+<a name="ln445">        if(dt-&gt;months) {</a>
+<a name="ln446">            offset += snprintf(date_s+offset, max-offset, &quot;%2d month%s &quot;, dt-&gt;months, dt-&gt;months&gt;1?&quot;s&quot;:&quot;&quot;);</a>
+<a name="ln447">        }</a>
+<a name="ln448">        if(dt-&gt;days) {</a>
+<a name="ln449">            offset += snprintf(date_s+offset, max-offset, &quot;%2d day%s &quot;, dt-&gt;days, dt-&gt;days&gt;1?&quot;s&quot;:&quot;&quot;);</a>
+<a name="ln450">        }</a>
+<a name="ln451">        if(dt-&gt;seconds) {</a>
+<a name="ln452">            offset += snprintf(date_s+offset, max-offset, &quot;%d seconds ( &quot;, dt-&gt;seconds);</a>
+<a name="ln453">            if(h) {</a>
+<a name="ln454">                offset += snprintf(date_s+offset, max-offset, &quot;%d hour%s &quot;, h, h&gt;1?&quot;s&quot;:&quot;&quot;);</a>
+<a name="ln455">            }</a>
+<a name="ln456">            if(m) {</a>
+<a name="ln457">                offset += snprintf(date_s+offset, max-offset, &quot;%d minute%s &quot;, m, m&gt;1?&quot;s&quot;:&quot;&quot;);</a>
+<a name="ln458">            }</a>
+<a name="ln459">            if(s) {</a>
+<a name="ln460">                offset += snprintf(date_s+offset, max-offset, &quot;%d second%s &quot;, s, s&gt;1?&quot;s&quot;:&quot;&quot;);</a>
+<a name="ln461">            }</a>
+<a name="ln462">            offset += snprintf(date_s+offset, max-offset, &quot;)&quot;);</a>
+<a name="ln463">        }</a>
+<a name="ln464">        goto done;</a>
+<a name="ln465">    }</a>
+<a name="ln466"> </a>
+<a name="ln467">    if (flags &amp; crm_time_log_date) {</a>
+<a name="ln468">        date_s = calloc(1, 32);</a>
+<a name="ln469">        if (date_s == NULL) {</a>
+<a name="ln470">            goto done;</a>
+<a name="ln471"> </a>
+<a name="ln472">        } else if (flags &amp; crm_time_seconds) {</a>
+<a name="ln473">            unsigned long long s = crm_time_get_seconds(date_time);</a>
+<a name="ln474"> </a>
+<a name="ln475">            snprintf(date_s, 31, &quot;%lld&quot;, s); /* Durations may not be +ve */</a>
+<a name="ln476">            goto done;</a>
+<a name="ln477"> </a>
+<a name="ln478">        } else if (flags &amp; crm_time_epoch) {</a>
+<a name="ln479">            unsigned long long s = crm_time_get_seconds_since_epoch(date_time);</a>
+<a name="ln480"> </a>
+<a name="ln481">            snprintf(date_s, 31, &quot;%lld&quot;, s); /* Durations may not be +ve */</a>
+<a name="ln482">            goto done;</a>
+<a name="ln483"> </a>
+<a name="ln484">        } else if (flags &amp; crm_time_weeks) {</a>
+<a name="ln485">            /* YYYY-Www-D */</a>
+<a name="ln486">            uint y, w, d;</a>
+<a name="ln487"> </a>
+<a name="ln488">            if (crm_time_get_isoweek(dt, &amp;y, &amp;w, &amp;d)) {</a>
+<a name="ln489">                snprintf(date_s, 31, &quot;%d-W%.2d-%d&quot;, y, w, d);</a>
+<a name="ln490">            }</a>
+<a name="ln491"> </a>
+<a name="ln492">        } else if (flags &amp; crm_time_ordinal) {</a>
+<a name="ln493">            /* YYYY-DDD */</a>
+<a name="ln494">            uint y, d;</a>
+<a name="ln495"> </a>
+<a name="ln496">            if (crm_time_get_ordinal(dt, &amp;y, &amp;d)) {</a>
+<a name="ln497">                snprintf(date_s, 31, &quot;%d-%.3d&quot;, y, d);</a>
+<a name="ln498">            }</a>
+<a name="ln499"> </a>
+<a name="ln500">        } else {</a>
+<a name="ln501">            /* YYYY-MM-DD */</a>
+<a name="ln502">            uint y, m, d;</a>
+<a name="ln503"> </a>
+<a name="ln504">            if (crm_time_get_gregorian(dt, &amp;y, &amp;m, &amp;d)) {</a>
+<a name="ln505">                snprintf(date_s, 31, &quot;%.4d-%.2d-%.2d&quot;, y, m, d);</a>
+<a name="ln506">            }</a>
+<a name="ln507">        }</a>
+<a name="ln508">    }</a>
+<a name="ln509"> </a>
+<a name="ln510">    if (flags &amp; crm_time_log_timeofday) {</a>
+<a name="ln511">        uint h, m, s;</a>
+<a name="ln512"> </a>
+<a name="ln513">        time_s = calloc(1, 32);</a>
+<a name="ln514">        if (time_s == NULL) {</a>
+<a name="ln515">            goto cleanup;</a>
+<a name="ln516">        }</a>
+<a name="ln517"> </a>
+<a name="ln518">        if (crm_time_get_timeofday(dt, &amp;h, &amp;m, &amp;s)) {</a>
+<a name="ln519">            snprintf(time_s, 31, &quot;%.2d:%.2d:%.2d&quot;, h, m, s);</a>
+<a name="ln520">        }</a>
+<a name="ln521"> </a>
+<a name="ln522">        if (dt-&gt;offset != 0) {</a>
+<a name="ln523">            crm_time_get_sec(dt-&gt;offset, &amp;h, &amp;m, &amp;s);</a>
+<a name="ln524">        }</a>
+<a name="ln525"> </a>
+<a name="ln526">        offset_s = calloc(1, 32);</a>
+<a name="ln527">        if ((flags &amp; crm_time_log_with_timezone) == 0 || dt-&gt;offset == 0) {</a>
+<a name="ln528">            crm_trace(&quot;flags %6x %6x&quot;, flags, crm_time_log_with_timezone);</a>
+<a name="ln529">            snprintf(offset_s, 31, &quot;Z&quot;);</a>
+<a name="ln530"> </a>
+<a name="ln531">        } else {</a>
+<a name="ln532">            snprintf(offset_s, 31, &quot; %c%.2d:%.2d&quot;, dt-&gt;offset &lt; 0 ? '-' : '+', h, m);</a>
+<a name="ln533">        }</a>
+<a name="ln534">    }</a>
+<a name="ln535"> </a>
+<a name="ln536">  done:</a>
+<a name="ln537">    result_s = calloc(1, 100);</a>
+<a name="ln538"> </a>
+<a name="ln539">    snprintf(result_s, 100, &quot;%s%s%s%s&quot;,</a>
+<a name="ln540">             date_s ? date_s : &quot;&quot;, (date_s != NULL &amp;&amp; time_s != NULL) ? &quot; &quot; : &quot;&quot;,</a>
+<a name="ln541">             time_s ? time_s : &quot;&quot;, offset_s ? offset_s : &quot;&quot;);</a>
+<a name="ln542"> </a>
+<a name="ln543">  cleanup:</a>
+<a name="ln544">    free(date_s);</a>
+<a name="ln545">    free(time_s);</a>
+<a name="ln546">    free(offset_s);</a>
+<a name="ln547">    crm_time_free(utc);</a>
+<a name="ln548"> </a>
+<a name="ln549">    return result_s;</a>
+<a name="ln550">}</a>
+<a name="ln551"> </a>
+<a name="ln552">static int</a>
+<a name="ln553">crm_time_parse_sec(const char *time_str)</a>
+<a name="ln554">{</a>
+<a name="ln555">    int rc;</a>
+<a name="ln556">    uint hour = 0;</a>
+<a name="ln557">    uint minute = 0;</a>
+<a name="ln558">    uint second = 0;</a>
+<a name="ln559"> </a>
+<a name="ln560">    rc = sscanf(time_str, &quot;%d:%d:%d&quot;, &amp;hour, &amp;minute, &amp;second);</a>
+<a name="ln561">    if (rc == 1) {</a>
+<a name="ln562">        rc = sscanf(time_str, &quot;%2d%2d%2d&quot;, &amp;hour, &amp;minute, &amp;second);</a>
+<a name="ln563">    }</a>
+<a name="ln564"> </a>
+<a name="ln565">    if (rc &gt; 0 &amp;&amp; rc &lt; 4) {</a>
+<a name="ln566">        crm_trace(&quot;Got valid time: %.2d:%.2d:%.2d&quot;, hour, minute, second);</a>
+<a name="ln567">        if (hour &gt;= 24) {</a>
+<a name="ln568">            crm_err(&quot;Invalid hour: %d&quot;, hour);</a>
+<a name="ln569">        } else if (minute &gt;= 60) {</a>
+<a name="ln570">            crm_err(&quot;Invalid minute: %d&quot;, minute);</a>
+<a name="ln571">        } else if (second &gt;= 60) {</a>
+<a name="ln572">            crm_err(&quot;Invalid second: %d&quot;, second);</a>
+<a name="ln573">        } else {</a>
+<a name="ln574">            second += (minute * 60);</a>
+<a name="ln575">            second += (hour * 60 * 60);</a>
+<a name="ln576">        }</a>
+<a name="ln577">    } else {</a>
+<a name="ln578">        crm_err(&quot;Bad time: %s (%d)&quot;, time_str, rc);</a>
+<a name="ln579">    }</a>
+<a name="ln580">    return second;</a>
+<a name="ln581">}</a>
+<a name="ln582"> </a>
+<a name="ln583">static int</a>
+<a name="ln584">crm_time_parse_offset(const char *offset_str)</a>
+<a name="ln585">{</a>
+<a name="ln586">    int offset = 0;</a>
+<a name="ln587"> </a>
+<a name="ln588">    tzset();</a>
+<a name="ln589">    if (offset_str == NULL) {</a>
+<a name="ln590">#if defined(HAVE_STRUCT_TM_TM_GMTOFF)</a>
+<a name="ln591">        time_t now = time(NULL);</a>
+<a name="ln592">        struct tm *now_tm = localtime(&amp;now);</a>
+<a name="ln593">#endif</a>
+<a name="ln594">        int h_offset = GMTOFF(now_tm) / (3600);</a>
+<a name="ln595">        int m_offset = (GMTOFF(now_tm) - (3600 * h_offset)) / (60);</a>
+<a name="ln596"> </a>
+<a name="ln597">        if (h_offset &lt; 0 &amp;&amp; m_offset &lt; 0) {</a>
+<a name="ln598">            m_offset = 0 - m_offset;</a>
+<a name="ln599">        }</a>
+<a name="ln600">        offset += (60 * 60 * h_offset);</a>
+<a name="ln601">        offset += (60 * m_offset);</a>
+<a name="ln602"> </a>
+<a name="ln603">    } else if (offset_str[0] == 'Z') {</a>
+<a name="ln604"> </a>
+<a name="ln605">    } else if (offset_str[0] == '+' || offset_str[0] == '-' || isdigit((int)offset_str[0])) {</a>
+<a name="ln606">        gboolean negate = FALSE;</a>
+<a name="ln607"> </a>
+<a name="ln608">        if (offset_str[0] == '-') {</a>
+<a name="ln609">            negate = TRUE;</a>
+<a name="ln610">            offset_str++;</a>
+<a name="ln611">        }</a>
+<a name="ln612">        offset = crm_time_parse_sec(offset_str);</a>
+<a name="ln613">        if (negate) {</a>
+<a name="ln614">            offset = 0 - offset;</a>
+<a name="ln615">        }</a>
+<a name="ln616">    }</a>
+<a name="ln617">    return offset;</a>
+<a name="ln618">}</a>
+<a name="ln619"> </a>
+<a name="ln620">static crm_time_t *</a>
+<a name="ln621">crm_time_parse(const char *time_str, crm_time_t * a_time)</a>
+<a name="ln622">{</a>
+<a name="ln623">    uint h, m, s;</a>
+<a name="ln624">    char *offset_s = NULL;</a>
+<a name="ln625">    crm_time_t *dt = a_time;</a>
+<a name="ln626"> </a>
+<a name="ln627">    tzset();</a>
+<a name="ln628">    if (a_time == NULL) {</a>
+<a name="ln629">        dt = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln630">    }</a>
+<a name="ln631"> </a>
+<a name="ln632">    if (time_str) {</a>
+<a name="ln633">        dt-&gt;seconds = crm_time_parse_sec(time_str);</a>
+<a name="ln634"> </a>
+<a name="ln635">        offset_s = strstr(time_str, &quot;Z&quot;);</a>
+<a name="ln636">        if (offset_s == NULL) {</a>
+<a name="ln637">            offset_s = strstr(time_str, &quot; &quot;);</a>
+<a name="ln638">        }</a>
+<a name="ln639">    }</a>
+<a name="ln640"> </a>
+<a name="ln641">    if (offset_s) {</a>
+<a name="ln642">        while (isspace(offset_s[0])) {</a>
+<a name="ln643">            offset_s++;</a>
+<a name="ln644">        }</a>
+<a name="ln645">    }</a>
+<a name="ln646">    dt-&gt;offset = crm_time_parse_offset(offset_s);</a>
+<a name="ln647">    crm_time_get_sec(dt-&gt;offset, &amp;h, &amp;m, &amp;s);</a>
+<a name="ln648">    crm_trace(&quot;Got tz: %c%2.d:%.2d&quot;, dt-&gt;offset &lt; 0 ? '-' : '+', h, m);</a>
+<a name="ln649">    return dt;</a>
+<a name="ln650">}</a>
+<a name="ln651"> </a>
+<a name="ln652">crm_time_t *</a>
+<a name="ln653">parse_date(const char *date_str)</a>
+<a name="ln654">{</a>
+<a name="ln655">    char *time_s;</a>
+<a name="ln656">    crm_time_t *dt = NULL;</a>
+<a name="ln657"> </a>
+<a name="ln658">    int year = 0;</a>
+<a name="ln659">    int month = 0;</a>
+<a name="ln660">    int week = 0;</a>
+<a name="ln661">    int day = 0;</a>
+<a name="ln662">    int rc = 0;</a>
+<a name="ln663"> </a>
+<a name="ln664">    CRM_CHECK(date_str != NULL, return NULL);</a>
+<a name="ln665">    CRM_CHECK(strlen(date_str) &gt; 0, return NULL);</a>
+<a name="ln666"> </a>
+<a name="ln667">    if (date_str[0] == 'T' || date_str[2] == ':') {</a>
+<a name="ln668">        /* Just a time supplied - Infer current date */</a>
+<a name="ln669">        dt = crm_time_new(NULL);</a>
+<a name="ln670">        dt = crm_time_parse(date_str, dt);</a>
+<a name="ln671">        goto done;</a>
+<a name="ln672"> </a>
+<a name="ln673">    } else {</a>
+<a name="ln674">        dt = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln675">    }</a>
+<a name="ln676"> </a>
+<a name="ln677">    if (safe_str_eq(&quot;epoch&quot;, date_str)) {</a>
+<a name="ln678">        dt-&gt;days = 1;</a>
+<a name="ln679">        dt-&gt;years = 1970;</a>
+<a name="ln680">        crm_time_log(LOG_TRACE, &quot;Unpacked&quot;, dt, crm_time_log_date | crm_time_log_timeofday);</a>
+<a name="ln681">        return dt;</a>
+<a name="ln682">    }</a>
+<a name="ln683"> </a>
+<a name="ln684">    /* YYYY-MM-DD */</a>
+<a name="ln685">    rc = sscanf(date_str, &quot;%d-%d-%d&quot;, &amp;year, &amp;month, &amp;day);</a>
+<a name="ln686">    if (rc == 1) {</a>
+<a name="ln687">        /* YYYYMMDD */</a>
+<a name="ln688">        rc = sscanf(date_str, &quot;%4d%2d%2d&quot;, &amp;year, &amp;month, &amp;day);</a>
+<a name="ln689">    }</a>
+<a name="ln690">    if (rc == 3) {</a>
+<a name="ln691">        if (month &gt; 12) {</a>
+<a name="ln692">            crm_err(&quot;Invalid month: %d&quot;, month);</a>
+<a name="ln693">        } else if (day &gt; 31) {</a>
+<a name="ln694">            crm_err(&quot;Invalid day: %d&quot;, day);</a>
+<a name="ln695">        } else {</a>
+<a name="ln696">            dt-&gt;years = year;</a>
+<a name="ln697">            dt-&gt;days = get_ordinal_days(year, month, day);</a>
+<a name="ln698">            crm_trace(&quot;Got gergorian date: %.4d-%.3d&quot;, year, dt-&gt;days);</a>
+<a name="ln699">        }</a>
+<a name="ln700">        goto done;</a>
+<a name="ln701">    }</a>
+<a name="ln702"> </a>
+<a name="ln703">    /* YYYY-DDD */</a>
+<a name="ln704">    rc = sscanf(date_str, &quot;%d-%d&quot;, &amp;year, &amp;day);</a>
+<a name="ln705">    if (rc == 2) {</a>
+<a name="ln706">        crm_trace(&quot;Got ordinal date&quot;);</a>
+<a name="ln707">        if (day &gt; year_days(year)) {</a>
+<a name="ln708">            crm_err(&quot;Invalid day: %d (max=%d)&quot;, day, year_days(year));</a>
+<a name="ln709">        } else {</a>
+<a name="ln710">            dt-&gt;days = day;</a>
+<a name="ln711">            dt-&gt;years = year;</a>
+<a name="ln712">        }</a>
+<a name="ln713">        goto done;</a>
+<a name="ln714">    }</a>
+<a name="ln715"> </a>
+<a name="ln716">    /* YYYY-Www-D */</a>
+<a name="ln717">    rc = sscanf(date_str, &quot;%d-W%d-%d&quot;, &amp;year, &amp;week, &amp;day);</a>
+<a name="ln718">    if (rc == 3) {</a>
+<a name="ln719">        crm_trace(&quot;Got week date&quot;);</a>
+<a name="ln720">        if (week &gt; crm_time_weeks_in_year(year)) {</a>
+<a name="ln721">            crm_err(&quot;Invalid week: %d (max=%d)&quot;, week, crm_time_weeks_in_year(year));</a>
+<a name="ln722">        } else if (day &lt; 1 || day &gt; 7) {</a>
+<a name="ln723">            crm_err(&quot;Invalid day: %d&quot;, day);</a>
+<a name="ln724">        } else {</a>
+<a name="ln725">            /*</a>
+<a name="ln726">             * http://en.wikipedia.org/wiki/ISO_week_date</a>
+<a name="ln727">             *</a>
+<a name="ln728">             * Monday 29 December 2008 is written &quot;2009-W01-1&quot;</a>
+<a name="ln729">             * Sunday 3 January 2010 is written &quot;2009-W53-7&quot;</a>
+<a name="ln730">             *</a>
+<a name="ln731">             * Saturday 27 September 2008 is written &quot;2008-W37-6&quot;</a>
+<a name="ln732">             *</a>
+<a name="ln733">             * http://en.wikipedia.org/wiki/ISO_week_date</a>
+<a name="ln734">             * If 1 January is on a Monday, Tuesday, Wednesday or Thursday, it is in week 01.</a>
+<a name="ln735">             * If 1 January is on a Friday, Saturday or Sunday, it is in week 52 or 53 of the previous year.</a>
+<a name="ln736">             */</a>
+<a name="ln737">            int jan1 = crm_time_january1_weekday(year);</a>
+<a name="ln738"> </a>
+<a name="ln739">            crm_trace(&quot;Jan 1 = %d&quot;, jan1);</a>
+<a name="ln740"> </a>
+<a name="ln741">            dt-&gt;years = year;</a>
+<a name="ln742">            crm_time_add_days(dt, (week - 1) * 7);</a>
+<a name="ln743"> </a>
+<a name="ln744">            if (jan1 &lt;= 4) {</a>
+<a name="ln745">                crm_time_add_days(dt, 1 - jan1);</a>
+<a name="ln746">            } else {</a>
+<a name="ln747">                crm_time_add_days(dt, 8 - jan1);</a>
+<a name="ln748">            }</a>
+<a name="ln749"> </a>
+<a name="ln750">            crm_time_add_days(dt, day);</a>
+<a name="ln751">        }</a>
+<a name="ln752">        goto done;</a>
+<a name="ln753">    }</a>
+<a name="ln754"> </a>
+<a name="ln755">    crm_err(&quot;Couldn't parse %s&quot;, date_str);</a>
+<a name="ln756">  done:</a>
+<a name="ln757"> </a>
+<a name="ln758">    time_s = strstr(date_str, &quot; &quot;);</a>
+<a name="ln759">    if (time_s == NULL) {</a>
+<a name="ln760">        time_s = strstr(date_str, &quot;T&quot;);</a>
+<a name="ln761">    }</a>
+<a name="ln762"> </a>
+<a name="ln763">    if (dt &amp;&amp; time_s) {</a>
+<a name="ln764">        time_s++;</a>
+<a name="ln765">        crm_time_parse(time_s, dt);</a>
+<a name="ln766">    }</a>
+<a name="ln767"> </a>
+<a name="ln768">    crm_time_log(LOG_TRACE, &quot;Unpacked&quot;, dt, crm_time_log_date | crm_time_log_timeofday);</a>
+<a name="ln769"> </a>
+<a name="ln770">    CRM_CHECK(crm_time_check(dt), return NULL);</a>
+<a name="ln771"> </a>
+<a name="ln772">    return dt;</a>
+<a name="ln773">}</a>
+<a name="ln774"> </a>
+<a name="ln775">static int</a>
+<a name="ln776">parse_int(const char *str, int field_width, int uppper_bound, int *result)</a>
+<a name="ln777">{</a>
+<a name="ln778">    int lpc = 0;</a>
+<a name="ln779">    int offset = 0;</a>
+<a name="ln780">    int intermediate = 0;</a>
+<a name="ln781">    gboolean fraction = FALSE;</a>
+<a name="ln782">    gboolean negate = FALSE;</a>
+<a name="ln783"> </a>
+<a name="ln784">    CRM_CHECK(str != NULL, return FALSE);</a>
+<a name="ln785">    CRM_CHECK(result != NULL, return FALSE);</a>
+<a name="ln786"> </a>
+<a name="ln787">    *result = 0;</a>
+<a name="ln788"> </a>
+<a name="ln789">    if (strlen(str) &lt;= 0) {</a>
+<a name="ln790">        return FALSE;</a>
+<a name="ln791">    }</a>
+<a name="ln792"> </a>
+<a name="ln793">    if (str[offset] == 'T') {</a>
+<a name="ln794">        offset++;</a>
+<a name="ln795">    }</a>
+<a name="ln796"> </a>
+<a name="ln797">    if (str[offset] == '.' || str[offset] == ',') {</a>
+<a name="ln798">        fraction = TRUE;</a>
+<a name="ln799">        field_width = -1;</a>
+<a name="ln800">        offset++;</a>
+<a name="ln801">    } else if (str[offset] == '-') {</a>
+<a name="ln802">        negate = TRUE;</a>
+<a name="ln803">        offset++;</a>
+<a name="ln804">    } else if (str[offset] == '+' || str[offset] == ':') {</a>
+<a name="ln805">        offset++;</a>
+<a name="ln806">    }</a>
+<a name="ln807"> </a>
+<a name="ln808">    for (; (fraction || lpc &lt; field_width) &amp;&amp; isdigit((int)str[offset]); lpc++) {</a>
+<a name="ln809">        if (fraction) {</a>
+<a name="ln810">            intermediate = (str[offset] - '0') / (10 ^ lpc);</a>
+<a name="ln811">        } else {</a>
+<a name="ln812">            *result *= 10;</a>
+<a name="ln813">            intermediate = str[offset] - '0';</a>
+<a name="ln814">        }</a>
+<a name="ln815">        *result += intermediate;</a>
+<a name="ln816">        offset++;</a>
+<a name="ln817">    }</a>
+<a name="ln818">    if (fraction) {</a>
+<a name="ln819">        *result = (int)(*result * uppper_bound);</a>
+<a name="ln820"> </a>
+<a name="ln821">    } else if (uppper_bound &gt; 0 &amp;&amp; *result &gt; uppper_bound) {</a>
+<a name="ln822">        *result = uppper_bound;</a>
+<a name="ln823">    }</a>
+<a name="ln824">    if (negate) {</a>
+<a name="ln825">        *result = 0 - *result;</a>
+<a name="ln826">    }</a>
+<a name="ln827">    if (lpc &gt; 0) {</a>
+<a name="ln828">        crm_trace(&quot;Found int: %d.  Stopped at str[%d]='%c'&quot;, *result, lpc, str[lpc]);</a>
+<a name="ln829">        return offset;</a>
+<a name="ln830">    }</a>
+<a name="ln831">    return 0;</a>
+<a name="ln832">}</a>
+<a name="ln833"> </a>
+<a name="ln834">crm_time_t *</a>
+<a name="ln835">crm_time_parse_duration(const char *interval_str)</a>
+<a name="ln836">{</a>
+<a name="ln837">    gboolean is_time = FALSE;</a>
+<a name="ln838">    crm_time_t *diff = NULL;</a>
+<a name="ln839"> </a>
+<a name="ln840">    CRM_CHECK(interval_str != NULL, goto bail);</a>
+<a name="ln841">    CRM_CHECK(strlen(interval_str) &gt; 0, goto bail);</a>
+<a name="ln842">    CRM_CHECK(interval_str[0] == 'P', goto bail);</a>
+<a name="ln843">    interval_str++;</a>
+<a name="ln844"> </a>
+<a name="ln845">    diff = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln846"> </a>
+<a name="ln847">    while (isspace((int)interval_str[0]) == FALSE) {</a>
+<a name="ln848">        int an_int = 0, rc;</a>
+<a name="ln849">        char ch = 0;</a>
+<a name="ln850"> </a>
+<a name="ln851">        if (interval_str[0] == 'T') {</a>
+<a name="ln852">            is_time = TRUE;</a>
+<a name="ln853">            interval_str++;</a>
+<a name="ln854">        }</a>
+<a name="ln855"> </a>
+<a name="ln856">        rc = parse_int(interval_str, 10, 0, &amp;an_int);</a>
+<a name="ln857">        if (rc == 0) {</a>
+<a name="ln858">            break;</a>
+<a name="ln859">        }</a>
+<a name="ln860">        interval_str += rc;</a>
+<a name="ln861"> </a>
+<a name="ln862">        ch = interval_str[0];</a>
+<a name="ln863">        interval_str++;</a>
+<a name="ln864"> </a>
+<a name="ln865">        crm_trace(&quot;Testing %c=%d, rc=%d&quot;, ch, an_int, rc);</a>
+<a name="ln866"> </a>
+<a name="ln867">        switch (ch) {</a>
+<a name="ln868">            case 0:</a>
+<a name="ln869">                return diff;</a>
+<a name="ln870">                break;</a>
+<a name="ln871">            case 'Y':</a>
+<a name="ln872">                diff-&gt;years = an_int;</a>
+<a name="ln873">                break;</a>
+<a name="ln874">            case 'M':</a>
+<a name="ln875">                if (is_time) {</a>
+<a name="ln876">                    /* Minutes */</a>
+<a name="ln877">                    diff-&gt;seconds += an_int * 60;</a>
+<a name="ln878">                } else {</a>
+<a name="ln879">                    diff-&gt;months = an_int;</a>
+<a name="ln880">                }</a>
+<a name="ln881">                break;</a>
+<a name="ln882">            case 'W':</a>
+<a name="ln883">                diff-&gt;days += an_int * 7;</a>
+<a name="ln884">                break;</a>
+<a name="ln885">            case 'D':</a>
+<a name="ln886">                diff-&gt;days += an_int;</a>
+<a name="ln887">                break;</a>
+<a name="ln888">            case 'H':</a>
+<a name="ln889">                diff-&gt;seconds += an_int * 60 * 60;</a>
+<a name="ln890">                break;</a>
+<a name="ln891">            case 'S':</a>
+<a name="ln892">                diff-&gt;seconds += an_int;</a>
+<a name="ln893">                break;</a>
+<a name="ln894">            default:</a>
+<a name="ln895">                goto bail;</a>
+<a name="ln896">                break;</a>
+<a name="ln897">        }</a>
+<a name="ln898">    }</a>
+<a name="ln899">    return diff;</a>
+<a name="ln900"> </a>
+<a name="ln901">  bail:</a>
+<a name="ln902">    free(diff);</a>
+<a name="ln903">    return NULL;</a>
+<a name="ln904">}</a>
+<a name="ln905"> </a>
+<a name="ln906">crm_time_period_t *</a>
+<a name="ln907">crm_time_parse_period(const char *period_str)</a>
+<a name="ln908">{</a>
+<a name="ln909">    gboolean invalid = FALSE;</a>
+<a name="ln910">    const char *original = period_str;</a>
+<a name="ln911">    crm_time_period_t *period = NULL;</a>
+<a name="ln912"> </a>
+<a name="ln913">    CRM_CHECK(period_str != NULL, return NULL);</a>
+<a name="ln914">    CRM_CHECK(strlen(period_str) &gt; 0, return NULL);</a>
+<a name="ln915"> </a>
+<a name="ln916">    tzset();</a>
+<a name="ln917">    period = calloc(1, sizeof(crm_time_period_t));</a>
+<a name="ln918"> </a>
+<a name="ln919">    if (period_str[0] == 'P') {</a>
+<a name="ln920">        period-&gt;diff = crm_time_parse_duration(period_str);</a>
+<a name="ln921">    } else {</a>
+<a name="ln922">        period-&gt;start = parse_date(period_str);</a>
+<a name="ln923">    }</a>
+<a name="ln924"> </a>
+<a name="ln925">    period_str = strstr(original, &quot;/&quot;);</a>
+<a name="ln926">    if (period_str) {</a>
+<a name="ln927">        CRM_CHECK(period_str[0] == '/', invalid = TRUE;</a>
+<a name="ln928">                  goto bail);</a>
+<a name="ln929">        period_str++;</a>
+<a name="ln930"> </a>
+<a name="ln931">        if (period_str[0] == 'P') {</a>
+<a name="ln932">            period-&gt;diff = crm_time_parse_duration(period_str);</a>
+<a name="ln933">        } else {</a>
+<a name="ln934">            period-&gt;end = parse_date(period_str);</a>
+<a name="ln935">        }</a>
+<a name="ln936"> </a>
+<a name="ln937">    } else if (period-&gt;diff != NULL) {</a>
+<a name="ln938">        /* just aduration starting from now */</a>
+<a name="ln939">        period-&gt;start = crm_time_new(NULL);</a>
+<a name="ln940"> </a>
+<a name="ln941">    } else {</a>
+<a name="ln942">        invalid = TRUE;</a>
+<a name="ln943">        CRM_CHECK(period_str != NULL, goto bail);</a>
+<a name="ln944">    }</a>
+<a name="ln945"> </a>
+<a name="ln946">    /* sanity checks */</a>
+<a name="ln947">    if (period-&gt;start == NULL &amp;&amp; period-&gt;end == NULL) {</a>
+<a name="ln948">        crm_err(&quot;Invalid time period: %s&quot;, original);</a>
+<a name="ln949">        invalid = TRUE;</a>
+<a name="ln950"> </a>
+<a name="ln951">    } else if (period-&gt;start == NULL &amp;&amp; period-&gt;diff == NULL) {</a>
+<a name="ln952">        crm_err(&quot;Invalid time period: %s&quot;, original);</a>
+<a name="ln953">        invalid = TRUE;</a>
+<a name="ln954"> </a>
+<a name="ln955">    } else if (period-&gt;end == NULL &amp;&amp; period-&gt;diff == NULL) {</a>
+<a name="ln956">        crm_err(&quot;Invalid time period: %s&quot;, original);</a>
+<a name="ln957">        invalid = TRUE;</a>
+<a name="ln958">    }</a>
+<a name="ln959"> </a>
+<a name="ln960">  bail:</a>
+<a name="ln961">    if (invalid) {</a>
+<a name="ln962">        free(period-&gt;start);</a>
+<a name="ln963">        free(period-&gt;end);</a>
+<a name="ln964">        free(period-&gt;diff);</a>
+<a name="ln965">        free(period);</a>
+<a name="ln966">        return NULL;</a>
+<a name="ln967">    }</a>
+<a name="ln968">    if (period-&gt;end == NULL &amp;&amp; period-&gt;diff == NULL) {</a>
+<a name="ln969">    }</a>
+<a name="ln970"> </a>
+<a name="ln971">    if (period-&gt;start == NULL) {</a>
+<a name="ln972">        period-&gt;start = crm_time_subtract(period-&gt;end, period-&gt;diff);</a>
+<a name="ln973"> </a>
+<a name="ln974">    } else if (period-&gt;end == NULL) {</a>
+<a name="ln975">        period-&gt;end = crm_time_add(period-&gt;start, period-&gt;diff);</a>
+<a name="ln976">    }</a>
+<a name="ln977"> </a>
+<a name="ln978">    crm_time_check(period-&gt;start);</a>
+<a name="ln979">    crm_time_check(period-&gt;end);</a>
+<a name="ln980"> </a>
+<a name="ln981">    return period;</a>
+<a name="ln982">}</a>
+<a name="ln983"> </a>
+<a name="ln984">void</a>
+<a name="ln985">crm_time_set(crm_time_t * target, crm_time_t * source)</a>
+<a name="ln986">{</a>
+<a name="ln987">    crm_trace(&quot;target=%p, source=%p&quot;, target, source);</a>
+<a name="ln988"> </a>
+<a name="ln989">    CRM_CHECK(target != NULL &amp;&amp; source != NULL, return);</a>
+<a name="ln990"> </a>
+<a name="ln991">    target-&gt;years = source-&gt;years;</a>
+<a name="ln992">    target-&gt;days = source-&gt;days;</a>
+<a name="ln993">    target-&gt;months = source-&gt;months;    /* Only for durations */</a>
+<a name="ln994">    target-&gt;seconds = source-&gt;seconds;</a>
+<a name="ln995">    target-&gt;offset = source-&gt;offset;</a>
+<a name="ln996"> </a>
+<a name="ln997">    crm_time_log(LOG_TRACE, &quot;source&quot;, source,</a>
+<a name="ln998">                 crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);</a>
+<a name="ln999">    crm_time_log(LOG_TRACE, &quot;target&quot;, target,</a>
+<a name="ln1000">                 crm_time_log_date | crm_time_log_timeofday | crm_time_log_with_timezone);</a>
+<a name="ln1001">}</a>
+<a name="ln1002"> </a>
+<a name="ln1003">static void</a>
+<a name="ln1004">ha_set_tm_time(crm_time_t * target, struct tm *source)</a>
+<a name="ln1005">{</a>
+<a name="ln1006">    int h_offset = 0;</a>
+<a name="ln1007">    int m_offset = 0;</a>
+<a name="ln1008"> </a>
+<a name="ln1009">    /* Ensure target is fully initialized */</a>
+<a name="ln1010">    target-&gt;years = 0;</a>
+<a name="ln1011">    target-&gt;months = 0;</a>
+<a name="ln1012">    target-&gt;days = 0;</a>
+<a name="ln1013">    target-&gt;seconds = 0;</a>
+<a name="ln1014">    target-&gt;offset = 0;</a>
+<a name="ln1015">    target-&gt;duration = FALSE;</a>
+<a name="ln1016"> </a>
+<a name="ln1017">    if (source-&gt;tm_year &gt; 0) {</a>
+<a name="ln1018">        /* years since 1900 */</a>
+<a name="ln1019">        target-&gt;years = 1900 + source-&gt;tm_year;</a>
+<a name="ln1020">    }</a>
+<a name="ln1021"> </a>
+<a name="ln1022">    if (source-&gt;tm_yday &gt;= 0) {</a>
+<a name="ln1023">        /* days since January 1 [0-365] */</a>
+<a name="ln1024">        target-&gt;days = 1 + source-&gt;tm_yday;</a>
+<a name="ln1025">    }</a>
+<a name="ln1026"> </a>
+<a name="ln1027">    if (source-&gt;tm_hour &gt;= 0) {</a>
+<a name="ln1028">        target-&gt;seconds += 60 * 60 * source-&gt;tm_hour;</a>
+<a name="ln1029">    }</a>
+<a name="ln1030">    if (source-&gt;tm_min &gt;= 0) {</a>
+<a name="ln1031">        target-&gt;seconds += 60 * source-&gt;tm_min;</a>
+<a name="ln1032">    }</a>
+<a name="ln1033">    if (source-&gt;tm_sec &gt;= 0) {</a>
+<a name="ln1034">        target-&gt;seconds += source-&gt;tm_sec;</a>
+<a name="ln1035">    }</a>
+<a name="ln1036"> </a>
+<a name="ln1037">    /* tm_gmtoff == offset from UTC in seconds */</a>
+<a name="ln1038">    h_offset = GMTOFF(source) / (3600);</a>
+<a name="ln1039">    m_offset = (GMTOFF(source) - (3600 * h_offset)) / (60);</a>
+<a name="ln1040">    crm_trace(&quot;Offset (s): %ld, offset (hh:mm): %.2d:%.2d&quot;, GMTOFF(source), h_offset, m_offset);</a>
+<a name="ln1041"> </a>
+<a name="ln1042">    target-&gt;offset += 60 * 60 * h_offset;</a>
+<a name="ln1043">    target-&gt;offset += 60 * m_offset;</a>
+<a name="ln1044">}</a>
+<a name="ln1045"> </a>
+<a name="ln1046">void</a>
+<a name="ln1047">crm_time_set_timet(crm_time_t * target, time_t * source)</a>
+<a name="ln1048">{</a>
+<a name="ln1049">    ha_set_tm_time(target, localtime(source));</a>
+<a name="ln1050">}</a>
+<a name="ln1051"> </a>
+<a name="ln1052">crm_time_t *</a>
+<a name="ln1053">crm_time_add(crm_time_t * dt, crm_time_t * value)</a>
+<a name="ln1054">{</a>
+<a name="ln1055">    crm_time_t *utc = NULL;</a>
+<a name="ln1056">    crm_time_t *answer = NULL;</a>
+<a name="ln1057"> </a>
+<a name="ln1058">    CRM_CHECK(dt != NULL &amp;&amp; value != NULL, return NULL);</a>
+<a name="ln1059"> </a>
+<a name="ln1060">    answer = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln1061">    crm_time_set(answer, dt);</a>
+<a name="ln1062"> </a>
+<a name="ln1063">    utc = crm_get_utc_time(value);</a>
+<a name="ln1064"> </a>
+<a name="ln1065">    answer-&gt;years += utc-&gt;years;</a>
+<a name="ln1066">    crm_time_add_months(answer, utc-&gt;months);</a>
+<a name="ln1067">    crm_time_add_days(answer, utc-&gt;days);</a>
+<a name="ln1068">    crm_time_add_seconds(answer, utc-&gt;seconds);</a>
+<a name="ln1069"> </a>
+<a name="ln1070">    crm_time_free(utc);</a>
+<a name="ln1071">    return answer;</a>
+<a name="ln1072">}</a>
+<a name="ln1073"> </a>
+<a name="ln1074">crm_time_t *</a>
+<a name="ln1075">crm_time_calculate_duration(crm_time_t * dt, crm_time_t * value)</a>
+<a name="ln1076">{</a>
+<a name="ln1077">    crm_time_t *utc = NULL;</a>
+<a name="ln1078">    crm_time_t *answer = NULL;</a>
+<a name="ln1079"> </a>
+<a name="ln1080">    CRM_CHECK(dt != NULL &amp;&amp; value != NULL, return NULL);</a>
+<a name="ln1081"> </a>
+<a name="ln1082">    utc = crm_get_utc_time(value);</a>
+<a name="ln1083">    answer = crm_get_utc_time(dt);</a>
+<a name="ln1084">    answer-&gt;duration = TRUE;</a>
+<a name="ln1085"> </a>
+<a name="ln1086">    answer-&gt;years -= utc-&gt;years;</a>
+<a name="ln1087">    if(utc-&gt;months != 0) {</a>
+<a name="ln1088">        crm_time_add_months(answer, -utc-&gt;months);</a>
+<a name="ln1089">    }</a>
+<a name="ln1090">    crm_time_add_days(answer, -utc-&gt;days);</a>
+<a name="ln1091">    crm_time_add_seconds(answer, -utc-&gt;seconds);</a>
+<a name="ln1092"> </a>
+<a name="ln1093">    crm_time_free(utc);</a>
+<a name="ln1094">    return answer;</a>
+<a name="ln1095">}</a>
+<a name="ln1096"> </a>
+<a name="ln1097">crm_time_t *</a>
+<a name="ln1098">crm_time_subtract(crm_time_t * dt, crm_time_t * value)</a>
+<a name="ln1099">{</a>
+<a name="ln1100">    crm_time_t *utc = NULL;</a>
+<a name="ln1101">    crm_time_t *answer = NULL;</a>
+<a name="ln1102"> </a>
+<a name="ln1103">    CRM_CHECK(dt != NULL &amp;&amp; value != NULL, return NULL);</a>
+<a name="ln1104"> </a>
+<a name="ln1105">    answer = calloc(1, sizeof(crm_time_t));</a>
+<a name="ln1106">    crm_time_set(answer, dt);</a>
+<a name="ln1107">    utc = crm_get_utc_time(value);</a>
+<a name="ln1108"> </a>
+<a name="ln1109">    answer-&gt;years -= utc-&gt;years;</a>
+<a name="ln1110">    if(utc-&gt;months != 0) {</a>
+<a name="ln1111">        crm_time_add_months(answer, -utc-&gt;months);</a>
+<a name="ln1112">    }</a>
+<a name="ln1113">    crm_time_add_days(answer, -utc-&gt;days);</a>
+<a name="ln1114">    crm_time_add_seconds(answer, -utc-&gt;seconds);</a>
+<a name="ln1115"> </a>
+<a name="ln1116">    return answer;</a>
+<a name="ln1117">}</a>
+<a name="ln1118"> </a>
+<a name="ln1119">bool</a>
+<a name="ln1120">crm_time_check(crm_time_t * dt)</a>
+<a name="ln1121">{</a>
+<a name="ln1122">    int ydays = 0;</a>
+<a name="ln1123"> </a>
+<a name="ln1124">    CRM_CHECK(dt != NULL, return FALSE);</a>
+<a name="ln1125"> </a>
+<a name="ln1126">    ydays = year_days(dt-&gt;years);</a>
+<a name="ln1127">    crm_trace(&quot;max ydays: %d&quot;, ydays);</a>
+<a name="ln1128"> </a>
+<a name="ln1129">    CRM_CHECK(dt-&gt;days &gt; 0, return FALSE);</a>
+<a name="ln1130">    CRM_CHECK(dt-&gt;days &lt;= ydays, return FALSE);</a>
+<a name="ln1131"> </a>
+<a name="ln1132">    CRM_CHECK(dt-&gt;seconds &gt;= 0, return FALSE);</a>
+<a name="ln1133">    CRM_CHECK(dt-&gt;seconds &lt; 24 * 60 * 60, return FALSE);</a>
+<a name="ln1134"> </a>
+<a name="ln1135">    return TRUE;</a>
+<a name="ln1136">}</a>
+<a name="ln1137"> </a>
+<a name="ln1138">#define do_cmp_field(l, r, field)					\</a>
+<a name="ln1139">    if(rc == 0) {                                                       \</a>
+<a name="ln1140">		if(l-&gt;field &gt; r-&gt;field) {				\</a>
+<a name="ln1141">			crm_trace(&quot;%s: %d &gt; %d&quot;,			\</a>
+<a name="ln1142">				    #field, l-&gt;field, r-&gt;field);	\</a>
+<a name="ln1143">			rc = 1;                                         \</a>
+<a name="ln1144">		} else if(l-&gt;field &lt; r-&gt;field) {			\</a>
+<a name="ln1145">			crm_trace(&quot;%s: %d &lt; %d&quot;,			\</a>
+<a name="ln1146">				    #field, l-&gt;field, r-&gt;field);	\</a>
+<a name="ln1147">			rc = -1;					\</a>
+<a name="ln1148">		}							\</a>
+<a name="ln1149">    }</a>
+<a name="ln1150"> </a>
+<a name="ln1151">int</a>
+<a name="ln1152">crm_time_compare(crm_time_t * a, crm_time_t * b)</a>
+<a name="ln1153">{</a>
+<a name="ln1154">    int rc = 0;</a>
+<a name="ln1155">    crm_time_t *t1 = NULL;</a>
+<a name="ln1156">    crm_time_t *t2 = NULL;</a>
+<a name="ln1157"> </a>
+<a name="ln1158">    if (a == NULL &amp;&amp; b == NULL) {</a>
+<a name="ln1159">        return 0;</a>
+<a name="ln1160">    } else if (a == NULL) {</a>
+<a name="ln1161">        return -1;</a>
+<a name="ln1162">    } else if (b == NULL) {</a>
+<a name="ln1163">        return 1;</a>
+<a name="ln1164">    }</a>
+<a name="ln1165"> </a>
+<a name="ln1166">    t1 = crm_get_utc_time(a);</a>
+<a name="ln1167">    t2 = crm_get_utc_time(b);</a>
+<a name="ln1168"> </a>
+<a name="ln1169">    do_cmp_field(t1, t2, years);</a>
+<a name="ln1170">    do_cmp_field(t1, t2, days);</a>
+<a name="ln1171">    do_cmp_field(t1, t2, seconds);</a>
+<a name="ln1172"> </a>
+<a name="ln1173">    crm_time_free(t1);</a>
+<a name="ln1174">    crm_time_free(t2);</a>
+<a name="ln1175">    return rc;</a>
+<a name="ln1176">}</a>
+<a name="ln1177"> </a>
+<a name="ln1178">void</a>
+<a name="ln1179">crm_time_add_seconds(crm_time_t * a_time, int extra)</a>
+<a name="ln1180">{</a>
+<a name="ln1181">    int days = 0;</a>
+<a name="ln1182">    int seconds = 24 * 60 * 60;</a>
+<a name="ln1183"> </a>
+<a name="ln1184">    crm_trace(&quot;Adding %d seconds to %d (max=%d)&quot;, extra, a_time-&gt;seconds, seconds);</a>
+<a name="ln1185"> </a>
+<a name="ln1186">    a_time-&gt;seconds += extra;</a>
+<a name="ln1187">    while (a_time-&gt;seconds &gt;= seconds) {</a>
+<a name="ln1188">        a_time-&gt;seconds -= seconds;</a>
+<a name="ln1189">        days++;</a>
+<a name="ln1190">    }</a>
+<a name="ln1191"> </a>
+<a name="ln1192">    while (a_time-&gt;seconds &lt; 0) {</a>
+<a name="ln1193">        a_time-&gt;seconds += seconds;</a>
+<a name="ln1194">        days--;</a>
+<a name="ln1195">    }</a>
+<a name="ln1196">    crm_time_add_days(a_time, days);</a>
+<a name="ln1197">}</a>
+<a name="ln1198"> </a>
+<a name="ln1199">void</a>
+<a name="ln1200">crm_time_add_days(crm_time_t * a_time, int extra)</a>
+<a name="ln1201">{</a>
+<a name="ln1202">    int lower_bound = 1;</a>
+<a name="ln1203">    int ydays = crm_time_leapyear(a_time-&gt;years) ? 366 : 365;</a>
+<a name="ln1204"> </a>
+<a name="ln1205">    crm_trace(&quot;Adding %d days to %.4d-%.3d&quot;, extra, a_time-&gt;years, a_time-&gt;days);</a>
+<a name="ln1206"> </a>
+<a name="ln1207">    a_time-&gt;days += extra;</a>
+<a name="ln1208">    while (a_time-&gt;days &gt; ydays) {</a>
+<a name="ln1209">        a_time-&gt;years++;</a>
+<a name="ln1210">        a_time-&gt;days -= ydays;</a>
+<a name="ln1211">        ydays = crm_time_leapyear(a_time-&gt;years) ? 366 : 365;</a>
+<a name="ln1212">    }</a>
+<a name="ln1213"> </a>
+<a name="ln1214">    if(a_time-&gt;duration) {</a>
+<a name="ln1215">        lower_bound = 0;</a>
+<a name="ln1216">    }</a>
+<a name="ln1217"> </a>
+<a name="ln1218">    while (a_time-&gt;days &lt; lower_bound) {</a>
+<a name="ln1219">        a_time-&gt;years--;</a>
+<a name="ln1220">        a_time-&gt;days += crm_time_leapyear(a_time-&gt;years) ? 366 : 365;</a>
+<a name="ln1221">    }</a>
+<a name="ln1222">}</a>
+<a name="ln1223"> </a>
+<a name="ln1224">void</a>
+<a name="ln1225">crm_time_add_months(crm_time_t * a_time, int extra)</a>
+<a name="ln1226">{</a>
+<a name="ln1227">    int lpc;</a>
+<a name="ln1228">    uint32_t y, m, d, dmax;</a>
+<a name="ln1229"> </a>
+<a name="ln1230">    crm_time_get_gregorian(a_time, &amp;y, &amp;m, &amp;d);</a>
+<a name="ln1231">    crm_trace(&quot;Adding %d months to %.4d-%.2d-%.2d&quot;, extra, y, m, d);</a>
+<a name="ln1232"> </a>
+<a name="ln1233">    if (extra &gt; 0) {</a>
+<a name="ln1234">        for (lpc = extra; lpc &gt; 0; lpc--) {</a>
+<a name="ln1235">            m++;</a>
+<a name="ln1236">            if (m == 13) {</a>
+<a name="ln1237">                m = 1;</a>
+<a name="ln1238">                y++;</a>
+<a name="ln1239">            }</a>
+<a name="ln1240">        }</a>
+<a name="ln1241">    } else {</a>
+<a name="ln1242">        for (lpc = -extra; lpc &gt; 0; lpc--) {</a>
+<a name="ln1243">            m--;</a>
+<a name="ln1244">            if (m == 0) {</a>
+<a name="ln1245">                m = 12;</a>
+<a name="ln1246">                y--;</a>
+<a name="ln1247">            }</a>
+<a name="ln1248">        }</a>
+<a name="ln1249">    }</a>
+<a name="ln1250"> </a>
+<a name="ln1251">    dmax = crm_time_days_in_month(m, y);</a>
+<a name="ln1252">    if (dmax &lt; d) {</a>
+<a name="ln1253">        /* Preserve day-of-month unless the month doesn't have enough days */</a>
+<a name="ln1254">        d = dmax;</a>
+<a name="ln1255">    }</a>
+<a name="ln1256"> </a>
+<a name="ln1257">    crm_trace(&quot;Calculated %.4d-%.2d-%.2d&quot;, y, m, d);</a>
+<a name="ln1258"> </a>
+<a name="ln1259">    a_time-&gt;years = y;</a>
+<a name="ln1260">    a_time-&gt;days = get_ordinal_days(y, m, d);</a>
+<a name="ln1261"> </a>
+<a name="ln1262">    crm_time_get_gregorian(a_time, &amp;y, &amp;m, &amp;d);</a>
+<a name="ln1263">    crm_trace(&quot;Got %.4d-%.2d-%.2d&quot;, y, m, d);</a>
+<a name="ln1264">}</a>
+<a name="ln1265"> </a>
+<a name="ln1266">void</a>
+<a name="ln1267">crm_time_add_minutes(crm_time_t * a_time, int extra)</a>
+<a name="ln1268">{</a>
+<a name="ln1269">    crm_time_add_seconds(a_time, extra * 60);</a>
+<a name="ln1270">}</a>
+<a name="ln1271"> </a>
+<a name="ln1272">void</a>
+<a name="ln1273">crm_time_add_hours(crm_time_t * a_time, int extra)</a>
+<a name="ln1274">{</a>
+<a name="ln1275">    crm_time_add_seconds(a_time, extra * 60 * 60);</a>
+<a name="ln1276">}</a>
+<a name="ln1277"> </a>
+<a name="ln1278">void</a>
+<a name="ln1279">crm_time_add_weeks(crm_time_t * a_time, int extra)</a>
+<a name="ln1280">{</a>
+<a name="ln1281">    crm_time_add_days(a_time, extra * 7);</a>
+<a name="ln1282">}</a>
+<a name="ln1283"> </a>
+<a name="ln1284">void</a>
+<a name="ln1285">crm_time_add_years(crm_time_t * a_time, int extra)</a>
+<a name="ln1286">{</a>
+<a name="ln1287">    a_time-&gt;years += extra;</a>
+<a name="ln1288">}</a>
+<a name="ln1289"> </a>
+<a name="ln1290">static void</a>
+<a name="ln1291">ha_get_tm_time( struct tm *target, crm_time_t *source)</a>
+<a name="ln1292">{</a>
+<a name="ln1293">    *target = (struct tm) {</a>
+<a name="ln1294">        .tm_year = source-&gt;years - 1900,</a>
+<a name="ln1295">        .tm_yday = source-&gt;days - 1,</a>
+<a name="ln1296">        .tm_sec = source-&gt;seconds % 60,</a>
+<a name="ln1297">        .tm_min = ( source-&gt;seconds / 60 ) % 60,</a>
+<a name="ln1298">        .tm_hour = source-&gt;seconds / 60 / 60,</a>
+<a name="ln1299"> </a>
+<a name="ln1300">#if defined(HAVE_STRUCT_TM_TM_GMTOFF)</a>
+<a name="ln1301">        .tm_gmtoff = source-&gt;offset</a>
+<a name="ln1302">#endif</a>
+<a name="ln1303">    };</a>
+<a name="ln1304">}</a>
+<a name="ln1305"> </a>
+<a name="ln1306">crm_time_hr_t *</a>
+<a name="ln1307">crm_time_hr_convert(crm_time_hr_t *target, crm_time_t *dt)</a>
+<a name="ln1308">{</a>
+<a name="ln1309">    crm_time_hr_t *hr_dt = NULL;</a>
+<a name="ln1310"> </a>
+<a name="ln1311">    if (dt) {</a>
+<a name="ln1312">        hr_dt = target?target:calloc(1, sizeof(crm_time_hr_t));</a>
+<a name="ln1313">        if (hr_dt) {</a>
+<a name="ln1314">            *hr_dt = (crm_time_hr_t) {</a>
+<a name="ln1315">                .years = dt-&gt;years,</a>
+<a name="ln1316">                .months = dt-&gt;months,</a>
+<a name="ln1317">                .days = dt-&gt;days,</a>
+<a name="ln1318">                .seconds = dt-&gt;seconds,</a>
+<a name="ln1319">                .offset = dt-&gt;offset,</a>
+<a name="ln1320">                .duration = dt-&gt;duration</a>
+<a name="ln1321">            };</a>
+<a name="ln1322">        }</a>
+<a name="ln1323">    }</a>
+<a name="ln1324"> </a>
+<a name="ln1325">    return hr_dt;</a>
+<a name="ln1326">}</a>
+<a name="ln1327"> </a>
+<a name="ln1328">void</a>
+<a name="ln1329">crm_time_set_hr_dt(crm_time_t *target, crm_time_hr_t *hr_dt)</a>
+<a name="ln1330">{</a>
+<a name="ln1331">    CRM_ASSERT((hr_dt) &amp;&amp; (target));</a>
+<a name="ln1332">    *target = (crm_time_t) {</a>
+<a name="ln1333">        .years = hr_dt-&gt;years,</a>
+<a name="ln1334">        .months = hr_dt-&gt;months,</a>
+<a name="ln1335">        .days = hr_dt-&gt;days,</a>
+<a name="ln1336">        .seconds = hr_dt-&gt;seconds,</a>
+<a name="ln1337">        .offset = hr_dt-&gt;offset,</a>
+<a name="ln1338">        .duration = hr_dt-&gt;duration</a>
+<a name="ln1339">    };</a>
+<a name="ln1340">}</a>
+<a name="ln1341"> </a>
+<a name="ln1342">crm_time_hr_t *</a>
+<a name="ln1343">crm_time_timeval_hr_convert(crm_time_hr_t *target, struct timeval *tv)</a>
+<a name="ln1344">{</a>
+<a name="ln1345">    crm_time_t dt;</a>
+<a name="ln1346">    crm_time_hr_t *ret;</a>
+<a name="ln1347"> </a>
+<a name="ln1348">    crm_time_set_timet(&amp;dt, &amp;tv-&gt;tv_sec);</a>
+<a name="ln1349">    ret = crm_time_hr_convert(target, &amp;dt);</a>
+<a name="ln1350">    if (ret) {</a>
+<a name="ln1351">        ret-&gt;useconds = tv-&gt;tv_usec;</a>
+<a name="ln1352">    }</a>
+<a name="ln1353">    return ret;</a>
+<a name="ln1354">}</a>
+<a name="ln1355"> </a>
+<a name="ln1356">crm_time_hr_t *</a>
+<a name="ln1357">crm_time_hr_new(const char *date_time)</a>
+<a name="ln1358">{</a>
+<a name="ln1359">    crm_time_hr_t *hr_dt = NULL;</a>
+<a name="ln1360">    struct timeval tv_now;</a>
+<a name="ln1361"> </a>
+<a name="ln1362">    if (!date_time) {</a>
+<a name="ln1363">        if (gettimeofday(&amp;tv_now, NULL) == 0) {</a>
+<a name="ln1364">            hr_dt = crm_time_timeval_hr_convert(NULL, &amp;tv_now);</a>
+<a name="ln1365">        }</a>
+<a name="ln1366">    } else {</a>
+<a name="ln1367">        crm_time_t *dt;</a>
+<a name="ln1368"> </a>
+<a name="ln1369">        dt = parse_date(date_time);</a>
+<a name="ln1370">        hr_dt = crm_time_hr_convert(NULL, dt);</a>
+<a name="ln1371">        crm_time_free(dt);</a>
+<a name="ln1372">    }</a>
+<a name="ln1373">    return hr_dt;</a>
+<a name="ln1374">}</a>
+<a name="ln1375"> </a>
+<a name="ln1376">void</a>
+<a name="ln1377">crm_time_hr_free(crm_time_hr_t * hr_dt)</a>
+<a name="ln1378">{</a>
+<a name="ln1379">    free(hr_dt);</a>
+<a name="ln1380">}</a>
+<a name="ln1381"> </a>
+<a name="ln1382">char *</a>
+<a name="ln1383">crm_time_format_hr(const char *format, crm_time_hr_t * hr_dt)</a>
+<a name="ln1384">{</a>
+<a name="ln1385">    const char *mark_s;</a>
+<a name="ln1386">    int max = 128, scanned_pos = 0, printed_pos = 0, fmt_pos = 0,</a>
+<a name="ln1387">        date_len = 0, nano_digits = 0, fmt_len;</a>
+<a name="ln1388">    char nano_s[10], date_s[max+1], nanofmt_s[5] = &quot;%&quot;, *tmp_fmt_s;</a>
+<a name="ln1389">    struct tm tm;</a>
+<a name="ln1390">    crm_time_t dt;</a>
+<a name="ln1391"> </a>
+<a name="ln1392">    if (!format) {</a>
+<a name="ln1393">        return NULL;</a>
+<a name="ln1394">    }</a>
+<a name="ln1395">    crm_time_set_hr_dt(&amp;dt, hr_dt);</a>
+<a name="ln1396">    ha_get_tm_time(&amp;tm, &amp;dt);</a>
+<a name="ln1397">    sprintf(nano_s, &quot;%06d000&quot;, hr_dt-&gt;useconds);</a>
+<a name="ln1398"> </a>
+<a name="ln1399">    while ((format[scanned_pos]) != '\0') {</a>
+<a name="ln1400">        fmt_len = 0;</a>
+<a name="ln1401">        mark_s = strchr(&amp;format[scanned_pos], '%');</a>
+<a name="ln1402">        if (mark_s) {</a>
+<a name="ln1403">            fmt_pos = mark_s - format;</a>
+<a name="ln1404">            fmt_len = 1;</a>
+<a name="ln1405">            while ((format[fmt_pos+fmt_len] != '\0') &amp;&amp;</a>
+<a name="ln1406">                (format[fmt_pos+fmt_len] &gt;= '0') &amp;&amp;</a>
+<a name="ln1407">                (format[fmt_pos+fmt_len] &lt;= '9')) {</a>
+<a name="ln1408">                fmt_len++;</a>
+<a name="ln1409">            }</a>
+<a name="ln1410">            scanned_pos = fmt_pos + fmt_len + 1;</a>
+<a name="ln1411">            if (format[fmt_pos+fmt_len] == 'N') {</a>
+<a name="ln1412">                nano_digits = atoi(&amp;format[fmt_pos+1]);</a>
+<a name="ln1413">                nano_digits = (nano_digits &gt; 6)?6:nano_digits;</a>
+<a name="ln1414">                nano_digits = (nano_digits &lt; 0)?0:nano_digits;</a>
+<a name="ln1415">                sprintf(&amp;nanofmt_s[1], &quot;.%ds&quot;, nano_digits);</a>
+<a name="ln1416">            } else {</a>
+<a name="ln1417">                if (format[scanned_pos] != '\0') {</a>
+<a name="ln1418">                    continue;</a>
+<a name="ln1419">                }</a>
+<a name="ln1420">                fmt_pos = scanned_pos; /* print till end */</a>
+<a name="ln1421">            }</a>
+<a name="ln1422">        } else {</a>
+<a name="ln1423">            scanned_pos = strlen(format);</a>
+<a name="ln1424">            fmt_pos = scanned_pos; /* print till end */</a>
+<a name="ln1425">        }</a>
+<a name="ln1426">        tmp_fmt_s = strndup(&amp;format[printed_pos], fmt_pos - printed_pos);</a>
+<a name="ln1427">#ifdef GCC_FORMAT_NONLITERAL_CHECKING_ENABLED</a>
+<a name="ln1428">#pragma GCC diagnostic push</a>
+<a name="ln1429">#pragma GCC diagnostic ignored &quot;-Wformat-nonliteral&quot;</a>
+<a name="ln1430">#endif</a>
+<a name="ln1431">        date_len += strftime(&amp;date_s[date_len], max-date_len, tmp_fmt_s, &amp;tm);</a>
+<a name="ln1432">#ifdef GCC_FORMAT_NONLITERAL_CHECKING_ENABLED</a>
+<a name="ln1433">#pragma GCC diagnostic pop</a>
+<a name="ln1434">#endif</a>
+<a name="ln1435">        printed_pos = scanned_pos;</a>
+<a name="ln1436">        free(tmp_fmt_s);</a>
+<a name="ln1437">        if (nano_digits) {</a>
+<a name="ln1438">#ifdef GCC_FORMAT_NONLITERAL_CHECKING_ENABLED</a>
+<a name="ln1439">#pragma GCC diagnostic push</a>
+<a name="ln1440">#pragma GCC diagnostic ignored &quot;-Wformat-nonliteral&quot;</a>
+<a name="ln1441">#endif</a>
+<a name="ln1442">            date_len += snprintf(&amp;date_s[date_len], max-date_len,</a>
+<a name="ln1443">                                 nanofmt_s, nano_s);</a>
+<a name="ln1444">#ifdef GCC_FORMAT_NONLITERAL_CHECKING_ENABLED</a>
+<a name="ln1445">#pragma GCC diagnostic pop</a>
+<a name="ln1446">#endif</a>
+<a name="ln1447">            nano_digits = 0;</a>
+<a name="ln1448">        }</a>
+<a name="ln1449">    }</a>
+<a name="ln1450"> </a>
+<a name="ln1451">    return (date_len == 0)?NULL:strdup(date_s);</a>
+<a name="ln1452">}</a>
+
+</code></pre>
+<div class="balloon" rel="83"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'utc'. Check lines: 83, 81.</p></div>
+<div class="balloon" rel="282"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'utc'. Check lines: 282, 81.</p></div>
+<div class="balloon" rel="366"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (dt->days > 0) == (0).</p></div>
+<div class="balloon" rel="560"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. A pointer to the signed int type is expected.</p></div>
+<div class="balloon" rel="560"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fourth actual argument of the 'sscanf' function. A pointer to the signed int type is expected.</p></div>
+<div class="balloon" rel="560"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fifth actual argument of the 'sscanf' function. A pointer to the signed int type is expected.</p></div>
+<div class="balloon" rel="562"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the third actual argument of the 'sscanf' function. A pointer to the signed int type is expected.</p></div>
+<div class="balloon" rel="562"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fourth actual argument of the 'sscanf' function. A pointer to the signed int type is expected.</p></div>
+<div class="balloon" rel="562"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V576/" target="_blank">V576</a> Incorrect format. Consider checking the fifth actual argument of the 'sscanf' function. A pointer to the signed int type is expected.</p></div>
+<div class="balloon" rel="665"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (strlen(date_str) > 0) == (0).</p></div>
+<div class="balloon" rel="678"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'dt'. Check lines: 678, 674.</p></div>
+<div class="balloon" rel="841"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (strlen(interval_str) > 0) == (0).</p></div>
+<div class="balloon" rel="872"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'diff'. Check lines: 872, 845.</p></div>
+<div class="balloon" rel="914"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (strlen(period_str) > 0) == (0).</p></div>
+<div class="balloon" rel="920"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'period'. Check lines: 920, 917.</p></div>
+<div class="balloon" rel="943"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'period_str != NULL' is always false.</p></div>
+<div class="balloon" rel="1065"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'answer'. Check lines: 1065, 1060.</p></div>
+<div class="balloon" rel="1065"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'utc'. Check lines: 1065, 81.</p></div>
+<div class="balloon" rel="1084"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'answer'. Check lines: 1084, 81.</p></div>
+<div class="balloon" rel="1086"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'utc'. Check lines: 1086, 81.</p></div>
+<div class="balloon" rel="1109"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'answer'. Check lines: 1109, 1105.</p></div>
+<div class="balloon" rel="1109"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'utc'. Check lines: 1109, 81.</p></div>
+<div class="balloon" rel="1129"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (dt->days > 0) == (0).</p></div>
+<div class="balloon" rel="1132"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (dt->seconds >= 0) == (0).</p></div>
+<div class="balloon" rel="1169"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 't1'. Check lines: 1169, 81.</p></div>
+<div class="balloon" rel="1169"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 't2'. Check lines: 1169, 81.</p></div>
+<div class="balloon" rel="1431"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strftime' function. Inspect the third argument. Check lines: 1431, 1426.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

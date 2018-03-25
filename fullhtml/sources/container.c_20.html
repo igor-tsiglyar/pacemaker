@@ -1,0 +1,1082 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;crm/pengine/rules.h&gt;</a>
+<a name="ln26">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln27">#include &lt;crm/pengine/internal.h&gt;</a>
+<a name="ln28">#include &lt;unpack.h&gt;</a>
+<a name="ln29">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#define VARIANT_CONTAINER 1</a>
+<a name="ln32">#include &quot;./variant.h&quot;</a>
+<a name="ln33"> </a>
+<a name="ln34">void tuple_free(container_grouping_t *tuple);</a>
+<a name="ln35"> </a>
+<a name="ln36">static char *</a>
+<a name="ln37">next_ip(const char *last_ip)</a>
+<a name="ln38">{</a>
+<a name="ln39">    unsigned int oct1 = 0;</a>
+<a name="ln40">    unsigned int oct2 = 0;</a>
+<a name="ln41">    unsigned int oct3 = 0;</a>
+<a name="ln42">    unsigned int oct4 = 0;</a>
+<a name="ln43">    int rc = sscanf(last_ip, &quot;%u.%u.%u.%u&quot;, &amp;oct1, &amp;oct2, &amp;oct3, &amp;oct4);</a>
+<a name="ln44"> </a>
+<a name="ln45">    if (rc != 4) {</a>
+<a name="ln46">        /*@ TODO check for IPv6 */</a>
+<a name="ln47">        return NULL;</a>
+<a name="ln48"> </a>
+<a name="ln49">    } else if (oct3 &gt; 253) {</a>
+<a name="ln50">        return NULL;</a>
+<a name="ln51"> </a>
+<a name="ln52">    } else if (oct4 &gt; 253) {</a>
+<a name="ln53">        ++oct3;</a>
+<a name="ln54">        oct4 = 1;</a>
+<a name="ln55"> </a>
+<a name="ln56">    } else {</a>
+<a name="ln57">        ++oct4;</a>
+<a name="ln58">    }</a>
+<a name="ln59"> </a>
+<a name="ln60">    return crm_strdup_printf(&quot;%u.%u.%u.%u&quot;, oct1, oct2, oct3, oct4);</a>
+<a name="ln61">}</a>
+<a name="ln62"> </a>
+<a name="ln63">static int</a>
+<a name="ln64">allocate_ip(container_variant_data_t *data, container_grouping_t *tuple, char *buffer, int max) </a>
+<a name="ln65">{</a>
+<a name="ln66">    if(data-&gt;ip_range_start == NULL) {</a>
+<a name="ln67">        return 0;</a>
+<a name="ln68"> </a>
+<a name="ln69">    } else if(data-&gt;ip_last) {</a>
+<a name="ln70">        tuple-&gt;ipaddr = next_ip(data-&gt;ip_last);</a>
+<a name="ln71"> </a>
+<a name="ln72">    } else {</a>
+<a name="ln73">        tuple-&gt;ipaddr = strdup(data-&gt;ip_range_start);</a>
+<a name="ln74">    }</a>
+<a name="ln75"> </a>
+<a name="ln76">    data-&gt;ip_last = tuple-&gt;ipaddr;</a>
+<a name="ln77">#if 0</a>
+<a name="ln78">    return snprintf(buffer, max, &quot; --add-host=%s-%d:%s --link %s-docker-%d:%s-link-%d&quot;,</a>
+<a name="ln79">                    data-&gt;prefix, tuple-&gt;offset, tuple-&gt;ipaddr,</a>
+<a name="ln80">                    data-&gt;prefix, tuple-&gt;offset, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln81">#else</a>
+<a name="ln82">    return snprintf(buffer, max, &quot; --add-host=%s-%d:%s&quot;,</a>
+<a name="ln83">                    data-&gt;prefix, tuple-&gt;offset, tuple-&gt;ipaddr);</a>
+<a name="ln84">#endif</a>
+<a name="ln85">}</a>
+<a name="ln86"> </a>
+<a name="ln87">static xmlNode *</a>
+<a name="ln88">create_resource(const char *name, const char *provider, const char *kind) </a>
+<a name="ln89">{</a>
+<a name="ln90">    xmlNode *rsc = create_xml_node(NULL, XML_CIB_TAG_RESOURCE);</a>
+<a name="ln91"> </a>
+<a name="ln92">    crm_xml_add(rsc, XML_ATTR_ID, name);</a>
+<a name="ln93">    crm_xml_add(rsc, XML_AGENT_ATTR_CLASS, &quot;ocf&quot;);</a>
+<a name="ln94">    crm_xml_add(rsc, XML_AGENT_ATTR_PROVIDER, provider);</a>
+<a name="ln95">    crm_xml_add(rsc, XML_ATTR_TYPE, kind);</a>
+<a name="ln96"> </a>
+<a name="ln97">    return rsc;</a>
+<a name="ln98">}</a>
+<a name="ln99"> </a>
+<a name="ln100">static void</a>
+<a name="ln101">create_nvp(xmlNode *parent, const char *name, const char *value) </a>
+<a name="ln102">{</a>
+<a name="ln103">    xmlNode *xml_nvp = create_xml_node(parent, XML_CIB_TAG_NVPAIR);</a>
+<a name="ln104"> </a>
+<a name="ln105">    crm_xml_set_id(xml_nvp, &quot;%s-%s&quot;, ID(parent), name);</a>
+<a name="ln106">    crm_xml_add(xml_nvp, XML_NVPAIR_ATTR_NAME, name);</a>
+<a name="ln107">    crm_xml_add(xml_nvp, XML_NVPAIR_ATTR_VALUE, value);</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">static void</a>
+<a name="ln111">create_op(xmlNode *parent, const char *prefix, const char *task, const char *interval) </a>
+<a name="ln112">{</a>
+<a name="ln113">    xmlNode *xml_op = create_xml_node(parent, &quot;op&quot;);</a>
+<a name="ln114"> </a>
+<a name="ln115">    crm_xml_set_id(xml_op, &quot;%s-%s-%s&quot;, prefix, task, interval);</a>
+<a name="ln116">    crm_xml_add(xml_op, XML_LRM_ATTR_INTERVAL, interval);</a>
+<a name="ln117">    crm_xml_add(xml_op, &quot;name&quot;, task);</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">/*!</a>
+<a name="ln121"> * \internal</a>
+<a name="ln122"> * \brief Check whether cluster can manage resource inside container</a>
+<a name="ln123"> *</a>
+<a name="ln124"> * \param[in] data  Container variant data</a>
+<a name="ln125"> *</a>
+<a name="ln126"> * \return TRUE if networking configuration is acceptable, FALSE otherwise</a>
+<a name="ln127"> *</a>
+<a name="ln128"> * \note The resource is manageable if an IP range or control port has been</a>
+<a name="ln129"> *       specified. If a control port is used without an IP range, replicas per</a>
+<a name="ln130"> *       host must be 1.</a>
+<a name="ln131"> */</a>
+<a name="ln132">static bool</a>
+<a name="ln133">valid_network(container_variant_data_t *data)</a>
+<a name="ln134">{</a>
+<a name="ln135">    if(data-&gt;ip_range_start) {</a>
+<a name="ln136">        return TRUE;</a>
+<a name="ln137">    }</a>
+<a name="ln138">    if(data-&gt;control_port) {</a>
+<a name="ln139">        if(data-&gt;replicas_per_host &gt; 1) {</a>
+<a name="ln140">            pe_err(&quot;Specifying the 'control-port' for %s requires 'replicas-per-host=1'&quot;, data-&gt;prefix);</a>
+<a name="ln141">            data-&gt;replicas_per_host = 1;</a>
+<a name="ln142">            /* @TODO to be sure: clear_bit(rsc-&gt;flags, pe_rsc_unique); */</a>
+<a name="ln143">        }</a>
+<a name="ln144">        return TRUE;</a>
+<a name="ln145">    }</a>
+<a name="ln146">    return FALSE;</a>
+<a name="ln147">}</a>
+<a name="ln148"> </a>
+<a name="ln149">static bool</a>
+<a name="ln150">create_ip_resource(</a>
+<a name="ln151">    resource_t *parent, container_variant_data_t *data, container_grouping_t *tuple,</a>
+<a name="ln152">    pe_working_set_t * data_set) </a>
+<a name="ln153">{</a>
+<a name="ln154">    if(data-&gt;ip_range_start) {</a>
+<a name="ln155">        char *id = NULL;</a>
+<a name="ln156">        xmlNode *xml_ip = NULL;</a>
+<a name="ln157">        xmlNode *xml_obj = NULL;</a>
+<a name="ln158"> </a>
+<a name="ln159">        id = crm_strdup_printf(&quot;%s-ip-%s&quot;, data-&gt;prefix, tuple-&gt;ipaddr);</a>
+<a name="ln160">        crm_xml_sanitize_id(id);</a>
+<a name="ln161">        xml_ip = create_resource(id, &quot;heartbeat&quot;, &quot;IPaddr2&quot;);</a>
+<a name="ln162">        free(id);</a>
+<a name="ln163"> </a>
+<a name="ln164">        xml_obj = create_xml_node(xml_ip, XML_TAG_ATTR_SETS);</a>
+<a name="ln165">        crm_xml_set_id(xml_obj, &quot;%s-attributes-%d&quot;, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln166"> </a>
+<a name="ln167">        create_nvp(xml_obj, &quot;ip&quot;, tuple-&gt;ipaddr);</a>
+<a name="ln168">        if(data-&gt;host_network) {</a>
+<a name="ln169">            create_nvp(xml_obj, &quot;nic&quot;, data-&gt;host_network);</a>
+<a name="ln170">        }</a>
+<a name="ln171"> </a>
+<a name="ln172">        if(data-&gt;host_netmask) {</a>
+<a name="ln173">            create_nvp(xml_obj, &quot;cidr_netmask&quot;, data-&gt;host_netmask);</a>
+<a name="ln174"> </a>
+<a name="ln175">        } else {</a>
+<a name="ln176">            create_nvp(xml_obj, &quot;cidr_netmask&quot;, &quot;32&quot;);</a>
+<a name="ln177">        }</a>
+<a name="ln178"> </a>
+<a name="ln179">        xml_obj = create_xml_node(xml_ip, &quot;operations&quot;);</a>
+<a name="ln180">        create_op(xml_obj, ID(xml_ip), &quot;monitor&quot;, &quot;60s&quot;);</a>
+<a name="ln181"> </a>
+<a name="ln182">        // TODO: Other ops? Timeouts and intervals from underlying resource?</a>
+<a name="ln183"> </a>
+<a name="ln184">        if (common_unpack(xml_ip, &amp;tuple-&gt;ip, NULL, data_set) == false) {</a>
+<a name="ln185">            return FALSE;</a>
+<a name="ln186">        }</a>
+<a name="ln187"> </a>
+<a name="ln188">        parent-&gt;children = g_list_append(parent-&gt;children, tuple-&gt;ip);</a>
+<a name="ln189">    }</a>
+<a name="ln190">    return TRUE;</a>
+<a name="ln191">}</a>
+<a name="ln192"> </a>
+<a name="ln193">static bool</a>
+<a name="ln194">create_docker_resource(</a>
+<a name="ln195">    resource_t *parent, container_variant_data_t *data, container_grouping_t *tuple,</a>
+<a name="ln196">    pe_working_set_t * data_set) </a>
+<a name="ln197">{</a>
+<a name="ln198">        int offset = 0, max = 4096;</a>
+<a name="ln199">        char *buffer = calloc(1, max+1);</a>
+<a name="ln200"> </a>
+<a name="ln201">        int doffset = 0, dmax = 1024;</a>
+<a name="ln202">        char *dbuffer = calloc(1, dmax+1);</a>
+<a name="ln203"> </a>
+<a name="ln204">        char *id = NULL;</a>
+<a name="ln205">        xmlNode *xml_docker = NULL;</a>
+<a name="ln206">        xmlNode *xml_obj = NULL;</a>
+<a name="ln207"> </a>
+<a name="ln208">        id = crm_strdup_printf(&quot;%s-docker-%d&quot;, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln209">        crm_xml_sanitize_id(id);</a>
+<a name="ln210">        xml_docker = create_resource(id, &quot;heartbeat&quot;, &quot;docker&quot;);</a>
+<a name="ln211">        free(id);</a>
+<a name="ln212"> </a>
+<a name="ln213">        xml_obj = create_xml_node(xml_docker, XML_TAG_ATTR_SETS);</a>
+<a name="ln214">        crm_xml_set_id(xml_obj, &quot;%s-attributes-%d&quot;, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln215"> </a>
+<a name="ln216">        create_nvp(xml_obj, &quot;image&quot;, data-&gt;image);</a>
+<a name="ln217">        create_nvp(xml_obj, &quot;allow_pull&quot;, &quot;true&quot;);</a>
+<a name="ln218">        create_nvp(xml_obj, &quot;force_kill&quot;, &quot;false&quot;);</a>
+<a name="ln219">        create_nvp(xml_obj, &quot;reuse&quot;, &quot;false&quot;);</a>
+<a name="ln220"> </a>
+<a name="ln221">        offset += snprintf(buffer+offset, max-offset, &quot; --restart=no&quot;);</a>
+<a name="ln222"> </a>
+<a name="ln223">        /* Set a container hostname only if we have an IP to map it to.</a>
+<a name="ln224">         * The user can set -h or --uts=host themselves if they want a nicer</a>
+<a name="ln225">         * name for logs, but this makes applications happy who need their</a>
+<a name="ln226">         * hostname to match the IP they bind to.</a>
+<a name="ln227">         */</a>
+<a name="ln228">        if (data-&gt;ip_range_start != NULL) {</a>
+<a name="ln229">            offset += snprintf(buffer+offset, max-offset, &quot; -h %s-%d&quot;,</a>
+<a name="ln230">                               data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln231">        }</a>
+<a name="ln232"> </a>
+<a name="ln233">        if(data-&gt;docker_network) {</a>
+<a name="ln234">//        offset += snprintf(buffer+offset, max-offset, &quot; --link-local-ip=%s&quot;, tuple-&gt;ipaddr);</a>
+<a name="ln235">            offset += snprintf(buffer+offset, max-offset, &quot; --net=%s&quot;, data-&gt;docker_network);</a>
+<a name="ln236">        }</a>
+<a name="ln237"> </a>
+<a name="ln238">        if(data-&gt;control_port) {</a>
+<a name="ln239">            offset += snprintf(buffer+offset, max-offset, &quot; -e PCMK_remote_port=%s&quot;, data-&gt;control_port);</a>
+<a name="ln240">        } else {</a>
+<a name="ln241">            offset += snprintf(buffer+offset, max-offset, &quot; -e PCMK_remote_port=%d&quot;, DEFAULT_REMOTE_PORT);</a>
+<a name="ln242">        }</a>
+<a name="ln243"> </a>
+<a name="ln244">        for(GListPtr pIter = data-&gt;mounts; pIter != NULL; pIter = pIter-&gt;next) {</a>
+<a name="ln245">            container_mount_t *mount = pIter-&gt;data;</a>
+<a name="ln246"> </a>
+<a name="ln247">            if(mount-&gt;flags) {</a>
+<a name="ln248">                char *source = crm_strdup_printf(</a>
+<a name="ln249">                    &quot;%s/%s-%d&quot;, mount-&gt;source, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln250"> </a>
+<a name="ln251">                if(doffset &gt; 0) {</a>
+<a name="ln252">                    doffset += snprintf(dbuffer+doffset, dmax-doffset, &quot;,&quot;);</a>
+<a name="ln253">                }</a>
+<a name="ln254">                doffset += snprintf(dbuffer+doffset, dmax-doffset, &quot;%s&quot;, source);</a>
+<a name="ln255">                offset += snprintf(buffer+offset, max-offset, &quot; -v %s:%s&quot;, source, mount-&gt;target);</a>
+<a name="ln256">                free(source);</a>
+<a name="ln257"> </a>
+<a name="ln258">            } else {</a>
+<a name="ln259">                offset += snprintf(buffer+offset, max-offset, &quot; -v %s:%s&quot;, mount-&gt;source, mount-&gt;target);</a>
+<a name="ln260">            }</a>
+<a name="ln261">            if(mount-&gt;options) {</a>
+<a name="ln262">                offset += snprintf(buffer+offset, max-offset, &quot;:%s&quot;, mount-&gt;options);</a>
+<a name="ln263">            }</a>
+<a name="ln264">        }</a>
+<a name="ln265"> </a>
+<a name="ln266">        for(GListPtr pIter = data-&gt;ports; pIter != NULL; pIter = pIter-&gt;next) {</a>
+<a name="ln267">            container_port_t *port = pIter-&gt;data;</a>
+<a name="ln268"> </a>
+<a name="ln269">            if(tuple-&gt;ipaddr) {</a>
+<a name="ln270">                offset += snprintf(buffer+offset, max-offset, &quot; -p %s:%s:%s&quot;,</a>
+<a name="ln271">                                   tuple-&gt;ipaddr, port-&gt;source, port-&gt;target);</a>
+<a name="ln272">            } else {</a>
+<a name="ln273">                offset += snprintf(buffer+offset, max-offset, &quot; -p %s:%s&quot;, port-&gt;source, port-&gt;target);</a>
+<a name="ln274">            }</a>
+<a name="ln275">        }</a>
+<a name="ln276"> </a>
+<a name="ln277">        if(data-&gt;docker_run_options) {</a>
+<a name="ln278">            offset += snprintf(buffer+offset, max-offset, &quot; %s&quot;, data-&gt;docker_run_options);</a>
+<a name="ln279">        }</a>
+<a name="ln280"> </a>
+<a name="ln281">        if(data-&gt;docker_host_options) {</a>
+<a name="ln282">            offset += snprintf(buffer+offset, max-offset, &quot; %s&quot;, data-&gt;docker_host_options);</a>
+<a name="ln283">        }</a>
+<a name="ln284"> </a>
+<a name="ln285">        create_nvp(xml_obj, &quot;run_opts&quot;, buffer);</a>
+<a name="ln286">        free(buffer);</a>
+<a name="ln287"> </a>
+<a name="ln288">        create_nvp(xml_obj, &quot;mount_points&quot;, dbuffer);</a>
+<a name="ln289">        free(dbuffer);</a>
+<a name="ln290"> </a>
+<a name="ln291">        if(tuple-&gt;child) {</a>
+<a name="ln292">            if(data-&gt;docker_run_command) {</a>
+<a name="ln293">                create_nvp(xml_obj, &quot;run_cmd&quot;, data-&gt;docker_run_command);</a>
+<a name="ln294">            } else {</a>
+<a name="ln295">                create_nvp(xml_obj, &quot;run_cmd&quot;, SBIN_DIR&quot;/pacemaker_remoted&quot;);</a>
+<a name="ln296">            }</a>
+<a name="ln297"> </a>
+<a name="ln298">            /* TODO: Allow users to specify their own?</a>
+<a name="ln299">             *</a>
+<a name="ln300">             * We just want to know if the container is alive, we'll</a>
+<a name="ln301">             * monitor the child independently</a>
+<a name="ln302">             */</a>
+<a name="ln303">            create_nvp(xml_obj, &quot;monitor_cmd&quot;, &quot;/bin/true&quot;); </a>
+<a name="ln304">        /* } else if(child &amp;&amp; data-&gt;untrusted) {</a>
+<a name="ln305">         * Support this use-case?</a>
+<a name="ln306">         *</a>
+<a name="ln307">         * The ability to have resources started/stopped by us, but</a>
+<a name="ln308">         * unable to set attributes, etc.</a>
+<a name="ln309">         *</a>
+<a name="ln310">         * Arguably better to control API access this with ACLs like</a>
+<a name="ln311">         * &quot;normal&quot; remote nodes</a>
+<a name="ln312">         *</a>
+<a name="ln313">         *     create_nvp(xml_obj, &quot;run_cmd&quot;, &quot;/usr/libexec/pacemaker/lrmd&quot;);</a>
+<a name="ln314">         *     create_nvp(xml_obj, &quot;monitor_cmd&quot;, &quot;/usr/libexec/pacemaker/lrmd_internal_ctl -c poke&quot;);</a>
+<a name="ln315">         */</a>
+<a name="ln316">        } else {</a>
+<a name="ln317">            if(data-&gt;docker_run_command) {</a>
+<a name="ln318">                create_nvp(xml_obj, &quot;run_cmd&quot;, data-&gt;docker_run_command);</a>
+<a name="ln319">            }</a>
+<a name="ln320"> </a>
+<a name="ln321">            /* TODO: Allow users to specify their own?</a>
+<a name="ln322">             *</a>
+<a name="ln323">             * We don't know what's in the container, so we just want</a>
+<a name="ln324">             * to know if it is alive</a>
+<a name="ln325">             */</a>
+<a name="ln326">            create_nvp(xml_obj, &quot;monitor_cmd&quot;, &quot;/bin/true&quot;);</a>
+<a name="ln327">        }</a>
+<a name="ln328"> </a>
+<a name="ln329"> </a>
+<a name="ln330">        xml_obj = create_xml_node(xml_docker, &quot;operations&quot;);</a>
+<a name="ln331">        create_op(xml_obj, ID(xml_docker), &quot;monitor&quot;, &quot;60s&quot;);</a>
+<a name="ln332"> </a>
+<a name="ln333">        // TODO: Other ops? Timeouts and intervals from underlying resource?</a>
+<a name="ln334"> </a>
+<a name="ln335">        if (common_unpack(xml_docker, &amp;tuple-&gt;docker, NULL, data_set) == FALSE) {</a>
+<a name="ln336">            return FALSE;</a>
+<a name="ln337">        }</a>
+<a name="ln338">        parent-&gt;children = g_list_append(parent-&gt;children, tuple-&gt;docker);</a>
+<a name="ln339">        tuple-&gt;docker-&gt;parent = parent;</a>
+<a name="ln340">        return TRUE;</a>
+<a name="ln341">}</a>
+<a name="ln342"> </a>
+<a name="ln343">static bool</a>
+<a name="ln344">create_remote_resource(</a>
+<a name="ln345">    resource_t *parent, container_variant_data_t *data, container_grouping_t *tuple,</a>
+<a name="ln346">    pe_working_set_t * data_set) </a>
+<a name="ln347">{</a>
+<a name="ln348">    if (tuple-&gt;child &amp;&amp; valid_network(data)) {</a>
+<a name="ln349">        GHashTableIter gIter;</a>
+<a name="ln350">        node_t *node = NULL;</a>
+<a name="ln351">        xmlNode *xml_obj = NULL;</a>
+<a name="ln352">        xmlNode *xml_remote = NULL;</a>
+<a name="ln353">        char *nodeid = crm_strdup_printf(&quot;%s-%d&quot;, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln354">        char *id = NULL;</a>
+<a name="ln355"> </a>
+<a name="ln356">        if (remote_id_conflict(nodeid, data_set)) {</a>
+<a name="ln357">            // The biggest hammer we have</a>
+<a name="ln358">            id = crm_strdup_printf(&quot;pcmk-internal-%s-remote-%d&quot;, tuple-&gt;child-&gt;id, tuple-&gt;offset);</a>
+<a name="ln359">            CRM_ASSERT(remote_id_conflict(id, data_set) == FALSE);</a>
+<a name="ln360">        } else {</a>
+<a name="ln361">            id = strdup(nodeid);</a>
+<a name="ln362">        }</a>
+<a name="ln363"> </a>
+<a name="ln364">        xml_remote = create_resource(id, &quot;pacemaker&quot;, &quot;remote&quot;);</a>
+<a name="ln365">        free(id);</a>
+<a name="ln366"> </a>
+<a name="ln367">        xml_obj = create_xml_node(xml_remote, &quot;operations&quot;);</a>
+<a name="ln368">        create_op(xml_obj, ID(xml_remote), &quot;monitor&quot;, &quot;60s&quot;);</a>
+<a name="ln369"> </a>
+<a name="ln370">        xml_obj = create_xml_node(xml_remote, XML_TAG_ATTR_SETS);</a>
+<a name="ln371">        crm_xml_set_id(xml_obj, &quot;%s-attributes-%d&quot;, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln372"> </a>
+<a name="ln373">        if(tuple-&gt;ipaddr) {</a>
+<a name="ln374">            create_nvp(xml_obj, &quot;addr&quot;, tuple-&gt;ipaddr);</a>
+<a name="ln375">        } else {</a>
+<a name="ln376">            // REMOTE_CONTAINER_HACK: Allow remote nodes that start containers with pacemaker remote inside</a>
+<a name="ln377">            create_nvp(xml_obj, &quot;addr&quot;, &quot;#uname&quot;);</a>
+<a name="ln378">        }</a>
+<a name="ln379"> </a>
+<a name="ln380">        if(data-&gt;control_port) {</a>
+<a name="ln381">            create_nvp(xml_obj, &quot;port&quot;, data-&gt;control_port);</a>
+<a name="ln382">        } else {</a>
+<a name="ln383">            create_nvp(xml_obj, &quot;port&quot;, crm_itoa(DEFAULT_REMOTE_PORT));</a>
+<a name="ln384">        }</a>
+<a name="ln385"> </a>
+<a name="ln386">        xml_obj = create_xml_node(xml_remote, XML_TAG_META_SETS);</a>
+<a name="ln387">        crm_xml_set_id(xml_obj, &quot;%s-meta-%d&quot;, data-&gt;prefix, tuple-&gt;offset);</a>
+<a name="ln388"> </a>
+<a name="ln389">        create_nvp(xml_obj, XML_OP_ATTR_ALLOW_MIGRATE, &quot;false&quot;);</a>
+<a name="ln390"> </a>
+<a name="ln391">        // Sets up node-&gt;details-&gt;remote_rsc-&gt;container == tuple-&gt;docker</a>
+<a name="ln392">        create_nvp(xml_obj, XML_RSC_ATTR_CONTAINER, tuple-&gt;docker-&gt;id);</a>
+<a name="ln393"> </a>
+<a name="ln394">        // TODO: Do this generically, eg with rsc-&gt;flags</a>
+<a name="ln395">        // create_nvp(xml_obj, XML_RSC_ATTR_INTERNAL_RSC, &quot;true&quot;); // Suppress printing</a>
+<a name="ln396"> </a>
+<a name="ln397">        // tuple-&gt;docker-&gt;fillers = g_list_append(tuple-&gt;docker-&gt;fillers, child);</a>
+<a name="ln398"> </a>
+<a name="ln399">        /* Ensure a node has been created for the guest (it may have already</a>
+<a name="ln400">         * been, if it has a permanent node attribute), and ensure its weight is</a>
+<a name="ln401">         * -INFINITY so no other resources can run on it.</a>
+<a name="ln402">         */</a>
+<a name="ln403">        node = pe_find_node(data_set-&gt;nodes, nodeid);</a>
+<a name="ln404">        if (node == NULL) {</a>
+<a name="ln405">            node = pe_create_node(strdup(nodeid), nodeid, &quot;remote&quot;, &quot;-INFINITY&quot;,</a>
+<a name="ln406">                                  data_set);</a>
+<a name="ln407">        } else {</a>
+<a name="ln408">            node-&gt;weight = -INFINITY;</a>
+<a name="ln409">        }</a>
+<a name="ln410"> </a>
+<a name="ln411">        tuple-&gt;node = node_copy(node);</a>
+<a name="ln412">        tuple-&gt;node-&gt;weight = 500;</a>
+<a name="ln413">        nodeid = NULL;</a>
+<a name="ln414">        id = NULL;</a>
+<a name="ln415"> </a>
+<a name="ln416">        if (common_unpack(xml_remote, &amp;tuple-&gt;remote, NULL, data_set) == FALSE) {</a>
+<a name="ln417">            return FALSE;</a>
+<a name="ln418">        }</a>
+<a name="ln419"> </a>
+<a name="ln420">        g_hash_table_iter_init(&amp;gIter, tuple-&gt;remote-&gt;allowed_nodes);</a>
+<a name="ln421">        while (g_hash_table_iter_next(&amp;gIter, NULL, (void **)&amp;node)) {</a>
+<a name="ln422">            if(is_remote_node(node)) {</a>
+<a name="ln423">                /* Remote resources can only run on 'normal' cluster node */</a>
+<a name="ln424">                node-&gt;weight = -INFINITY;</a>
+<a name="ln425">            }</a>
+<a name="ln426">        }</a>
+<a name="ln427"> </a>
+<a name="ln428">        tuple-&gt;node-&gt;details-&gt;remote_rsc = tuple-&gt;remote;</a>
+<a name="ln429">        parent-&gt;children = g_list_append(parent-&gt;children, tuple-&gt;remote);</a>
+<a name="ln430">    }</a>
+<a name="ln431">    return TRUE;</a>
+<a name="ln432">}</a>
+<a name="ln433"> </a>
+<a name="ln434">static bool</a>
+<a name="ln435">create_container(</a>
+<a name="ln436">    resource_t *parent, container_variant_data_t *data, container_grouping_t *tuple,</a>
+<a name="ln437">    pe_working_set_t * data_set)</a>
+<a name="ln438">{</a>
+<a name="ln439"> </a>
+<a name="ln440">    if(create_docker_resource(parent, data, tuple, data_set) == FALSE) {</a>
+<a name="ln441">        return TRUE;</a>
+<a name="ln442">    }</a>
+<a name="ln443">    if(create_ip_resource(parent, data, tuple, data_set) == FALSE) {</a>
+<a name="ln444">        return TRUE;</a>
+<a name="ln445">    }</a>
+<a name="ln446">    if(create_remote_resource(parent, data, tuple, data_set) == FALSE) {</a>
+<a name="ln447">        return TRUE;</a>
+<a name="ln448">    }</a>
+<a name="ln449">    if(tuple-&gt;child &amp;&amp; tuple-&gt;ipaddr) {</a>
+<a name="ln450">        add_hash_param(tuple-&gt;child-&gt;meta, &quot;external-ip&quot;, tuple-&gt;ipaddr);</a>
+<a name="ln451">    }</a>
+<a name="ln452"> </a>
+<a name="ln453">    if(tuple-&gt;remote) {</a>
+<a name="ln454">        /*</a>
+<a name="ln455">         * Allow the remote connection resource to be allocated to a</a>
+<a name="ln456">         * different node than the one on which the docker container</a>
+<a name="ln457">         * is active.</a>
+<a name="ln458">         *</a>
+<a name="ln459">         * Makes it possible to have remote nodes, running docker</a>
+<a name="ln460">         * containers with pacemaker_remoted inside in order to start</a>
+<a name="ln461">         * services inside those containers.</a>
+<a name="ln462">         */</a>
+<a name="ln463">        set_bit(tuple-&gt;remote-&gt;flags, pe_rsc_allow_remote_remotes);</a>
+<a name="ln464">    }</a>
+<a name="ln465"> </a>
+<a name="ln466">    return FALSE;</a>
+<a name="ln467">}</a>
+<a name="ln468"> </a>
+<a name="ln469">static void mount_free(container_mount_t *mount)</a>
+<a name="ln470">{</a>
+<a name="ln471">    free(mount-&gt;source);</a>
+<a name="ln472">    free(mount-&gt;target);</a>
+<a name="ln473">    free(mount-&gt;options);</a>
+<a name="ln474">    free(mount);</a>
+<a name="ln475">}</a>
+<a name="ln476"> </a>
+<a name="ln477">static void port_free(container_port_t *port)</a>
+<a name="ln478">{</a>
+<a name="ln479">    free(port-&gt;source);</a>
+<a name="ln480">    free(port-&gt;target);</a>
+<a name="ln481">    free(port);</a>
+<a name="ln482">}</a>
+<a name="ln483"> </a>
+<a name="ln484">gboolean</a>
+<a name="ln485">container_unpack(resource_t * rsc, pe_working_set_t * data_set)</a>
+<a name="ln486">{</a>
+<a name="ln487">    const char *value = NULL;</a>
+<a name="ln488">    xmlNode *xml_obj = NULL;</a>
+<a name="ln489">    xmlNode *xml_resource = NULL;</a>
+<a name="ln490">    container_variant_data_t *container_data = NULL;</a>
+<a name="ln491"> </a>
+<a name="ln492">    CRM_ASSERT(rsc != NULL);</a>
+<a name="ln493">    pe_rsc_trace(rsc, &quot;Processing resource %s...&quot;, rsc-&gt;id);</a>
+<a name="ln494"> </a>
+<a name="ln495">    container_data = calloc(1, sizeof(container_variant_data_t));</a>
+<a name="ln496">    rsc-&gt;variant_opaque = container_data;</a>
+<a name="ln497">    container_data-&gt;prefix = strdup(rsc-&gt;id);</a>
+<a name="ln498"> </a>
+<a name="ln499">    xml_obj = first_named_child(rsc-&gt;xml, &quot;docker&quot;);</a>
+<a name="ln500">    if(xml_obj == NULL) {</a>
+<a name="ln501">        return FALSE;</a>
+<a name="ln502">    }</a>
+<a name="ln503"> </a>
+<a name="ln504">    value = crm_element_value(xml_obj, &quot;masters&quot;);</a>
+<a name="ln505">    container_data-&gt;masters = crm_parse_int(value, &quot;0&quot;);</a>
+<a name="ln506">    if (container_data-&gt;masters &lt; 0) {</a>
+<a name="ln507">        pe_err(&quot;'masters' for %s must be nonnegative integer, using 0&quot;,</a>
+<a name="ln508">               rsc-&gt;id);</a>
+<a name="ln509">        container_data-&gt;masters = 0;</a>
+<a name="ln510">    }</a>
+<a name="ln511"> </a>
+<a name="ln512">    value = crm_element_value(xml_obj, &quot;replicas&quot;);</a>
+<a name="ln513">    if ((value == NULL) &amp;&amp; (container_data-&gt;masters &gt; 0)) {</a>
+<a name="ln514">        container_data-&gt;replicas = container_data-&gt;masters;</a>
+<a name="ln515">    } else {</a>
+<a name="ln516">        container_data-&gt;replicas = crm_parse_int(value, &quot;1&quot;);</a>
+<a name="ln517">    }</a>
+<a name="ln518">    if (container_data-&gt;replicas &lt; 1) {</a>
+<a name="ln519">        pe_err(&quot;'replicas' for %s must be positive integer, using 1&quot;, rsc-&gt;id);</a>
+<a name="ln520">        container_data-&gt;replicas = 1;</a>
+<a name="ln521">    }</a>
+<a name="ln522"> </a>
+<a name="ln523">    /*</a>
+<a name="ln524">     * Communication between containers on the same host via the</a>
+<a name="ln525">     * floating IPs only works if docker is started with:</a>
+<a name="ln526">     *   --userland-proxy=false --ip-masq=false</a>
+<a name="ln527">     */</a>
+<a name="ln528">    value = crm_element_value(xml_obj, &quot;replicas-per-host&quot;);</a>
+<a name="ln529">    container_data-&gt;replicas_per_host = crm_parse_int(value, &quot;1&quot;);</a>
+<a name="ln530">    if (container_data-&gt;replicas_per_host &lt; 1) {</a>
+<a name="ln531">        pe_err(&quot;'replicas-per-host' for %s must be positive integer, using 1&quot;,</a>
+<a name="ln532">               rsc-&gt;id);</a>
+<a name="ln533">        container_data-&gt;replicas_per_host = 1;</a>
+<a name="ln534">    }</a>
+<a name="ln535">    if (container_data-&gt;replicas_per_host == 1) {</a>
+<a name="ln536">        clear_bit(rsc-&gt;flags, pe_rsc_unique);</a>
+<a name="ln537">    }</a>
+<a name="ln538"> </a>
+<a name="ln539">    container_data-&gt;docker_run_command = crm_element_value_copy(xml_obj, &quot;run-command&quot;);</a>
+<a name="ln540">    container_data-&gt;docker_run_options = crm_element_value_copy(xml_obj, &quot;options&quot;);</a>
+<a name="ln541">    container_data-&gt;image = crm_element_value_copy(xml_obj, &quot;image&quot;);</a>
+<a name="ln542">    container_data-&gt;docker_network = crm_element_value_copy(xml_obj, &quot;network&quot;);</a>
+<a name="ln543"> </a>
+<a name="ln544">    xml_obj = first_named_child(rsc-&gt;xml, &quot;network&quot;);</a>
+<a name="ln545">    if(xml_obj) {</a>
+<a name="ln546"> </a>
+<a name="ln547">        container_data-&gt;ip_range_start = crm_element_value_copy(xml_obj, &quot;ip-range-start&quot;);</a>
+<a name="ln548">        container_data-&gt;host_netmask = crm_element_value_copy(xml_obj, &quot;host-netmask&quot;);</a>
+<a name="ln549">        container_data-&gt;host_network = crm_element_value_copy(xml_obj, &quot;host-interface&quot;);</a>
+<a name="ln550">        container_data-&gt;control_port = crm_element_value_copy(xml_obj, &quot;control-port&quot;);</a>
+<a name="ln551"> </a>
+<a name="ln552">        for (xmlNode *xml_child = __xml_first_child_element(xml_obj); xml_child != NULL;</a>
+<a name="ln553">             xml_child = __xml_next_element(xml_child)) {</a>
+<a name="ln554"> </a>
+<a name="ln555">            container_port_t *port = calloc(1, sizeof(container_port_t));</a>
+<a name="ln556">            port-&gt;source = crm_element_value_copy(xml_child, &quot;port&quot;);</a>
+<a name="ln557"> </a>
+<a name="ln558">            if(port-&gt;source == NULL) {</a>
+<a name="ln559">                port-&gt;source = crm_element_value_copy(xml_child, &quot;range&quot;);</a>
+<a name="ln560">            } else {</a>
+<a name="ln561">                port-&gt;target = crm_element_value_copy(xml_child, &quot;internal-port&quot;);</a>
+<a name="ln562">            }</a>
+<a name="ln563"> </a>
+<a name="ln564">            if(port-&gt;source != NULL &amp;&amp; strlen(port-&gt;source) &gt; 0) {</a>
+<a name="ln565">                if(port-&gt;target == NULL) {</a>
+<a name="ln566">                    port-&gt;target = strdup(port-&gt;source);</a>
+<a name="ln567">                }</a>
+<a name="ln568">                container_data-&gt;ports = g_list_append(container_data-&gt;ports, port);</a>
+<a name="ln569"> </a>
+<a name="ln570">            } else {</a>
+<a name="ln571">                pe_err(&quot;Invalid port directive %s&quot;, ID(xml_child));</a>
+<a name="ln572">                port_free(port);</a>
+<a name="ln573">            }</a>
+<a name="ln574">        }</a>
+<a name="ln575">    }</a>
+<a name="ln576"> </a>
+<a name="ln577">    xml_obj = first_named_child(rsc-&gt;xml, &quot;storage&quot;);</a>
+<a name="ln578">    for (xmlNode *xml_child = __xml_first_child_element(xml_obj); xml_child != NULL;</a>
+<a name="ln579">         xml_child = __xml_next_element(xml_child)) {</a>
+<a name="ln580"> </a>
+<a name="ln581">        container_mount_t *mount = calloc(1, sizeof(container_mount_t));</a>
+<a name="ln582">        mount-&gt;source = crm_element_value_copy(xml_child, &quot;source-dir&quot;);</a>
+<a name="ln583"> </a>
+<a name="ln584">        if(mount-&gt;source == NULL) {</a>
+<a name="ln585">            mount-&gt;source = crm_element_value_copy(xml_child, &quot;source-dir-root&quot;);</a>
+<a name="ln586">            mount-&gt;flags = 1;</a>
+<a name="ln587">        }</a>
+<a name="ln588">        mount-&gt;target = crm_element_value_copy(xml_child, &quot;target-dir&quot;);</a>
+<a name="ln589">        mount-&gt;options = crm_element_value_copy(xml_child, &quot;options&quot;);</a>
+<a name="ln590"> </a>
+<a name="ln591">        if(mount-&gt;source &amp;&amp; mount-&gt;target) {</a>
+<a name="ln592">            container_data-&gt;mounts = g_list_append(container_data-&gt;mounts, mount);</a>
+<a name="ln593">        } else {</a>
+<a name="ln594">            pe_err(&quot;Invalid mount directive %s&quot;, ID(xml_child));</a>
+<a name="ln595">            mount_free(mount);</a>
+<a name="ln596">        }</a>
+<a name="ln597">    }</a>
+<a name="ln598"> </a>
+<a name="ln599">    xml_obj = first_named_child(rsc-&gt;xml, &quot;primitive&quot;);</a>
+<a name="ln600">    if (xml_obj &amp;&amp; valid_network(container_data)) {</a>
+<a name="ln601">        char *value = NULL;</a>
+<a name="ln602">        xmlNode *xml_set = NULL;</a>
+<a name="ln603"> </a>
+<a name="ln604">        if(container_data-&gt;masters &gt; 0) {</a>
+<a name="ln605">            xml_resource = create_xml_node(NULL, XML_CIB_TAG_MASTER);</a>
+<a name="ln606"> </a>
+<a name="ln607">        } else {</a>
+<a name="ln608">            xml_resource = create_xml_node(NULL, XML_CIB_TAG_INCARNATION);</a>
+<a name="ln609">        }</a>
+<a name="ln610"> </a>
+<a name="ln611">        crm_xml_set_id(xml_resource, &quot;%s-%s&quot;, container_data-&gt;prefix, xml_resource-&gt;name);</a>
+<a name="ln612"> </a>
+<a name="ln613">        xml_set = create_xml_node(xml_resource, XML_TAG_META_SETS);</a>
+<a name="ln614">        crm_xml_set_id(xml_set, &quot;%s-%s-meta&quot;, container_data-&gt;prefix, xml_resource-&gt;name);</a>
+<a name="ln615"> </a>
+<a name="ln616">        create_nvp(xml_set, XML_RSC_ATTR_ORDERED, &quot;true&quot;);</a>
+<a name="ln617"> </a>
+<a name="ln618">        value = crm_itoa(container_data-&gt;replicas);</a>
+<a name="ln619">        create_nvp(xml_set, XML_RSC_ATTR_INCARNATION_MAX, value);</a>
+<a name="ln620">        free(value);</a>
+<a name="ln621"> </a>
+<a name="ln622">        value = crm_itoa(container_data-&gt;replicas_per_host);</a>
+<a name="ln623">        create_nvp(xml_set, XML_RSC_ATTR_INCARNATION_NODEMAX, value);</a>
+<a name="ln624">        free(value);</a>
+<a name="ln625"> </a>
+<a name="ln626">        if(container_data-&gt;replicas_per_host &gt; 1) {</a>
+<a name="ln627">            create_nvp(xml_set, XML_RSC_ATTR_UNIQUE, &quot;true&quot;);</a>
+<a name="ln628">        } else {</a>
+<a name="ln629">            create_nvp(xml_set, XML_RSC_ATTR_UNIQUE, &quot;false&quot;);</a>
+<a name="ln630">        }</a>
+<a name="ln631"> </a>
+<a name="ln632">        if(container_data-&gt;masters) {</a>
+<a name="ln633">            value = crm_itoa(container_data-&gt;masters);</a>
+<a name="ln634">            create_nvp(xml_set, XML_RSC_ATTR_MASTER_MAX, value);</a>
+<a name="ln635">            free(value);</a>
+<a name="ln636">        }</a>
+<a name="ln637"> </a>
+<a name="ln638">        //crm_xml_add(xml_obj, XML_ATTR_ID, container_data-&gt;prefix);</a>
+<a name="ln639">        add_node_copy(xml_resource, xml_obj);</a>
+<a name="ln640"> </a>
+<a name="ln641">    } else if(xml_obj) {</a>
+<a name="ln642">        pe_err(&quot;Cannot control %s inside %s without either ip-range-start or control-port&quot;,</a>
+<a name="ln643">               rsc-&gt;id, ID(xml_obj));</a>
+<a name="ln644">        return FALSE;</a>
+<a name="ln645">    }</a>
+<a name="ln646"> </a>
+<a name="ln647">    if(xml_resource) {</a>
+<a name="ln648">        int lpc = 0;</a>
+<a name="ln649">        GListPtr childIter = NULL;</a>
+<a name="ln650">        resource_t *new_rsc = NULL;</a>
+<a name="ln651">        container_mount_t *mount = NULL;</a>
+<a name="ln652">        container_port_t *port = NULL;</a>
+<a name="ln653"> </a>
+<a name="ln654">        int offset = 0, max = 1024;</a>
+<a name="ln655">        char *buffer = NULL;</a>
+<a name="ln656"> </a>
+<a name="ln657">        if (common_unpack(xml_resource, &amp;new_rsc, rsc, data_set) == FALSE) {</a>
+<a name="ln658">            pe_err(&quot;Failed unpacking resource %s&quot;, ID(rsc-&gt;xml));</a>
+<a name="ln659">            if (new_rsc != NULL &amp;&amp; new_rsc-&gt;fns != NULL) {</a>
+<a name="ln660">                new_rsc-&gt;fns-&gt;free(new_rsc);</a>
+<a name="ln661">            }</a>
+<a name="ln662">            return FALSE;</a>
+<a name="ln663">        }</a>
+<a name="ln664"> </a>
+<a name="ln665">        container_data-&gt;child = new_rsc;</a>
+<a name="ln666">        container_data-&gt;child-&gt;orig_xml = xml_obj; // Also the trigger for common_free()</a>
+<a name="ln667">                                                   // to free xml_resource as container_data-&gt;child-&gt;xml</a>
+<a name="ln668"> </a>
+<a name="ln669">        mount = calloc(1, sizeof(container_mount_t));</a>
+<a name="ln670">        mount-&gt;source = strdup(DEFAULT_REMOTE_KEY_LOCATION);</a>
+<a name="ln671">        mount-&gt;target = strdup(DEFAULT_REMOTE_KEY_LOCATION);</a>
+<a name="ln672">        mount-&gt;options = NULL;</a>
+<a name="ln673">        mount-&gt;flags = 0;</a>
+<a name="ln674">        container_data-&gt;mounts = g_list_append(container_data-&gt;mounts, mount);</a>
+<a name="ln675"> </a>
+<a name="ln676">        mount = calloc(1, sizeof(container_mount_t));</a>
+<a name="ln677">        mount-&gt;source = strdup(CRM_LOG_DIR &quot;/bundles&quot;);</a>
+<a name="ln678">        mount-&gt;target = strdup(&quot;/var/log&quot;);</a>
+<a name="ln679">        mount-&gt;options = NULL;</a>
+<a name="ln680">        mount-&gt;flags = 1;</a>
+<a name="ln681">        container_data-&gt;mounts = g_list_append(container_data-&gt;mounts, mount);</a>
+<a name="ln682"> </a>
+<a name="ln683">        port = calloc(1, sizeof(container_port_t));</a>
+<a name="ln684">        if(container_data-&gt;control_port) {</a>
+<a name="ln685">            port-&gt;source = strdup(container_data-&gt;control_port);</a>
+<a name="ln686">        } else {</a>
+<a name="ln687">            port-&gt;source = crm_itoa(DEFAULT_REMOTE_PORT);</a>
+<a name="ln688">        }</a>
+<a name="ln689">        port-&gt;target = strdup(port-&gt;source);</a>
+<a name="ln690">        container_data-&gt;ports = g_list_append(container_data-&gt;ports, port);</a>
+<a name="ln691"> </a>
+<a name="ln692">        buffer = calloc(1, max+1);</a>
+<a name="ln693">        for(childIter = container_data-&gt;child-&gt;children; childIter != NULL; childIter = childIter-&gt;next) {</a>
+<a name="ln694">            container_grouping_t *tuple = calloc(1, sizeof(container_grouping_t));</a>
+<a name="ln695">            tuple-&gt;child = childIter-&gt;data;</a>
+<a name="ln696">            tuple-&gt;offset = lpc++;</a>
+<a name="ln697"> </a>
+<a name="ln698">            offset += allocate_ip(container_data, tuple, buffer+offset, max-offset);</a>
+<a name="ln699">            container_data-&gt;tuples = g_list_append(container_data-&gt;tuples, tuple);</a>
+<a name="ln700">        }</a>
+<a name="ln701">        container_data-&gt;docker_host_options = buffer;</a>
+<a name="ln702"> </a>
+<a name="ln703">    } else {</a>
+<a name="ln704">        // Just a naked container, no pacemaker-remote</a>
+<a name="ln705">        int offset = 0, max = 1024;</a>
+<a name="ln706">        char *buffer = calloc(1, max+1);</a>
+<a name="ln707"> </a>
+<a name="ln708">        for(int lpc = 0; lpc &lt; container_data-&gt;replicas; lpc++) {</a>
+<a name="ln709">            container_grouping_t *tuple = calloc(1, sizeof(container_grouping_t));</a>
+<a name="ln710">            tuple-&gt;offset = lpc;</a>
+<a name="ln711">            offset += allocate_ip(container_data, tuple, buffer+offset, max-offset);</a>
+<a name="ln712">            container_data-&gt;tuples = g_list_append(container_data-&gt;tuples, tuple);</a>
+<a name="ln713">        }</a>
+<a name="ln714"> </a>
+<a name="ln715">        container_data-&gt;docker_host_options = buffer;</a>
+<a name="ln716">    }</a>
+<a name="ln717"> </a>
+<a name="ln718"> </a>
+<a name="ln719">    for (GListPtr gIter = container_data-&gt;tuples; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln720">        container_grouping_t *tuple = (container_grouping_t *)gIter-&gt;data;</a>
+<a name="ln721">        // TODO: Remove from list if create_container() returns TRUE</a>
+<a name="ln722">        create_container(rsc, container_data, tuple, data_set);</a>
+<a name="ln723">    }</a>
+<a name="ln724"> </a>
+<a name="ln725">    if(container_data-&gt;child) {</a>
+<a name="ln726">        rsc-&gt;children = g_list_append(rsc-&gt;children, container_data-&gt;child);</a>
+<a name="ln727">    }</a>
+<a name="ln728">    return TRUE;</a>
+<a name="ln729">}</a>
+<a name="ln730"> </a>
+<a name="ln731">static int</a>
+<a name="ln732">tuple_rsc_active(resource_t *rsc, gboolean all)</a>
+<a name="ln733">{</a>
+<a name="ln734">    if (rsc) {</a>
+<a name="ln735">        gboolean child_active = rsc-&gt;fns-&gt;active(rsc, all);</a>
+<a name="ln736"> </a>
+<a name="ln737">        if (child_active &amp;&amp; !all) {</a>
+<a name="ln738">            return TRUE;</a>
+<a name="ln739">        } else if (!child_active &amp;&amp; all) {</a>
+<a name="ln740">            return FALSE;</a>
+<a name="ln741">        }</a>
+<a name="ln742">    }</a>
+<a name="ln743">    return -1;</a>
+<a name="ln744">}</a>
+<a name="ln745"> </a>
+<a name="ln746">gboolean</a>
+<a name="ln747">container_active(resource_t * rsc, gboolean all)</a>
+<a name="ln748">{</a>
+<a name="ln749">    container_variant_data_t *container_data = NULL;</a>
+<a name="ln750">    GListPtr iter = NULL;</a>
+<a name="ln751"> </a>
+<a name="ln752">    get_container_variant_data(container_data, rsc);</a>
+<a name="ln753">    for (iter = container_data-&gt;tuples; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln754">        container_grouping_t *tuple = (container_grouping_t *)(iter-&gt;data);</a>
+<a name="ln755">        int rsc_active;</a>
+<a name="ln756"> </a>
+<a name="ln757">        rsc_active = tuple_rsc_active(tuple-&gt;ip, all);</a>
+<a name="ln758">        if (rsc_active &gt;= 0) {</a>
+<a name="ln759">            return (gboolean) rsc_active;</a>
+<a name="ln760">        }</a>
+<a name="ln761"> </a>
+<a name="ln762">        rsc_active = tuple_rsc_active(tuple-&gt;child, all);</a>
+<a name="ln763">        if (rsc_active &gt;= 0) {</a>
+<a name="ln764">            return (gboolean) rsc_active;</a>
+<a name="ln765">        }</a>
+<a name="ln766"> </a>
+<a name="ln767">        rsc_active = tuple_rsc_active(tuple-&gt;docker, all);</a>
+<a name="ln768">        if (rsc_active &gt;= 0) {</a>
+<a name="ln769">            return (gboolean) rsc_active;</a>
+<a name="ln770">        }</a>
+<a name="ln771"> </a>
+<a name="ln772">        rsc_active = tuple_rsc_active(tuple-&gt;remote, all);</a>
+<a name="ln773">        if (rsc_active &gt;= 0) {</a>
+<a name="ln774">            return (gboolean) rsc_active;</a>
+<a name="ln775">        }</a>
+<a name="ln776">    }</a>
+<a name="ln777"> </a>
+<a name="ln778">    /* If &quot;all&quot; is TRUE, we've already checked that no resources were inactive,</a>
+<a name="ln779">     * so return TRUE; if &quot;all&quot; is FALSE, we didn't find any active resources,</a>
+<a name="ln780">     * so return FALSE.</a>
+<a name="ln781">     */</a>
+<a name="ln782">    return all;</a>
+<a name="ln783">}</a>
+<a name="ln784"> </a>
+<a name="ln785">resource_t *</a>
+<a name="ln786">find_container_child(const char *stem, resource_t * rsc, node_t *node) </a>
+<a name="ln787">{</a>
+<a name="ln788">    container_variant_data_t *container_data = NULL;</a>
+<a name="ln789">    resource_t *parent = uber_parent(rsc);</a>
+<a name="ln790">    CRM_ASSERT(parent-&gt;parent);</a>
+<a name="ln791"> </a>
+<a name="ln792">    parent = parent-&gt;parent;</a>
+<a name="ln793">    get_container_variant_data(container_data, parent);</a>
+<a name="ln794"> </a>
+<a name="ln795">    if (is_not_set(rsc-&gt;flags, pe_rsc_unique)) {</a>
+<a name="ln796">        for (GListPtr gIter = container_data-&gt;tuples; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln797">            container_grouping_t *tuple = (container_grouping_t *)gIter-&gt;data;</a>
+<a name="ln798"> </a>
+<a name="ln799">            CRM_ASSERT(tuple);</a>
+<a name="ln800">            if(tuple-&gt;node-&gt;details == node-&gt;details) {</a>
+<a name="ln801">                rsc = tuple-&gt;child;</a>
+<a name="ln802">                break;</a>
+<a name="ln803">            }</a>
+<a name="ln804">        }</a>
+<a name="ln805">    }</a>
+<a name="ln806"> </a>
+<a name="ln807">    if (rsc &amp;&amp; safe_str_neq(stem, rsc-&gt;id)) {</a>
+<a name="ln808">        free(rsc-&gt;clone_name);</a>
+<a name="ln809">        rsc-&gt;clone_name = strdup(stem);</a>
+<a name="ln810">    }</a>
+<a name="ln811"> </a>
+<a name="ln812">    return rsc;</a>
+<a name="ln813">}</a>
+<a name="ln814"> </a>
+<a name="ln815">static void</a>
+<a name="ln816">print_rsc_in_list(resource_t *rsc, const char *pre_text, long options,</a>
+<a name="ln817">                  void *print_data)</a>
+<a name="ln818">{</a>
+<a name="ln819">    if (rsc != NULL) {</a>
+<a name="ln820">        if (options &amp; pe_print_html) {</a>
+<a name="ln821">            status_print(&quot;&lt;li&gt;&quot;);</a>
+<a name="ln822">        }</a>
+<a name="ln823">        rsc-&gt;fns-&gt;print(rsc, pre_text, options, print_data);</a>
+<a name="ln824">        if (options &amp; pe_print_html) {</a>
+<a name="ln825">            status_print(&quot;&lt;/li&gt;\n&quot;);</a>
+<a name="ln826">        }</a>
+<a name="ln827">    }</a>
+<a name="ln828">}</a>
+<a name="ln829"> </a>
+<a name="ln830">static void</a>
+<a name="ln831">container_print_xml(resource_t * rsc, const char *pre_text, long options, void *print_data)</a>
+<a name="ln832">{</a>
+<a name="ln833">    container_variant_data_t *container_data = NULL;</a>
+<a name="ln834">    char *child_text = NULL;</a>
+<a name="ln835">    CRM_CHECK(rsc != NULL, return);</a>
+<a name="ln836"> </a>
+<a name="ln837">    if (pre_text == NULL) {</a>
+<a name="ln838">        pre_text = &quot;&quot;;</a>
+<a name="ln839">    }</a>
+<a name="ln840">    child_text = crm_concat(pre_text, &quot;       &quot;, ' ');</a>
+<a name="ln841"> </a>
+<a name="ln842">    get_container_variant_data(container_data, rsc);</a>
+<a name="ln843"> </a>
+<a name="ln844">    status_print(&quot;%s&lt;bundle &quot;, pre_text);</a>
+<a name="ln845">    status_print(&quot;id=\&quot;%s\&quot; &quot;, rsc-&gt;id);</a>
+<a name="ln846">    status_print(&quot;type=\&quot;docker\&quot; &quot;);</a>
+<a name="ln847">    status_print(&quot;image=\&quot;%s\&quot; &quot;, container_data-&gt;image);</a>
+<a name="ln848">    status_print(&quot;unique=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_unique)? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln849">    status_print(&quot;managed=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_managed) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln850">    status_print(&quot;failed=\&quot;%s\&quot; &quot;, is_set(rsc-&gt;flags, pe_rsc_failed) ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln851">    status_print(&quot;&gt;\n&quot;);</a>
+<a name="ln852"> </a>
+<a name="ln853">    for (GListPtr gIter = container_data-&gt;tuples; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln854">        container_grouping_t *tuple = (container_grouping_t *)gIter-&gt;data;</a>
+<a name="ln855"> </a>
+<a name="ln856">        CRM_ASSERT(tuple);</a>
+<a name="ln857">        status_print(&quot;%s    &lt;replica id=\&quot;%d\&quot;&gt;\n&quot;, pre_text, tuple-&gt;offset);</a>
+<a name="ln858">        print_rsc_in_list(tuple-&gt;ip, child_text, options, print_data);</a>
+<a name="ln859">        print_rsc_in_list(tuple-&gt;child, child_text, options, print_data);</a>
+<a name="ln860">        print_rsc_in_list(tuple-&gt;docker, child_text, options, print_data);</a>
+<a name="ln861">        print_rsc_in_list(tuple-&gt;remote, child_text, options, print_data);</a>
+<a name="ln862">        status_print(&quot;%s    &lt;/replica&gt;\n&quot;, pre_text);</a>
+<a name="ln863">    }</a>
+<a name="ln864">    status_print(&quot;%s&lt;/bundle&gt;\n&quot;, pre_text);</a>
+<a name="ln865">    free(child_text);</a>
+<a name="ln866">}</a>
+<a name="ln867"> </a>
+<a name="ln868">static void</a>
+<a name="ln869">tuple_print(container_grouping_t * tuple, const char *pre_text, long options, void *print_data)</a>
+<a name="ln870">{</a>
+<a name="ln871">    node_t *node = NULL;</a>
+<a name="ln872">    resource_t *rsc = tuple-&gt;child;</a>
+<a name="ln873"> </a>
+<a name="ln874">    int offset = 0;</a>
+<a name="ln875">    char buffer[LINE_MAX];</a>
+<a name="ln876"> </a>
+<a name="ln877">    if(rsc == NULL) {</a>
+<a name="ln878">        rsc = tuple-&gt;docker;</a>
+<a name="ln879">    }</a>
+<a name="ln880"> </a>
+<a name="ln881">    if(tuple-&gt;remote) {</a>
+<a name="ln882">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;%s&quot;, rsc_printable_id(tuple-&gt;remote));</a>
+<a name="ln883">    } else {</a>
+<a name="ln884">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot;%s&quot;, rsc_printable_id(tuple-&gt;docker));</a>
+<a name="ln885">    }</a>
+<a name="ln886">    if(tuple-&gt;ipaddr) {</a>
+<a name="ln887">        offset += snprintf(buffer + offset, LINE_MAX - offset, &quot; (%s)&quot;, tuple-&gt;ipaddr);</a>
+<a name="ln888">    }</a>
+<a name="ln889"> </a>
+<a name="ln890">    if(tuple-&gt;docker &amp;&amp; tuple-&gt;docker-&gt;running_on != NULL) {</a>
+<a name="ln891">        node = tuple-&gt;docker-&gt;running_on-&gt;data;</a>
+<a name="ln892">    } else if (tuple-&gt;docker == NULL &amp;&amp; rsc-&gt;running_on != NULL) {</a>
+<a name="ln893">        node = rsc-&gt;running_on-&gt;data;</a>
+<a name="ln894">    }</a>
+<a name="ln895">    common_print(rsc, pre_text, buffer, node, options, print_data);</a>
+<a name="ln896">}</a>
+<a name="ln897"> </a>
+<a name="ln898">void</a>
+<a name="ln899">container_print(resource_t * rsc, const char *pre_text, long options, void *print_data)</a>
+<a name="ln900">{</a>
+<a name="ln901">    container_variant_data_t *container_data = NULL;</a>
+<a name="ln902">    char *child_text = NULL;</a>
+<a name="ln903">    CRM_CHECK(rsc != NULL, return);</a>
+<a name="ln904"> </a>
+<a name="ln905">    if (options &amp; pe_print_xml) {</a>
+<a name="ln906">        container_print_xml(rsc, pre_text, options, print_data);</a>
+<a name="ln907">        return;</a>
+<a name="ln908">    }</a>
+<a name="ln909"> </a>
+<a name="ln910">    get_container_variant_data(container_data, rsc);</a>
+<a name="ln911"> </a>
+<a name="ln912">    if (pre_text == NULL) {</a>
+<a name="ln913">        pre_text = &quot; &quot;;</a>
+<a name="ln914">    }</a>
+<a name="ln915"> </a>
+<a name="ln916">    status_print(&quot;%sDocker container%s: %s [%s]%s%s\n&quot;,</a>
+<a name="ln917">                 pre_text, container_data-&gt;replicas&gt;1?&quot; set&quot;:&quot;&quot;, rsc-&gt;id, container_data-&gt;image,</a>
+<a name="ln918">                 is_set(rsc-&gt;flags, pe_rsc_unique) ? &quot; (unique)&quot; : &quot;&quot;,</a>
+<a name="ln919">                 is_set(rsc-&gt;flags, pe_rsc_managed) ? &quot;&quot; : &quot; (unmanaged)&quot;);</a>
+<a name="ln920">    if (options &amp; pe_print_html) {</a>
+<a name="ln921">        status_print(&quot;&lt;br /&gt;\n&lt;ul&gt;\n&quot;);</a>
+<a name="ln922">    }</a>
+<a name="ln923"> </a>
+<a name="ln924"> </a>
+<a name="ln925">    for (GListPtr gIter = container_data-&gt;tuples; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln926">        container_grouping_t *tuple = (container_grouping_t *)gIter-&gt;data;</a>
+<a name="ln927"> </a>
+<a name="ln928">        CRM_ASSERT(tuple);</a>
+<a name="ln929">        if (options &amp; pe_print_html) {</a>
+<a name="ln930">            status_print(&quot;&lt;li&gt;&quot;);</a>
+<a name="ln931">        }</a>
+<a name="ln932"> </a>
+<a name="ln933">        if(is_set(options, pe_print_clone_details)) {</a>
+<a name="ln934">            child_text = crm_strdup_printf(&quot;     %s&quot;, pre_text);</a>
+<a name="ln935">            if(g_list_length(container_data-&gt;tuples) &gt; 1) {</a>
+<a name="ln936">                status_print(&quot;  %sReplica[%d]\n&quot;, pre_text, tuple-&gt;offset);</a>
+<a name="ln937">            }</a>
+<a name="ln938">            if (options &amp; pe_print_html) {</a>
+<a name="ln939">                status_print(&quot;&lt;br /&gt;\n&lt;ul&gt;\n&quot;);</a>
+<a name="ln940">            }</a>
+<a name="ln941">            print_rsc_in_list(tuple-&gt;ip, child_text, options, print_data);</a>
+<a name="ln942">            print_rsc_in_list(tuple-&gt;docker, child_text, options, print_data);</a>
+<a name="ln943">            print_rsc_in_list(tuple-&gt;remote, child_text, options, print_data);</a>
+<a name="ln944">            print_rsc_in_list(tuple-&gt;child, child_text, options, print_data);</a>
+<a name="ln945">            if (options &amp; pe_print_html) {</a>
+<a name="ln946">                status_print(&quot;&lt;/ul&gt;\n&quot;);</a>
+<a name="ln947">            }</a>
+<a name="ln948">        } else {</a>
+<a name="ln949">            child_text = crm_strdup_printf(&quot;%s  &quot;, pre_text);</a>
+<a name="ln950">            tuple_print(tuple, child_text, options, print_data);</a>
+<a name="ln951">        }</a>
+<a name="ln952">        free(child_text);</a>
+<a name="ln953"> </a>
+<a name="ln954">        if (options &amp; pe_print_html) {</a>
+<a name="ln955">            status_print(&quot;&lt;/li&gt;\n&quot;);</a>
+<a name="ln956">        }</a>
+<a name="ln957">    }</a>
+<a name="ln958">    if (options &amp; pe_print_html) {</a>
+<a name="ln959">        status_print(&quot;&lt;/ul&gt;\n&quot;);</a>
+<a name="ln960">    }</a>
+<a name="ln961">}</a>
+<a name="ln962"> </a>
+<a name="ln963">void</a>
+<a name="ln964">tuple_free(container_grouping_t *tuple) </a>
+<a name="ln965">{</a>
+<a name="ln966">    if(tuple == NULL) {</a>
+<a name="ln967">        return;</a>
+<a name="ln968">    }</a>
+<a name="ln969"> </a>
+<a name="ln970">    // TODO: Free tuple-&gt;node ?</a>
+<a name="ln971"> </a>
+<a name="ln972">    if(tuple-&gt;ip) {</a>
+<a name="ln973">        tuple-&gt;ip-&gt;fns-&gt;free(tuple-&gt;ip);</a>
+<a name="ln974">        tuple-&gt;ip = NULL;</a>
+<a name="ln975">    }</a>
+<a name="ln976">    if(tuple-&gt;child) {</a>
+<a name="ln977">        tuple-&gt;child-&gt;fns-&gt;free(tuple-&gt;child);</a>
+<a name="ln978">        tuple-&gt;child = NULL;</a>
+<a name="ln979">    }</a>
+<a name="ln980">    if(tuple-&gt;docker) {</a>
+<a name="ln981">        tuple-&gt;docker-&gt;fns-&gt;free(tuple-&gt;docker);</a>
+<a name="ln982">        tuple-&gt;docker = NULL;</a>
+<a name="ln983">    }</a>
+<a name="ln984">    if(tuple-&gt;remote) {</a>
+<a name="ln985">        tuple-&gt;remote-&gt;fns-&gt;free(tuple-&gt;remote);</a>
+<a name="ln986">        tuple-&gt;remote = NULL;</a>
+<a name="ln987">    }</a>
+<a name="ln988">    free(tuple-&gt;ipaddr);</a>
+<a name="ln989">    free(tuple);</a>
+<a name="ln990">}</a>
+<a name="ln991"> </a>
+<a name="ln992">void</a>
+<a name="ln993">container_free(resource_t * rsc)</a>
+<a name="ln994">{</a>
+<a name="ln995">    container_variant_data_t *container_data = NULL;</a>
+<a name="ln996">    CRM_CHECK(rsc != NULL, return);</a>
+<a name="ln997"> </a>
+<a name="ln998">    get_container_variant_data(container_data, rsc);</a>
+<a name="ln999">    pe_rsc_trace(rsc, &quot;Freeing %s&quot;, rsc-&gt;id);</a>
+<a name="ln1000"> </a>
+<a name="ln1001">    free(container_data-&gt;prefix);</a>
+<a name="ln1002">    free(container_data-&gt;image);</a>
+<a name="ln1003">    free(container_data-&gt;control_port);</a>
+<a name="ln1004">    free(container_data-&gt;host_network);</a>
+<a name="ln1005">    free(container_data-&gt;host_netmask);</a>
+<a name="ln1006">    free(container_data-&gt;ip_range_start);</a>
+<a name="ln1007">    free(container_data-&gt;docker_network);</a>
+<a name="ln1008">    free(container_data-&gt;docker_run_options);</a>
+<a name="ln1009">    free(container_data-&gt;docker_run_command);</a>
+<a name="ln1010">    free(container_data-&gt;docker_host_options);</a>
+<a name="ln1011"> </a>
+<a name="ln1012">    g_list_free_full(container_data-&gt;tuples, (GDestroyNotify)tuple_free);</a>
+<a name="ln1013">    g_list_free_full(container_data-&gt;mounts, (GDestroyNotify)mount_free);</a>
+<a name="ln1014">    g_list_free_full(container_data-&gt;ports, (GDestroyNotify)port_free);</a>
+<a name="ln1015">    common_free(rsc);</a>
+<a name="ln1016">}</a>
+<a name="ln1017"> </a>
+<a name="ln1018">enum rsc_role_e</a>
+<a name="ln1019">container_resource_state(const resource_t * rsc, gboolean current)</a>
+<a name="ln1020">{</a>
+<a name="ln1021">    enum rsc_role_e container_role = RSC_ROLE_UNKNOWN;</a>
+<a name="ln1022">    return container_role;</a>
+<a name="ln1023">}</a>
+
+</code></pre>
+<div class="balloon" rel="221"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'buffer' pointer in the 'buffer + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 221, 199.</p></div>
+<div class="balloon" rel="254"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'dbuffer' pointer in the 'dbuffer + doffset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 254, 202.</p></div>
+<div class="balloon" rel="497"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'container_data'. Check lines: 497, 495.</p></div>
+<div class="balloon" rel="556"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'port'. Check lines: 556, 555.</p></div>
+<div class="balloon" rel="582"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mount'. Check lines: 582, 581.</p></div>
+<div class="balloon" rel="670"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'mount'. Check lines: 670, 669.</p></div>
+<div class="balloon" rel="685"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'port'. Check lines: 685, 683.</p></div>
+<div class="balloon" rel="695"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'tuple'. Check lines: 695, 694.</p></div>
+<div class="balloon" rel="698"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'buffer' pointer in the 'buffer + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 698, 692.</p></div>
+<div class="balloon" rel="710"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'tuple'. Check lines: 710, 709.</p></div>
+<div class="balloon" rel="711"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V769/" target="_blank">V769</a> The 'buffer' pointer in the 'buffer + offset' expression could be nullptr. In such case, resulting value will be senseless and it should not be used. Check lines: 711, 706.</p></div>
+<div class="balloon" rel="821"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 820.</p></div>
+<div class="balloon" rel="825"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 824.</p></div>
+<div class="balloon" rel="921"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 920.</p></div>
+<div class="balloon" rel="930"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 929.</p></div>
+<div class="balloon" rel="939"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 938.</p></div>
+<div class="balloon" rel="946"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 945.</p></div>
+<div class="balloon" rel="955"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 954.</p></div>
+<div class="balloon" rel="959"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V571/" target="_blank">V571</a> Recurring check. The 'if (options & pe_print_html)' condition was already verified in line 958.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

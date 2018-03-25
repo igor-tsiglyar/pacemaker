@@ -1,0 +1,1047 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;stdio.h&gt;</a>
+<a name="ln27">#include &lt;sys/types.h&gt;</a>
+<a name="ln28">#include &lt;unistd.h&gt;</a>
+<a name="ln29"> </a>
+<a name="ln30">#include &lt;stdlib.h&gt;</a>
+<a name="ln31">#include &lt;errno.h&gt;</a>
+<a name="ln32">#include &lt;fcntl.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;libgen.h&gt;             /* for basename() */</a>
+<a name="ln35"> </a>
+<a name="ln36">#include &lt;crm/crm.h&gt;</a>
+<a name="ln37">#include &lt;crm/cluster/internal.h&gt;</a>
+<a name="ln38">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln39">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln40">#include &lt;crm/cib.h&gt;</a>
+<a name="ln41">#include &lt;crm/attrd.h&gt;</a>
+<a name="ln42"> </a>
+<a name="ln43">int command = 0;</a>
+<a name="ln44">int ccm_fd = 0;</a>
+<a name="ln45">gboolean do_quiet = FALSE;</a>
+<a name="ln46"> </a>
+<a name="ln47">char *target_uuid = NULL;</a>
+<a name="ln48">char *target_uname = NULL;</a>
+<a name="ln49">const char *standby_value = NULL;</a>
+<a name="ln50">const char *standby_scope = NULL;</a>
+<a name="ln51"> </a>
+<a name="ln52">/* *INDENT-OFF* */</a>
+<a name="ln53">static struct crm_option long_options[] = {</a>
+<a name="ln54">    /* Top-level Options */</a>
+<a name="ln55">    {&quot;help&quot;,       0, 0, '?', &quot;\tThis text&quot;},</a>
+<a name="ln56">    {&quot;version&quot;,    0, 0, '$', &quot;\tVersion information&quot;  },</a>
+<a name="ln57">    {&quot;verbose&quot;,    0, 0, 'V', &quot;\tIncrease debug output&quot;},</a>
+<a name="ln58">    {&quot;quiet&quot;,      0, 0, 'Q', &quot;\tEssential output only&quot;},</a>
+<a name="ln59"> </a>
+<a name="ln60">    {&quot;-spacer-&quot;,   1, 0, '-', &quot;\nStack:&quot;},</a>
+<a name="ln61">#if SUPPORT_CMAN</a>
+<a name="ln62">    {&quot;cman&quot;,       0, 0, 'c', &quot;\tOnly try connecting to a cman-based cluster&quot;},</a>
+<a name="ln63">#endif</a>
+<a name="ln64">#if SUPPORT_COROSYNC</a>
+<a name="ln65">    {&quot;openais&quot;,    0, 0, 'A', &quot;\tOnly try connecting to an OpenAIS-based cluster&quot;},</a>
+<a name="ln66">#endif</a>
+<a name="ln67">#ifdef SUPPORT_CS_QUORUM</a>
+<a name="ln68">    {&quot;corosync&quot;,   0, 0, 'C', &quot;\tOnly try connecting to an Corosync-based cluster&quot;},</a>
+<a name="ln69">#endif</a>
+<a name="ln70">#ifdef SUPPORT_HEARTBEAT</a>
+<a name="ln71">    {&quot;heartbeat&quot;,  0, 0, 'H', &quot;Only try connecting to a Heartbeat-based cluster&quot;},</a>
+<a name="ln72">#endif</a>
+<a name="ln73">    </a>
+<a name="ln74">    {&quot;-spacer-&quot;,      1, 0, '-', &quot;\nCommands:&quot;},</a>
+<a name="ln75">    {&quot;name&quot;,	      0, 0, 'n', &quot;\tDisplay the name used by the cluster for this node&quot;},</a>
+<a name="ln76">    {&quot;name-for-id&quot;,   1, 0, 'N', &quot;\tDisplay the name used by the cluster for the node with the specified id&quot;},</a>
+<a name="ln77">    {&quot;epoch&quot;,	      0, 0, 'e', &quot;\tDisplay the epoch during which this node joined the cluster&quot;},</a>
+<a name="ln78">    {&quot;quorum&quot;,        0, 0, 'q', &quot;\tDisplay a 1 if our partition has quorum, 0 if not&quot;},</a>
+<a name="ln79">    {&quot;list&quot;,          0, 0, 'l', &quot;\tDisplay all known members (past and present) of this cluster (Not available for heartbeat clusters)&quot;},</a>
+<a name="ln80">    {&quot;partition&quot;,     0, 0, 'p', &quot;Display the members of this partition&quot;},</a>
+<a name="ln81">    {&quot;cluster-id&quot;,    0, 0, 'i', &quot;Display this node's cluster id&quot;},</a>
+<a name="ln82">    {&quot;remove&quot;,        1, 0, 'R', &quot;(Advanced) Remove the (stopped) node with the specified name from Pacemaker's configuration and caches&quot;},</a>
+<a name="ln83">    {&quot;-spacer-&quot;,      1, 0, '-', &quot;In the case of Heartbeat, CMAN and Corosync 2.0, requires that the node has already been removed from the underlying cluster&quot;},</a>
+<a name="ln84"> </a>
+<a name="ln85">    {&quot;-spacer-&quot;, 1, 0, '-', &quot;\nAdditional Options:&quot;},</a>
+<a name="ln86">    {&quot;force&quot;,	 0, 0, 'f'},</a>
+<a name="ln87"> </a>
+<a name="ln88">    {0, 0, 0, 0}</a>
+<a name="ln89">};</a>
+<a name="ln90">/* *INDENT-ON* */</a>
+<a name="ln91"> </a>
+<a name="ln92">static int</a>
+<a name="ln93">cib_remove_node(uint32_t id, const char *name)</a>
+<a name="ln94">{</a>
+<a name="ln95">    int rc;</a>
+<a name="ln96">    cib_t *cib = NULL;</a>
+<a name="ln97">    xmlNode *node = NULL;</a>
+<a name="ln98">    xmlNode *node_state = NULL;</a>
+<a name="ln99"> </a>
+<a name="ln100">    crm_trace(&quot;Removing %s from the CIB&quot;, name);</a>
+<a name="ln101"> </a>
+<a name="ln102">    if(name == NULL &amp;&amp; id == 0) {</a>
+<a name="ln103">        return -ENOTUNIQ;</a>
+<a name="ln104">    }</a>
+<a name="ln105"> </a>
+<a name="ln106">    node = create_xml_node(NULL, XML_CIB_TAG_NODE);</a>
+<a name="ln107">    node_state = create_xml_node(NULL, XML_CIB_TAG_STATE);</a>
+<a name="ln108"> </a>
+<a name="ln109">    crm_xml_add(node, XML_ATTR_UNAME, name);</a>
+<a name="ln110">    crm_xml_add(node_state, XML_ATTR_UNAME, name);</a>
+<a name="ln111">    if(id) {</a>
+<a name="ln112">        crm_xml_set_id(node, &quot;%u&quot;, id);</a>
+<a name="ln113">        crm_xml_add(node_state, XML_ATTR_ID, ID(node));</a>
+<a name="ln114">    }</a>
+<a name="ln115"> </a>
+<a name="ln116">    cib = cib_new();</a>
+<a name="ln117">    cib-&gt;cmds-&gt;signon(cib, crm_system_name, cib_command);</a>
+<a name="ln118"> </a>
+<a name="ln119">    rc = cib-&gt;cmds-&gt;delete(cib, XML_CIB_TAG_NODES, node, cib_sync_call);</a>
+<a name="ln120">    if (rc != pcmk_ok) {</a>
+<a name="ln121">        printf(&quot;Could not remove %s/%u from &quot; XML_CIB_TAG_NODES &quot;: %s&quot;, name, id, pcmk_strerror(rc));</a>
+<a name="ln122">    }</a>
+<a name="ln123">    rc = cib-&gt;cmds-&gt;delete(cib, XML_CIB_TAG_STATUS, node_state, cib_sync_call);</a>
+<a name="ln124">    if (rc != pcmk_ok) {</a>
+<a name="ln125">        printf(&quot;Could not remove %s/%u from &quot; XML_CIB_TAG_STATUS &quot;: %s&quot;, name, id, pcmk_strerror(rc));</a>
+<a name="ln126">    }</a>
+<a name="ln127"> </a>
+<a name="ln128">    cib-&gt;cmds-&gt;signoff(cib);</a>
+<a name="ln129">    cib_delete(cib);</a>
+<a name="ln130">    return rc;</a>
+<a name="ln131">}</a>
+<a name="ln132"> </a>
+<a name="ln133">int tools_remove_node_cache(const char *node, const char *target);</a>
+<a name="ln134"> </a>
+<a name="ln135">int tools_remove_node_cache(const char *node, const char *target)</a>
+<a name="ln136">{</a>
+<a name="ln137">    int n = 0;</a>
+<a name="ln138">    int rc = -1;</a>
+<a name="ln139">    char *name = NULL;</a>
+<a name="ln140">    char *admin_uuid = NULL;</a>
+<a name="ln141">    crm_ipc_t *conn = crm_ipc_new(target, 0);</a>
+<a name="ln142">    xmlNode *cmd = NULL;</a>
+<a name="ln143">    xmlNode *hello = NULL;</a>
+<a name="ln144">    char *endptr = NULL;</a>
+<a name="ln145"> </a>
+<a name="ln146">    if (!conn) {</a>
+<a name="ln147">        return -ENOTCONN;</a>
+<a name="ln148">    }</a>
+<a name="ln149"> </a>
+<a name="ln150">    if (!crm_ipc_connect(conn)) {</a>
+<a name="ln151">        crm_perror(LOG_ERR, &quot;Connection to %s failed&quot;, target);</a>
+<a name="ln152">        crm_ipc_destroy(conn);</a>
+<a name="ln153">        return -ENOTCONN;</a>
+<a name="ln154">    }</a>
+<a name="ln155"> </a>
+<a name="ln156">    if(safe_str_eq(target, CRM_SYSTEM_CRMD)) {</a>
+<a name="ln157">        admin_uuid = calloc(1, 11);</a>
+<a name="ln158">        snprintf(admin_uuid, 10, &quot;%d&quot;, getpid());</a>
+<a name="ln159">        admin_uuid[10] = '\0';</a>
+<a name="ln160"> </a>
+<a name="ln161">        hello = create_hello_message(admin_uuid, &quot;crm_node&quot;, &quot;0&quot;, &quot;1&quot;);</a>
+<a name="ln162">        rc = crm_ipc_send(conn, hello, 0, 0, NULL);</a>
+<a name="ln163"> </a>
+<a name="ln164">        free_xml(hello);</a>
+<a name="ln165">        if (rc &lt; 0) {</a>
+<a name="ln166">            free(admin_uuid);</a>
+<a name="ln167">            return rc;</a>
+<a name="ln168">        }</a>
+<a name="ln169">    }</a>
+<a name="ln170"> </a>
+<a name="ln171"> </a>
+<a name="ln172">    errno = 0;</a>
+<a name="ln173">    n = strtol(node, &amp;endptr, 10);</a>
+<a name="ln174">    if (errno != 0 || endptr == node || *endptr != '\0') {</a>
+<a name="ln175">        /* Argument was not a nodeid */</a>
+<a name="ln176">        n = 0;</a>
+<a name="ln177">        name = strdup(node);</a>
+<a name="ln178">    } else {</a>
+<a name="ln179">        name = get_node_name(n);</a>
+<a name="ln180">    }</a>
+<a name="ln181"> </a>
+<a name="ln182">    crm_trace(&quot;Removing %s aka. %s (%u) from the membership cache&quot;, name, node, n);</a>
+<a name="ln183"> </a>
+<a name="ln184">    if(safe_str_eq(target, T_ATTRD)) {</a>
+<a name="ln185">        cmd = create_xml_node(NULL, __FUNCTION__);</a>
+<a name="ln186"> </a>
+<a name="ln187">        crm_xml_add(cmd, F_TYPE, T_ATTRD);</a>
+<a name="ln188">        crm_xml_add(cmd, F_ORIG, crm_system_name);</a>
+<a name="ln189"> </a>
+<a name="ln190">        crm_xml_add(cmd, F_ATTRD_TASK, ATTRD_OP_PEER_REMOVE);</a>
+<a name="ln191">        crm_xml_add(cmd, F_ATTRD_HOST, name);</a>
+<a name="ln192"> </a>
+<a name="ln193">        if (n) {</a>
+<a name="ln194">            char buffer[64];</a>
+<a name="ln195">            if(snprintf(buffer, 63, &quot;%u&quot;, n) &gt; 0) {</a>
+<a name="ln196">                crm_xml_add(cmd, F_ATTRD_HOST_ID, buffer);</a>
+<a name="ln197">            }</a>
+<a name="ln198">        }</a>
+<a name="ln199"> </a>
+<a name="ln200">    } else {</a>
+<a name="ln201">        cmd = create_request(CRM_OP_RM_NODE_CACHE,</a>
+<a name="ln202">                             NULL, NULL, target, crm_system_name, admin_uuid);</a>
+<a name="ln203">        if (n) {</a>
+<a name="ln204">            crm_xml_set_id(cmd, &quot;%u&quot;, n);</a>
+<a name="ln205">        }</a>
+<a name="ln206">        crm_xml_add(cmd, XML_ATTR_UNAME, name);</a>
+<a name="ln207">    }</a>
+<a name="ln208"> </a>
+<a name="ln209">    rc = crm_ipc_send(conn, cmd, 0, 0, NULL);</a>
+<a name="ln210">    crm_debug(&quot;%s peer cache cleanup for %s (%u): %d&quot;, target, name, n, rc);</a>
+<a name="ln211"> </a>
+<a name="ln212">    if (rc &gt; 0) {</a>
+<a name="ln213">        rc = cib_remove_node(n, name);</a>
+<a name="ln214">    }</a>
+<a name="ln215"> </a>
+<a name="ln216">    if (conn) {</a>
+<a name="ln217">        crm_ipc_close(conn);</a>
+<a name="ln218">        crm_ipc_destroy(conn);</a>
+<a name="ln219">    }</a>
+<a name="ln220">    free(admin_uuid);</a>
+<a name="ln221">    free_xml(cmd);</a>
+<a name="ln222">    free(name);</a>
+<a name="ln223">    return rc &gt; 0 ? 0 : rc;</a>
+<a name="ln224">}</a>
+<a name="ln225"> </a>
+<a name="ln226">static gint</a>
+<a name="ln227">compare_node_uname(gconstpointer a, gconstpointer b)</a>
+<a name="ln228">{</a>
+<a name="ln229">    const crm_node_t *a_node = a;</a>
+<a name="ln230">    const crm_node_t *b_node = b;</a>
+<a name="ln231">    return strcmp(a_node-&gt;uname?a_node-&gt;uname:&quot;&quot;, b_node-&gt;uname?b_node-&gt;uname:&quot;&quot;);</a>
+<a name="ln232">}</a>
+<a name="ln233"> </a>
+<a name="ln234">static int</a>
+<a name="ln235">node_mcp_dispatch(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln236">{</a>
+<a name="ln237">    xmlNode *msg = string2xml(buffer);</a>
+<a name="ln238"> </a>
+<a name="ln239">    if (msg) {</a>
+<a name="ln240">        xmlNode *node = NULL;</a>
+<a name="ln241">        GListPtr nodes = NULL;</a>
+<a name="ln242">        GListPtr iter = NULL;</a>
+<a name="ln243">        const char *quorate = crm_element_value(msg, &quot;quorate&quot;);</a>
+<a name="ln244"> </a>
+<a name="ln245">        crm_log_xml_trace(msg, &quot;message&quot;);</a>
+<a name="ln246">        if (command == 'q' &amp;&amp; quorate != NULL) {</a>
+<a name="ln247">            fprintf(stdout, &quot;%s\n&quot;, quorate);</a>
+<a name="ln248">            crm_exit(pcmk_ok);</a>
+<a name="ln249"> </a>
+<a name="ln250">        } else if(command == 'q') {</a>
+<a name="ln251">            crm_exit(1);</a>
+<a name="ln252">        }</a>
+<a name="ln253"> </a>
+<a name="ln254">        for (node = __xml_first_child(msg); node != NULL; node = __xml_next(node)) {</a>
+<a name="ln255">            crm_node_t *peer = calloc(1, sizeof(crm_node_t));</a>
+<a name="ln256"> </a>
+<a name="ln257">            nodes = g_list_insert_sorted(nodes, peer, compare_node_uname);</a>
+<a name="ln258">            peer-&gt;uname = (char*)crm_element_value_copy(node, &quot;uname&quot;);</a>
+<a name="ln259">            peer-&gt;state = (char*)crm_element_value_copy(node, &quot;state&quot;);</a>
+<a name="ln260">            crm_element_value_int(node, &quot;id&quot;, (int*)&amp;peer-&gt;id);</a>
+<a name="ln261">        }</a>
+<a name="ln262"> </a>
+<a name="ln263">        for(iter = nodes; iter; iter = iter-&gt;next) {</a>
+<a name="ln264">            crm_node_t *peer = iter-&gt;data;</a>
+<a name="ln265">            if (command == 'l') {</a>
+<a name="ln266">                fprintf(stdout, &quot;%u %s %s\n&quot;, peer-&gt;id, peer-&gt;uname, peer-&gt;state?peer-&gt;state:&quot;&quot;);</a>
+<a name="ln267"> </a>
+<a name="ln268">            } else if (command == 'p') {</a>
+<a name="ln269">                if(safe_str_eq(peer-&gt;state, CRM_NODE_MEMBER)) {</a>
+<a name="ln270">                    fprintf(stdout, &quot;%s &quot;, peer-&gt;uname);</a>
+<a name="ln271">                }</a>
+<a name="ln272"> </a>
+<a name="ln273">            } else if (command == 'i') {</a>
+<a name="ln274">                if(safe_str_eq(peer-&gt;state, CRM_NODE_MEMBER)) {</a>
+<a name="ln275">                    fprintf(stdout, &quot;%u &quot;, peer-&gt;id);</a>
+<a name="ln276">                }</a>
+<a name="ln277">            }</a>
+<a name="ln278">        }</a>
+<a name="ln279"> </a>
+<a name="ln280">        g_list_free_full(nodes, free);</a>
+<a name="ln281">        free_xml(msg);</a>
+<a name="ln282"> </a>
+<a name="ln283">        if (command == 'p') {</a>
+<a name="ln284">            fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln285">        }</a>
+<a name="ln286"> </a>
+<a name="ln287">        crm_exit(pcmk_ok);</a>
+<a name="ln288">    }</a>
+<a name="ln289"> </a>
+<a name="ln290">    return 0;</a>
+<a name="ln291">}</a>
+<a name="ln292"> </a>
+<a name="ln293">static void</a>
+<a name="ln294">node_mcp_destroy(gpointer user_data)</a>
+<a name="ln295">{</a>
+<a name="ln296">    crm_exit(ENOTCONN);</a>
+<a name="ln297">}</a>
+<a name="ln298"> </a>
+<a name="ln299">static gboolean</a>
+<a name="ln300">try_pacemaker(int command, enum cluster_type_e stack)</a>
+<a name="ln301">{</a>
+<a name="ln302">    struct ipc_client_callbacks node_callbacks = {</a>
+<a name="ln303">        .dispatch = node_mcp_dispatch,</a>
+<a name="ln304">        .destroy = node_mcp_destroy</a>
+<a name="ln305">    };</a>
+<a name="ln306"> </a>
+<a name="ln307">    if (stack == pcmk_cluster_heartbeat) {</a>
+<a name="ln308">        /* Nothing to do for them */</a>
+<a name="ln309">        return FALSE;</a>
+<a name="ln310">    }</a>
+<a name="ln311"> </a>
+<a name="ln312">    switch (command) {</a>
+<a name="ln313">        case 'e':</a>
+<a name="ln314">            /* Age only applies to heartbeat clusters */</a>
+<a name="ln315">            fprintf(stdout, &quot;1\n&quot;);</a>
+<a name="ln316">            crm_exit(pcmk_ok);</a>
+<a name="ln317"> </a>
+<a name="ln318">        case 'R':</a>
+<a name="ln319">            {</a>
+<a name="ln320">                int lpc = 0;</a>
+<a name="ln321">                const char *daemons[] = {</a>
+<a name="ln322">                    CRM_SYSTEM_CRMD,</a>
+<a name="ln323">                    &quot;stonith-ng&quot;,</a>
+<a name="ln324">                    T_ATTRD,</a>
+<a name="ln325">                    CRM_SYSTEM_MCP,</a>
+<a name="ln326">                };</a>
+<a name="ln327"> </a>
+<a name="ln328">                for(lpc = 0; lpc &lt; DIMOF(daemons); lpc++) {</a>
+<a name="ln329">                    if (tools_remove_node_cache(target_uname, daemons[lpc])) {</a>
+<a name="ln330">                        crm_err(&quot;Failed to connect to %s to remove node '%s'&quot;, daemons[lpc], target_uname);</a>
+<a name="ln331">                        crm_exit(pcmk_err_generic);</a>
+<a name="ln332">                    }</a>
+<a name="ln333">                }</a>
+<a name="ln334">                crm_exit(pcmk_ok);</a>
+<a name="ln335">            }</a>
+<a name="ln336">            break;</a>
+<a name="ln337"> </a>
+<a name="ln338">        case 'i':</a>
+<a name="ln339">        case 'l':</a>
+<a name="ln340">        case 'q':</a>
+<a name="ln341">        case 'p':</a>
+<a name="ln342">            /* Go to pacemakerd */</a>
+<a name="ln343">            {</a>
+<a name="ln344">                GMainLoop *amainloop = g_main_loop_new(NULL, FALSE);</a>
+<a name="ln345">                mainloop_io_t *ipc =</a>
+<a name="ln346">                    mainloop_add_ipc_client(CRM_SYSTEM_MCP, G_PRIORITY_DEFAULT, 0, NULL, &amp;node_callbacks);</a>
+<a name="ln347">                if (ipc != NULL) {</a>
+<a name="ln348">                    /* Sending anything will get us a list of nodes */</a>
+<a name="ln349">                    xmlNode *poke = create_xml_node(NULL, &quot;poke&quot;);</a>
+<a name="ln350"> </a>
+<a name="ln351">                    crm_ipc_send(mainloop_get_ipc_client(ipc), poke, 0, 0, NULL);</a>
+<a name="ln352">                    free_xml(poke);</a>
+<a name="ln353">                    g_main_run(amainloop);</a>
+<a name="ln354">                }</a>
+<a name="ln355">            }</a>
+<a name="ln356">            break;</a>
+<a name="ln357">    }</a>
+<a name="ln358">    return FALSE;</a>
+<a name="ln359">}</a>
+<a name="ln360"> </a>
+<a name="ln361">#if SUPPORT_HEARTBEAT</a>
+<a name="ln362">#  include &lt;ocf/oc_event.h&gt;</a>
+<a name="ln363">#  include &lt;ocf/oc_membership.h&gt;</a>
+<a name="ln364">#  include &lt;clplumbing/cl_uuid.h&gt;</a>
+<a name="ln365"> </a>
+<a name="ln366">#  define UUID_LEN 16</a>
+<a name="ln367"> </a>
+<a name="ln368">oc_ev_t *ccm_token = NULL;</a>
+<a name="ln369">static void *ccm_library = NULL;</a>
+<a name="ln370">void oc_ev_special(const oc_ev_t *, oc_ev_class_t, int);</a>
+<a name="ln371"> </a>
+<a name="ln372">static gboolean</a>
+<a name="ln373">read_local_hb_uuid(void)</a>
+<a name="ln374">{</a>
+<a name="ln375">    cl_uuid_t uuid;</a>
+<a name="ln376">    char *buffer = NULL;</a>
+<a name="ln377">    long start = 0, read_len = 0;</a>
+<a name="ln378"> </a>
+<a name="ln379">    FILE *input = fopen(UUID_FILE, &quot;r&quot;);</a>
+<a name="ln380"> </a>
+<a name="ln381">    if (input == NULL) {</a>
+<a name="ln382">        crm_info(&quot;Could not open UUID file %s&quot;, UUID_FILE);</a>
+<a name="ln383">        return FALSE;</a>
+<a name="ln384">    }</a>
+<a name="ln385"> </a>
+<a name="ln386">    /* see how big the file is */</a>
+<a name="ln387">    start = ftell(input);</a>
+<a name="ln388">    fseek(input, 0L, SEEK_END);</a>
+<a name="ln389">    if (UUID_LEN != ftell(input)) {</a>
+<a name="ln390">        fprintf(stderr, &quot;%s must contain exactly %d bytes\n&quot;, UUID_FILE, UUID_LEN);</a>
+<a name="ln391">        abort();</a>
+<a name="ln392">    }</a>
+<a name="ln393"> </a>
+<a name="ln394">    fseek(input, 0L, start);</a>
+<a name="ln395">    if (start != ftell(input)) {</a>
+<a name="ln396">        fprintf(stderr, &quot;fseek not behaving: %ld vs. %ld\n&quot;, start, ftell(input));</a>
+<a name="ln397">        crm_exit(pcmk_err_generic);</a>
+<a name="ln398">    }</a>
+<a name="ln399"> </a>
+<a name="ln400">    buffer = malloc(50);</a>
+<a name="ln401">    read_len = fread(uuid.uuid, 1, UUID_LEN, input);</a>
+<a name="ln402">    fclose(input);</a>
+<a name="ln403"> </a>
+<a name="ln404">    if (read_len != UUID_LEN) {</a>
+<a name="ln405">        fprintf(stderr, &quot;Expected and read bytes differ: %d vs. %ld\n&quot;, UUID_LEN, read_len);</a>
+<a name="ln406">        crm_exit(pcmk_err_generic);</a>
+<a name="ln407"> </a>
+<a name="ln408">    } else if (buffer != NULL) {</a>
+<a name="ln409">        cl_uuid_unparse(&amp;uuid, buffer);</a>
+<a name="ln410">        fprintf(stdout, &quot;%s\n&quot;, buffer);</a>
+<a name="ln411">        return TRUE;</a>
+<a name="ln412"> </a>
+<a name="ln413">    } else {</a>
+<a name="ln414">        fprintf(stderr, &quot;No buffer to unparse\n&quot;);</a>
+<a name="ln415">        crm_exit(ENODATA);</a>
+<a name="ln416">    }</a>
+<a name="ln417"> </a>
+<a name="ln418">    free(buffer);</a>
+<a name="ln419">    return FALSE;</a>
+<a name="ln420">}</a>
+<a name="ln421"> </a>
+<a name="ln422">static void</a>
+<a name="ln423">ccm_age_callback(oc_ed_t event, void *cookie, size_t size, const void *data)</a>
+<a name="ln424">{</a>
+<a name="ln425">    int lpc;</a>
+<a name="ln426">    int node_list_size;</a>
+<a name="ln427">    const oc_ev_membership_t *oc = (const oc_ev_membership_t *)data;</a>
+<a name="ln428"> </a>
+<a name="ln429">    int (*ccm_api_callback_done) (void *cookie) =</a>
+<a name="ln430">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_callback_done&quot;, 1);</a>
+<a name="ln431"> </a>
+<a name="ln432">    node_list_size = oc-&gt;m_n_member;</a>
+<a name="ln433">    if (command == 'q') {</a>
+<a name="ln434">        crm_debug(&quot;Processing \&quot;%s\&quot; event.&quot;,</a>
+<a name="ln435">                  event == OC_EV_MS_NEW_MEMBERSHIP ? &quot;NEW MEMBERSHIP&quot; :</a>
+<a name="ln436">                  event == OC_EV_MS_NOT_PRIMARY ? &quot;NOT PRIMARY&quot; :</a>
+<a name="ln437">                  event == OC_EV_MS_PRIMARY_RESTORED ? &quot;PRIMARY RESTORED&quot; :</a>
+<a name="ln438">                  event == OC_EV_MS_EVICTED ? &quot;EVICTED&quot; : &quot;NO QUORUM MEMBERSHIP&quot;);</a>
+<a name="ln439">        if (ccm_have_quorum(event)) {</a>
+<a name="ln440">            fprintf(stdout, &quot;1\n&quot;);</a>
+<a name="ln441">        } else {</a>
+<a name="ln442">            fprintf(stdout, &quot;0\n&quot;);</a>
+<a name="ln443">        }</a>
+<a name="ln444"> </a>
+<a name="ln445">    } else if (command == 'e') {</a>
+<a name="ln446">        crm_debug(&quot;Searching %d members for our birth&quot;, oc-&gt;m_n_member);</a>
+<a name="ln447">    }</a>
+<a name="ln448">    for (lpc = 0; lpc &lt; node_list_size; lpc++) {</a>
+<a name="ln449">        if (command == 'p') {</a>
+<a name="ln450">            fprintf(stdout, &quot;%s &quot;, oc-&gt;m_array[oc-&gt;m_memb_idx + lpc].node_uname);</a>
+<a name="ln451"> </a>
+<a name="ln452">        } else if (command == 'e') {</a>
+<a name="ln453">            int (*ccm_api_is_my_nodeid) (const oc_ev_t * token, const oc_node_t * node) =</a>
+<a name="ln454">                find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_is_my_nodeid&quot;, 1);</a>
+<a name="ln455">            if ((*ccm_api_is_my_nodeid) (ccm_token, &amp;(oc-&gt;m_array[lpc]))) {</a>
+<a name="ln456">                crm_debug(&quot;MATCH: nodeid=%d, uname=%s, born=%d&quot;,</a>
+<a name="ln457">                          oc-&gt;m_array[oc-&gt;m_memb_idx + lpc].node_id,</a>
+<a name="ln458">                          oc-&gt;m_array[oc-&gt;m_memb_idx + lpc].node_uname,</a>
+<a name="ln459">                          oc-&gt;m_array[oc-&gt;m_memb_idx + lpc].node_born_on);</a>
+<a name="ln460">                fprintf(stdout, &quot;%d\n&quot;, oc-&gt;m_array[oc-&gt;m_memb_idx + lpc].node_born_on);</a>
+<a name="ln461">            }</a>
+<a name="ln462">        }</a>
+<a name="ln463">    }</a>
+<a name="ln464"> </a>
+<a name="ln465">    (*ccm_api_callback_done) (cookie);</a>
+<a name="ln466"> </a>
+<a name="ln467">    if (command == 'p') {</a>
+<a name="ln468">        fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln469">    }</a>
+<a name="ln470">    fflush(stdout);</a>
+<a name="ln471">    crm_exit(pcmk_ok);</a>
+<a name="ln472">}</a>
+<a name="ln473"> </a>
+<a name="ln474">static gboolean</a>
+<a name="ln475">ccm_age_connect(int *ccm_fd)</a>
+<a name="ln476">{</a>
+<a name="ln477">    gboolean did_fail = FALSE;</a>
+<a name="ln478">    int ret = 0;</a>
+<a name="ln479"> </a>
+<a name="ln480">    int (*ccm_api_register) (oc_ev_t ** token) =</a>
+<a name="ln481">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_register&quot;, 1);</a>
+<a name="ln482"> </a>
+<a name="ln483">    int (*ccm_api_set_callback) (const oc_ev_t * token,</a>
+<a name="ln484">                                 oc_ev_class_t class,</a>
+<a name="ln485">                                 oc_ev_callback_t * fn,</a>
+<a name="ln486">                                 oc_ev_callback_t ** prev_fn) =</a>
+<a name="ln487">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_set_callback&quot;, 1);</a>
+<a name="ln488"> </a>
+<a name="ln489">    void (*ccm_api_special) (const oc_ev_t *, oc_ev_class_t, int) =</a>
+<a name="ln490">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_special&quot;, 1);</a>
+<a name="ln491">    int (*ccm_api_activate) (const oc_ev_t * token, int *fd) =</a>
+<a name="ln492">        find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_activate&quot;, 1);</a>
+<a name="ln493"> </a>
+<a name="ln494">    crm_debug(&quot;Registering with CCM&quot;);</a>
+<a name="ln495">    ret = (*ccm_api_register) (&amp;ccm_token);</a>
+<a name="ln496">    if (ret != 0) {</a>
+<a name="ln497">        crm_info(&quot;CCM registration failed: %d&quot;, ret);</a>
+<a name="ln498">        did_fail = TRUE;</a>
+<a name="ln499">    }</a>
+<a name="ln500"> </a>
+<a name="ln501">    if (did_fail == FALSE) {</a>
+<a name="ln502">        crm_debug(&quot;Setting up CCM callbacks&quot;);</a>
+<a name="ln503">        ret = (*ccm_api_set_callback) (ccm_token, OC_EV_MEMB_CLASS, ccm_age_callback, NULL);</a>
+<a name="ln504">        if (ret != 0) {</a>
+<a name="ln505">            crm_warn(&quot;CCM callback not set: %d&quot;, ret);</a>
+<a name="ln506">            did_fail = TRUE;</a>
+<a name="ln507">        }</a>
+<a name="ln508">    }</a>
+<a name="ln509">    if (did_fail == FALSE) {</a>
+<a name="ln510">        (*ccm_api_special) (ccm_token, OC_EV_MEMB_CLASS, 0 /*don't care */ );</a>
+<a name="ln511"> </a>
+<a name="ln512">        crm_debug(&quot;Activating CCM token&quot;);</a>
+<a name="ln513">        ret = (*ccm_api_activate) (ccm_token, ccm_fd);</a>
+<a name="ln514">        if (ret != 0) {</a>
+<a name="ln515">            crm_warn(&quot;CCM Activation failed: %d&quot;, ret);</a>
+<a name="ln516">            did_fail = TRUE;</a>
+<a name="ln517">        }</a>
+<a name="ln518">    }</a>
+<a name="ln519"> </a>
+<a name="ln520">    return !did_fail;</a>
+<a name="ln521">}</a>
+<a name="ln522"> </a>
+<a name="ln523">static gboolean</a>
+<a name="ln524">try_heartbeat(int command, enum cluster_type_e stack)</a>
+<a name="ln525">{</a>
+<a name="ln526">    crm_debug(&quot;Attempting to process %c command&quot;, command);</a>
+<a name="ln527"> </a>
+<a name="ln528">    if (command == 'i') {</a>
+<a name="ln529">        if (read_local_hb_uuid()) {</a>
+<a name="ln530">            crm_exit(pcmk_ok);</a>
+<a name="ln531">        }</a>
+<a name="ln532"> </a>
+<a name="ln533">    } else if (command == 'R') {</a>
+<a name="ln534">        if (tools_remove_node_cache(target_uname, CRM_SYSTEM_CRMD)) {</a>
+<a name="ln535">            crm_err(&quot;Failed to connect to &quot;CRM_SYSTEM_CRMD&quot; to remove node '%s'&quot;, target_uname);</a>
+<a name="ln536">            crm_exit(pcmk_err_generic);</a>
+<a name="ln537">        }</a>
+<a name="ln538">        crm_exit(pcmk_ok);</a>
+<a name="ln539"> </a>
+<a name="ln540">    } else if (ccm_age_connect(&amp;ccm_fd)) {</a>
+<a name="ln541">        int rc = 0;</a>
+<a name="ln542">        fd_set rset;</a>
+<a name="ln543">        int (*ccm_api_handle_event) (const oc_ev_t * token) =</a>
+<a name="ln544">            find_library_function(&amp;ccm_library, CCM_LIBRARY, &quot;oc_ev_handle_event&quot;, 1);</a>
+<a name="ln545"> </a>
+<a name="ln546">        while (1) {</a>
+<a name="ln547"> </a>
+<a name="ln548">            sleep(1);</a>
+<a name="ln549">            FD_ZERO(&amp;rset);</a>
+<a name="ln550">            FD_SET(ccm_fd, &amp;rset);</a>
+<a name="ln551"> </a>
+<a name="ln552">            errno = 0;</a>
+<a name="ln553">            rc = select(ccm_fd + 1, &amp;rset, NULL, NULL, NULL);</a>
+<a name="ln554"> </a>
+<a name="ln555">            if (rc &gt; 0 &amp;&amp; (*ccm_api_handle_event) (ccm_token) != 0) {</a>
+<a name="ln556">                crm_err(&quot;oc_ev_handle_event failed&quot;);</a>
+<a name="ln557">                return FALSE;</a>
+<a name="ln558"> </a>
+<a name="ln559">            } else if (rc &lt; 0 &amp;&amp; errno != EINTR) {</a>
+<a name="ln560">                crm_perror(LOG_ERR, &quot;select failed: %d&quot;, rc);</a>
+<a name="ln561">                return FALSE;</a>
+<a name="ln562">            }</a>
+<a name="ln563">        }</a>
+<a name="ln564">    }</a>
+<a name="ln565">    return FALSE;</a>
+<a name="ln566">}</a>
+<a name="ln567">#endif</a>
+<a name="ln568"> </a>
+<a name="ln569">#if SUPPORT_CMAN</a>
+<a name="ln570">#  include &lt;libcman.h&gt;</a>
+<a name="ln571">#  define MAX_NODES 256</a>
+<a name="ln572">static bool valid_cman_name(const char *name, uint32_t nodeid) </a>
+<a name="ln573">{</a>
+<a name="ln574">    bool rc = TRUE;</a>
+<a name="ln575"> </a>
+<a name="ln576">    /* Yes, %d, because that's what CMAN does */</a>
+<a name="ln577">    char *fakename = crm_strdup_printf(&quot;Node%d&quot;, nodeid);</a>
+<a name="ln578"> </a>
+<a name="ln579">    if(crm_str_eq(fakename, name, TRUE)) {</a>
+<a name="ln580">        rc = FALSE;</a>
+<a name="ln581">        crm_notice(&quot;Ignoring inferred name from cman: %s&quot;, fakename);</a>
+<a name="ln582">    }</a>
+<a name="ln583">    free(fakename);</a>
+<a name="ln584">    return rc;</a>
+<a name="ln585">}</a>
+<a name="ln586"> </a>
+<a name="ln587">static gboolean</a>
+<a name="ln588">try_cman(int command, enum cluster_type_e stack)</a>
+<a name="ln589">{</a>
+<a name="ln590"> </a>
+<a name="ln591">    int rc = -1, lpc = 0, node_count = 0;</a>
+<a name="ln592">    cman_node_t node;</a>
+<a name="ln593">    cman_cluster_t cluster;</a>
+<a name="ln594">    cman_handle_t cman_handle = NULL;</a>
+<a name="ln595">    cman_node_t cman_nodes[MAX_NODES];</a>
+<a name="ln596"> </a>
+<a name="ln597">    memset(&amp;cluster, 0, sizeof(cluster));</a>
+<a name="ln598"> </a>
+<a name="ln599">    cman_handle = cman_init(NULL);</a>
+<a name="ln600">    if (cman_handle == NULL || cman_is_active(cman_handle) == FALSE) {</a>
+<a name="ln601">        crm_info(&quot;Couldn't connect to cman&quot;);</a>
+<a name="ln602">        return FALSE;</a>
+<a name="ln603">    }</a>
+<a name="ln604"> </a>
+<a name="ln605">    switch (command) {</a>
+<a name="ln606">        case 'R':</a>
+<a name="ln607">            try_pacemaker(command, stack);</a>
+<a name="ln608">            break;</a>
+<a name="ln609"> </a>
+<a name="ln610">        case 'e':</a>
+<a name="ln611">            /* Age makes no sense (yet?) in a cman cluster */</a>
+<a name="ln612">            fprintf(stdout, &quot;1\n&quot;);</a>
+<a name="ln613">            break;</a>
+<a name="ln614"> </a>
+<a name="ln615">        case 'q':</a>
+<a name="ln616">            fprintf(stdout, &quot;%d\n&quot;, cman_is_quorate(cman_handle));</a>
+<a name="ln617">            break;</a>
+<a name="ln618"> </a>
+<a name="ln619">        case 'l':</a>
+<a name="ln620">        case 'p':</a>
+<a name="ln621">            memset(cman_nodes, 0, MAX_NODES * sizeof(cman_node_t));</a>
+<a name="ln622">            rc = cman_get_nodes(cman_handle, MAX_NODES, &amp;node_count, cman_nodes);</a>
+<a name="ln623">            if (rc != 0) {</a>
+<a name="ln624">                fprintf(stderr, &quot;Couldn't query cman node list: %d %d&quot;, rc, errno);</a>
+<a name="ln625">                goto cman_bail;</a>
+<a name="ln626">            }</a>
+<a name="ln627"> </a>
+<a name="ln628">            for (lpc = 0; lpc &lt; node_count; lpc++) {</a>
+<a name="ln629">                if(valid_cman_name(cman_nodes[lpc].cn_name, cman_nodes[lpc].cn_nodeid) == FALSE) {</a>
+<a name="ln630">                    /* The name was invented, but we need to print something, make it the id instead */</a>
+<a name="ln631">                    printf(&quot;%u &quot;, cman_nodes[lpc].cn_nodeid);</a>
+<a name="ln632"> </a>
+<a name="ln633">                } if (command == 'l') {</a>
+<a name="ln634">                    printf(&quot;%s &quot;, cman_nodes[lpc].cn_name);</a>
+<a name="ln635"> </a>
+<a name="ln636">                } else if (cman_nodes[lpc].cn_nodeid != 0 &amp;&amp; cman_nodes[lpc].cn_member) {</a>
+<a name="ln637">                    /* Never allow node ID 0 to be considered a member #315711 */</a>
+<a name="ln638">                    printf(&quot;%s &quot;, cman_nodes[lpc].cn_name);</a>
+<a name="ln639">                }</a>
+<a name="ln640">            }</a>
+<a name="ln641">            printf(&quot;\n&quot;);</a>
+<a name="ln642">            break;</a>
+<a name="ln643"> </a>
+<a name="ln644">        case 'i':</a>
+<a name="ln645">            memset(&amp;node, 0, sizeof(cman_node_t));</a>
+<a name="ln646">            rc = cman_get_node(cman_handle, CMAN_NODEID_US, &amp;node);</a>
+<a name="ln647">            if (rc != 0) {</a>
+<a name="ln648">                fprintf(stderr, &quot;Couldn't query cman node id: %d %d&quot;, rc, errno);</a>
+<a name="ln649">                goto cman_bail;</a>
+<a name="ln650">            }</a>
+<a name="ln651">            fprintf(stdout, &quot;%u\n&quot;, node.cn_nodeid);</a>
+<a name="ln652">            break;</a>
+<a name="ln653"> </a>
+<a name="ln654">        default:</a>
+<a name="ln655">            fprintf(stderr, &quot;Unknown option '%c'\n&quot;, command);</a>
+<a name="ln656">            crm_help('?', EX_USAGE);</a>
+<a name="ln657">    }</a>
+<a name="ln658">    cman_finish(cman_handle);</a>
+<a name="ln659">    crm_exit(pcmk_ok);</a>
+<a name="ln660"> </a>
+<a name="ln661">  cman_bail:</a>
+<a name="ln662">    cman_finish(cman_handle);</a>
+<a name="ln663">    return crm_exit(EINVAL);</a>
+<a name="ln664">}</a>
+<a name="ln665">#endif</a>
+<a name="ln666"> </a>
+<a name="ln667">#if HAVE_CONFDB</a>
+<a name="ln668">static void</a>
+<a name="ln669">ais_membership_destroy(gpointer user_data)</a>
+<a name="ln670">{</a>
+<a name="ln671">    crm_err(&quot;AIS connection terminated&quot;);</a>
+<a name="ln672">    ais_fd_sync = -1;</a>
+<a name="ln673">    crm_exit(ENOTCONN);</a>
+<a name="ln674">}</a>
+<a name="ln675"> </a>
+<a name="ln676">static gint</a>
+<a name="ln677">member_sort(gconstpointer a, gconstpointer b)</a>
+<a name="ln678">{</a>
+<a name="ln679">    const crm_node_t *node_a = a;</a>
+<a name="ln680">    const crm_node_t *node_b = b;</a>
+<a name="ln681"> </a>
+<a name="ln682">    return strcmp(node_a-&gt;uname, node_b-&gt;uname);</a>
+<a name="ln683">}</a>
+<a name="ln684"> </a>
+<a name="ln685">static void</a>
+<a name="ln686">crm_add_member(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln687">{</a>
+<a name="ln688">    GList **list = user_data;</a>
+<a name="ln689">    crm_node_t *node = value;</a>
+<a name="ln690"> </a>
+<a name="ln691">    if (node-&gt;uname != NULL) {</a>
+<a name="ln692">        *list = g_list_insert_sorted(*list, node, member_sort);</a>
+<a name="ln693">    }</a>
+<a name="ln694">}</a>
+<a name="ln695"> </a>
+<a name="ln696">static void</a>
+<a name="ln697">ais_membership_dispatch(cpg_handle_t handle,</a>
+<a name="ln698">                          const struct cpg_name *groupName,</a>
+<a name="ln699">                          uint32_t nodeid, uint32_t pid, void *msg, size_t msg_len)</a>
+<a name="ln700">{</a>
+<a name="ln701">    uint32_t kind = 0;</a>
+<a name="ln702">    const char *from = NULL;</a>
+<a name="ln703">    char *data = pcmk_message_common_cs(handle, nodeid, pid, msg, &amp;kind, &amp;from);</a>
+<a name="ln704"> </a>
+<a name="ln705">    switch (kind) {</a>
+<a name="ln706">        case crm_class_members:</a>
+<a name="ln707">        case crm_class_notify:</a>
+<a name="ln708">        case crm_class_quorum:</a>
+<a name="ln709">            break;</a>
+<a name="ln710">        default:</a>
+<a name="ln711">            free(data);</a>
+<a name="ln712">            return;</a>
+<a name="ln713"> </a>
+<a name="ln714">            break;</a>
+<a name="ln715">    }</a>
+<a name="ln716"> </a>
+<a name="ln717">    if (command == 'q') {</a>
+<a name="ln718">        if (crm_have_quorum) {</a>
+<a name="ln719">            fprintf(stdout, &quot;1\n&quot;);</a>
+<a name="ln720">        } else {</a>
+<a name="ln721">            fprintf(stdout, &quot;0\n&quot;);</a>
+<a name="ln722">        }</a>
+<a name="ln723"> </a>
+<a name="ln724">    } else if (command == 'l') {</a>
+<a name="ln725">        GList *nodes = NULL;</a>
+<a name="ln726">        GListPtr lpc = NULL;</a>
+<a name="ln727"> </a>
+<a name="ln728">        g_hash_table_foreach(crm_peer_cache, crm_add_member, &amp;nodes);</a>
+<a name="ln729">        for (lpc = nodes; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln730">            crm_node_t *node = (crm_node_t *) lpc-&gt;data;</a>
+<a name="ln731"> </a>
+<a name="ln732">            fprintf(stdout, &quot;%u %s %s\n&quot;, node-&gt;id, node-&gt;uname, node-&gt;state);</a>
+<a name="ln733">        }</a>
+<a name="ln734">        fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln735"> </a>
+<a name="ln736">    } else if (command == 'p') {</a>
+<a name="ln737">        GList *nodes = NULL;</a>
+<a name="ln738">        GListPtr lpc = NULL;</a>
+<a name="ln739"> </a>
+<a name="ln740">        g_hash_table_foreach(crm_peer_cache, crm_add_member, &amp;nodes);</a>
+<a name="ln741">        for (lpc = nodes; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln742">            crm_node_t *node = (crm_node_t *) lpc-&gt;data;</a>
+<a name="ln743"> </a>
+<a name="ln744">            if (node-&gt;uname &amp;&amp; safe_str_eq(node-&gt;state, CRM_NODE_MEMBER)) {</a>
+<a name="ln745">                fprintf(stdout, &quot;%s &quot;, node-&gt;uname);</a>
+<a name="ln746">            }</a>
+<a name="ln747">        }</a>
+<a name="ln748">        fprintf(stdout, &quot;\n&quot;);</a>
+<a name="ln749">    }</a>
+<a name="ln750"> </a>
+<a name="ln751">    free(data);</a>
+<a name="ln752">    crm_exit(pcmk_ok);</a>
+<a name="ln753"> </a>
+<a name="ln754">    return;</a>
+<a name="ln755">}</a>
+<a name="ln756">#endif</a>
+<a name="ln757"> </a>
+<a name="ln758">#ifdef SUPPORT_CS_QUORUM</a>
+<a name="ln759">#  include &lt;corosync/quorum.h&gt;</a>
+<a name="ln760">#  include &lt;corosync/cpg.h&gt;</a>
+<a name="ln761"> </a>
+<a name="ln762">static gboolean</a>
+<a name="ln763">try_corosync(int command, enum cluster_type_e stack)</a>
+<a name="ln764">{</a>
+<a name="ln765">    int rc = 0;</a>
+<a name="ln766">    int quorate = 0;</a>
+<a name="ln767">    uint32_t quorum_type = 0;</a>
+<a name="ln768">    unsigned int nodeid = 0;</a>
+<a name="ln769">    cpg_handle_t c_handle = 0;</a>
+<a name="ln770">    quorum_handle_t q_handle = 0;</a>
+<a name="ln771"> </a>
+<a name="ln772">    switch (command) {</a>
+<a name="ln773">        case 'q':</a>
+<a name="ln774">            /* Go direct to the Quorum API */</a>
+<a name="ln775">            rc = quorum_initialize(&amp;q_handle, NULL, &amp;quorum_type);</a>
+<a name="ln776">            if (rc != CS_OK) {</a>
+<a name="ln777">                crm_err(&quot;Could not connect to the Quorum API: %d&quot;, rc);</a>
+<a name="ln778">                return FALSE;</a>
+<a name="ln779">            }</a>
+<a name="ln780"> </a>
+<a name="ln781">            rc = quorum_getquorate(q_handle, &amp;quorate);</a>
+<a name="ln782">            if (rc != CS_OK) {</a>
+<a name="ln783">                crm_err(&quot;Could not obtain the current Quorum API state: %d&quot;, rc);</a>
+<a name="ln784">                return FALSE;</a>
+<a name="ln785">            }</a>
+<a name="ln786"> </a>
+<a name="ln787">            if (quorate) {</a>
+<a name="ln788">                fprintf(stdout, &quot;1\n&quot;);</a>
+<a name="ln789">            } else {</a>
+<a name="ln790">                fprintf(stdout, &quot;0\n&quot;);</a>
+<a name="ln791">            }</a>
+<a name="ln792">            quorum_finalize(q_handle);</a>
+<a name="ln793">            crm_exit(pcmk_ok);</a>
+<a name="ln794"> </a>
+<a name="ln795">        case 'i':</a>
+<a name="ln796">            /* Go direct to the CPG API */</a>
+<a name="ln797">            rc = cpg_initialize(&amp;c_handle, NULL);</a>
+<a name="ln798">            if (rc != CS_OK) {</a>
+<a name="ln799">                crm_err(&quot;Could not connect to the Cluster Process Group API: %d&quot;, rc);</a>
+<a name="ln800">                return FALSE;</a>
+<a name="ln801">            }</a>
+<a name="ln802"> </a>
+<a name="ln803">            rc = cpg_local_get(c_handle, &amp;nodeid);</a>
+<a name="ln804">            if (rc != CS_OK) {</a>
+<a name="ln805">                crm_err(&quot;Could not get local node id from the CPG API&quot;);</a>
+<a name="ln806">                return FALSE;</a>
+<a name="ln807">            }</a>
+<a name="ln808"> </a>
+<a name="ln809">            fprintf(stdout, &quot;%u\n&quot;, nodeid);</a>
+<a name="ln810">            cpg_finalize(c_handle);</a>
+<a name="ln811">            crm_exit(pcmk_ok);</a>
+<a name="ln812"> </a>
+<a name="ln813">        default:</a>
+<a name="ln814">            try_pacemaker(command, stack);</a>
+<a name="ln815">            break;</a>
+<a name="ln816">    }</a>
+<a name="ln817">    return FALSE;</a>
+<a name="ln818">}</a>
+<a name="ln819">#endif</a>
+<a name="ln820"> </a>
+<a name="ln821">#if HAVE_CONFDB</a>
+<a name="ln822">static gboolean</a>
+<a name="ln823">try_openais(int command, enum cluster_type_e stack)</a>
+<a name="ln824">{</a>
+<a name="ln825">    static crm_cluster_t cluster;</a>
+<a name="ln826"> </a>
+<a name="ln827">    cluster.destroy = ais_membership_destroy;</a>
+<a name="ln828">    cluster.cpg.cpg_deliver_fn = ais_membership_dispatch;</a>
+<a name="ln829">    cluster.cpg.cpg_confchg_fn = NULL;</a>
+<a name="ln830"> </a>
+<a name="ln831">    if (init_cs_connection_once(&amp;cluster)) {</a>
+<a name="ln832"> </a>
+<a name="ln833">        GMainLoop *amainloop = NULL;</a>
+<a name="ln834"> </a>
+<a name="ln835">        switch (command) {</a>
+<a name="ln836">            case 'R':</a>
+<a name="ln837">                send_cluster_text(crm_class_rmpeer, target_uname, TRUE, NULL, crm_msg_ais);</a>
+<a name="ln838">                cib_remove_node(0, target_uname);</a>
+<a name="ln839">                crm_exit(pcmk_ok);</a>
+<a name="ln840"> </a>
+<a name="ln841">            case 'e':</a>
+<a name="ln842">                /* Age makes no sense (yet) in an AIS cluster */</a>
+<a name="ln843">                fprintf(stdout, &quot;1\n&quot;);</a>
+<a name="ln844">                crm_exit(pcmk_ok);</a>
+<a name="ln845"> </a>
+<a name="ln846">            case 'q':</a>
+<a name="ln847">                send_cluster_text(crm_class_quorum, NULL, TRUE, NULL, crm_msg_ais);</a>
+<a name="ln848">                break;</a>
+<a name="ln849"> </a>
+<a name="ln850">            case 'l':</a>
+<a name="ln851">            case 'p':</a>
+<a name="ln852">                crm_info(&quot;Requesting the list of configured nodes&quot;);</a>
+<a name="ln853">                send_cluster_text(crm_class_members, __FUNCTION__, TRUE, NULL, crm_msg_ais);</a>
+<a name="ln854">                break;</a>
+<a name="ln855"> </a>
+<a name="ln856">            case 'i':</a>
+<a name="ln857">                printf(&quot;%u\n&quot;, cluster.nodeid);</a>
+<a name="ln858">                crm_exit(pcmk_ok);</a>
+<a name="ln859"> </a>
+<a name="ln860">            default:</a>
+<a name="ln861">                fprintf(stderr, &quot;Unknown option '%c'\n&quot;, command);</a>
+<a name="ln862">                crm_help('?', EX_USAGE);</a>
+<a name="ln863">        }</a>
+<a name="ln864">        amainloop = g_main_new(FALSE);</a>
+<a name="ln865">        g_main_run(amainloop);</a>
+<a name="ln866">    }</a>
+<a name="ln867">    return FALSE;</a>
+<a name="ln868">}</a>
+<a name="ln869">#endif</a>
+<a name="ln870"> </a>
+<a name="ln871">int set_cluster_type(enum cluster_type_e type);</a>
+<a name="ln872"> </a>
+<a name="ln873">int</a>
+<a name="ln874">main(int argc, char **argv)</a>
+<a name="ln875">{</a>
+<a name="ln876">    int flag = 0;</a>
+<a name="ln877">    int argerr = 0;</a>
+<a name="ln878">    uint32_t nodeid = 0;</a>
+<a name="ln879">    gboolean force_flag = FALSE;</a>
+<a name="ln880">    gboolean dangerous_cmd = FALSE;</a>
+<a name="ln881">    enum cluster_type_e try_stack = pcmk_cluster_unknown;</a>
+<a name="ln882"> </a>
+<a name="ln883">    int option_index = 0;</a>
+<a name="ln884"> </a>
+<a name="ln885">    crm_peer_init();</a>
+<a name="ln886">    crm_log_cli_init(&quot;crm_node&quot;);</a>
+<a name="ln887">    crm_set_options(NULL, &quot;command [options]&quot;, long_options,</a>
+<a name="ln888">                    &quot;Tool for displaying low-level node information&quot;);</a>
+<a name="ln889"> </a>
+<a name="ln890">    while (flag &gt;= 0) {</a>
+<a name="ln891">        flag = crm_get_option(argc, argv, &amp;option_index);</a>
+<a name="ln892">        switch (flag) {</a>
+<a name="ln893">            case -1:</a>
+<a name="ln894">                break;</a>
+<a name="ln895">            case 'V':</a>
+<a name="ln896">                crm_bump_log_level(argc, argv);</a>
+<a name="ln897">                break;</a>
+<a name="ln898">            case '$':</a>
+<a name="ln899">            case '?':</a>
+<a name="ln900">                crm_help(flag, EX_OK);</a>
+<a name="ln901">                break;</a>
+<a name="ln902">            case 'Q':</a>
+<a name="ln903">                do_quiet = TRUE;</a>
+<a name="ln904">                break;</a>
+<a name="ln905">            case 'H':</a>
+<a name="ln906">                set_cluster_type(pcmk_cluster_heartbeat);</a>
+<a name="ln907">                break;</a>
+<a name="ln908">            case 'A':</a>
+<a name="ln909">                set_cluster_type(pcmk_cluster_classic_ais);</a>
+<a name="ln910">                break;</a>
+<a name="ln911">            case 'C':</a>
+<a name="ln912">                set_cluster_type(pcmk_cluster_corosync);</a>
+<a name="ln913">                break;</a>
+<a name="ln914">            case 'c':</a>
+<a name="ln915">                set_cluster_type(pcmk_cluster_cman);</a>
+<a name="ln916">                break;</a>
+<a name="ln917">            case 'f':</a>
+<a name="ln918">                force_flag = TRUE;</a>
+<a name="ln919">                break;</a>
+<a name="ln920">            case 'R':</a>
+<a name="ln921">                command = flag;</a>
+<a name="ln922">                dangerous_cmd = TRUE;</a>
+<a name="ln923">                target_uname = optarg;</a>
+<a name="ln924">                break;</a>
+<a name="ln925">            case 'N':</a>
+<a name="ln926">                command = flag;</a>
+<a name="ln927">                nodeid = crm_parse_int(optarg, NULL);</a>
+<a name="ln928">                break;</a>
+<a name="ln929">            case 'p':</a>
+<a name="ln930">            case 'e':</a>
+<a name="ln931">            case 'q':</a>
+<a name="ln932">            case 'i':</a>
+<a name="ln933">            case 'l':</a>
+<a name="ln934">            case 'n':</a>
+<a name="ln935">                command = flag;</a>
+<a name="ln936">                break;</a>
+<a name="ln937">            default:</a>
+<a name="ln938">                ++argerr;</a>
+<a name="ln939">                break;</a>
+<a name="ln940">        }</a>
+<a name="ln941">    }</a>
+<a name="ln942"> </a>
+<a name="ln943">    if (optind &gt; argc) {</a>
+<a name="ln944">        ++argerr;</a>
+<a name="ln945">    }</a>
+<a name="ln946"> </a>
+<a name="ln947">    if (argerr) {</a>
+<a name="ln948">        crm_help('?', EX_USAGE);</a>
+<a name="ln949">    }</a>
+<a name="ln950"> </a>
+<a name="ln951">    if (command == 'n') {</a>
+<a name="ln952">        const char *name = getenv(&quot;OCF_RESKEY_&quot; CRM_META &quot;_&quot; XML_LRM_ATTR_TARGET);</a>
+<a name="ln953">        if(name == NULL) {</a>
+<a name="ln954">            name = get_local_node_name();</a>
+<a name="ln955">        }</a>
+<a name="ln956">        fprintf(stdout, &quot;%s\n&quot;, name);</a>
+<a name="ln957">        crm_exit(pcmk_ok);</a>
+<a name="ln958"> </a>
+<a name="ln959">    } else if (command == 'N') {</a>
+<a name="ln960">        fprintf(stdout, &quot;%s\n&quot;, get_node_name(nodeid));</a>
+<a name="ln961">        crm_exit(pcmk_ok);</a>
+<a name="ln962">    }</a>
+<a name="ln963"> </a>
+<a name="ln964">    if (dangerous_cmd &amp;&amp; force_flag == FALSE) {</a>
+<a name="ln965">        fprintf(stderr, &quot;The supplied command is considered dangerous.&quot;</a>
+<a name="ln966">                &quot;  To prevent accidental destruction of the cluster,&quot;</a>
+<a name="ln967">                &quot; the --force flag is required in order to proceed.\n&quot;);</a>
+<a name="ln968">        fflush(stderr);</a>
+<a name="ln969">        crm_exit(EINVAL);</a>
+<a name="ln970">    }</a>
+<a name="ln971"> </a>
+<a name="ln972">    try_stack = get_cluster_type();</a>
+<a name="ln973">    crm_debug(&quot;Attempting to process -%c command for cluster type: %s&quot;, command,</a>
+<a name="ln974">              name_for_cluster_type(try_stack));</a>
+<a name="ln975"> </a>
+<a name="ln976">#if SUPPORT_CMAN</a>
+<a name="ln977">    if (try_stack == pcmk_cluster_cman) {</a>
+<a name="ln978">        try_cman(command, try_stack);</a>
+<a name="ln979">    }</a>
+<a name="ln980">#endif</a>
+<a name="ln981"> </a>
+<a name="ln982">#ifdef SUPPORT_CS_QUORUM</a>
+<a name="ln983">    if (try_stack == pcmk_cluster_corosync) {</a>
+<a name="ln984">        try_corosync(command, try_stack);</a>
+<a name="ln985">    }</a>
+<a name="ln986">#endif</a>
+<a name="ln987"> </a>
+<a name="ln988">#if HAVE_CONFDB</a>
+<a name="ln989">    /* Only an option if we're using the plugins */</a>
+<a name="ln990">    if (try_stack == pcmk_cluster_classic_ais) {</a>
+<a name="ln991">        try_openais(command, try_stack);</a>
+<a name="ln992">    }</a>
+<a name="ln993">#endif</a>
+<a name="ln994"> </a>
+<a name="ln995">#if SUPPORT_HEARTBEAT</a>
+<a name="ln996">    if (try_stack == pcmk_cluster_heartbeat) {</a>
+<a name="ln997">        try_heartbeat(command, try_stack);</a>
+<a name="ln998">    }</a>
+<a name="ln999">#endif</a>
+<a name="ln1000"> </a>
+<a name="ln1001">    try_pacemaker(command, try_stack);</a>
+<a name="ln1002"> </a>
+<a name="ln1003">    return (1);</a>
+<a name="ln1004">}</a>
+
+</code></pre>
+<div class="balloon" rel="159"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'admin_uuid'. Check lines: 159, 157.</p></div>
+<div class="balloon" rel="216"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V547/" target="_blank">V547</a> Expression 'conn' is always true.</p></div>
+<div class="balloon" rel="258"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'peer'. Check lines: 258, 255.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

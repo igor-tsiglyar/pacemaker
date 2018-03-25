@@ -1,0 +1,308 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2015 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;crm/crm.h&gt;</a>
+<a name="ln25">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln26">#include &lt;crm/common/alerts_internal.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">typedef struct {</a>
+<a name="ln29">    char *name;</a>
+<a name="ln30">    char *value;</a>
+<a name="ln31">} envvar_t;</a>
+<a name="ln32"> </a>
+<a name="ln33">GListPtr crm_alert_list = NULL;</a>
+<a name="ln34">guint crm_alert_max_alert_timeout = CRM_ALERT_DEFAULT_TIMEOUT_MS;</a>
+<a name="ln35"> </a>
+<a name="ln36">/*		</a>
+<a name="ln37"> * to allow script compatibility we can have more than one		</a>
+<a name="ln38"> * set of environment variables		</a>
+<a name="ln39"> */</a>
+<a name="ln40">const char *crm_alert_keys[14][3] =		</a>
+<a name="ln41">{		</a>
+<a name="ln42">    [CRM_alert_recipient]     = {&quot;CRM_notify_recipient&quot;,     &quot;CRM_alert_recipient&quot;,     NULL},		</a>
+<a name="ln43">    [CRM_alert_node]          = {&quot;CRM_notify_node&quot;,          &quot;CRM_alert_node&quot;,          NULL},		</a>
+<a name="ln44">    [CRM_alert_nodeid]        = {&quot;CRM_notify_nodeid&quot;,        &quot;CRM_alert_nodeid&quot;,        NULL},		</a>
+<a name="ln45">    [CRM_alert_rsc]           = {&quot;CRM_notify_rsc&quot;,           &quot;CRM_alert_rsc&quot;,           NULL},		</a>
+<a name="ln46">    [CRM_alert_task]          = {&quot;CRM_notify_task&quot;,          &quot;CRM_alert_task&quot;,          NULL},		</a>
+<a name="ln47">    [CRM_alert_interval]      = {&quot;CRM_notify_interval&quot;,      &quot;CRM_alert_interval&quot;,      NULL},		</a>
+<a name="ln48">    [CRM_alert_desc]          = {&quot;CRM_notify_desc&quot;,          &quot;CRM_alert_desc&quot;,          NULL},		</a>
+<a name="ln49">    [CRM_alert_status]        = {&quot;CRM_notify_status&quot;,        &quot;CRM_alert_status&quot;,        NULL},		</a>
+<a name="ln50">    [CRM_alert_target_rc]     = {&quot;CRM_notify_target_rc&quot;,     &quot;CRM_alert_target_rc&quot;,     NULL},		</a>
+<a name="ln51">    [CRM_alert_rc]            = {&quot;CRM_notify_rc&quot;,            &quot;CRM_alert_rc&quot;,            NULL},		</a>
+<a name="ln52">    [CRM_alert_kind]          = {&quot;CRM_notify_kind&quot;,          &quot;CRM_alert_kind&quot;,          NULL},		</a>
+<a name="ln53">    [CRM_alert_version]       = {&quot;CRM_notify_version&quot;,       &quot;CRM_alert_version&quot;,       NULL},		</a>
+<a name="ln54">    [CRM_alert_node_sequence] = {&quot;CRM_notify_node_sequence&quot;, &quot;CRM_alert_node_sequence&quot;, NULL},		</a>
+<a name="ln55">    [CRM_alert_timestamp]     = {&quot;CRM_notify_timestamp&quot;,     &quot;CRM_alert_timestamp&quot;,     NULL}		</a>
+<a name="ln56">};</a>
+<a name="ln57"> </a>
+<a name="ln58">static void		</a>
+<a name="ln59">free_envvar_entry(envvar_t *entry)		</a>
+<a name="ln60">{		</a>
+<a name="ln61">    free(entry-&gt;name);		</a>
+<a name="ln62">    free(entry-&gt;value);		</a>
+<a name="ln63">    free(entry);		</a>
+<a name="ln64">}		</a>
+<a name="ln65"> </a>
+<a name="ln66">static void		</a>
+<a name="ln67">crm_free_alert_list_entry(crm_alert_entry_t *entry)		</a>
+<a name="ln68">{		</a>
+<a name="ln69">    free(entry-&gt;id);		</a>
+<a name="ln70">    free(entry-&gt;path);		</a>
+<a name="ln71">    free(entry-&gt;tstamp_format);		</a>
+<a name="ln72">    free(entry-&gt;recipient);		</a>
+<a name="ln73">    if (entry-&gt;envvars) {		</a>
+<a name="ln74">        g_list_free_full(entry-&gt;envvars,		</a>
+<a name="ln75">                         (GDestroyNotify) free_envvar_entry);		</a>
+<a name="ln76">    }		</a>
+<a name="ln77">    free(entry);		</a>
+<a name="ln78">}		</a>
+<a name="ln79"> </a>
+<a name="ln80">void		</a>
+<a name="ln81">crm_free_alert_list()		</a>
+<a name="ln82">{		</a>
+<a name="ln83">    if (crm_alert_list) {		</a>
+<a name="ln84">        g_list_free_full(crm_alert_list, (GDestroyNotify) crm_free_alert_list_entry);		</a>
+<a name="ln85">        crm_alert_list = NULL;		</a>
+<a name="ln86">    }		</a>
+<a name="ln87">}		</a>
+<a name="ln88"> </a>
+<a name="ln89">static gpointer		</a>
+<a name="ln90">copy_envvar_entry(envvar_t * src,		</a>
+<a name="ln91">                  gpointer data)		</a>
+<a name="ln92">{		</a>
+<a name="ln93">    envvar_t *dst = calloc(1, sizeof(envvar_t));		</a>
+<a name="ln94"> </a>
+<a name="ln95">    CRM_ASSERT(dst);		</a>
+<a name="ln96">    dst-&gt;name = strdup(src-&gt;name);		</a>
+<a name="ln97">    dst-&gt;value = src-&gt;value?strdup(src-&gt;value):NULL;		</a>
+<a name="ln98">    return (gpointer) dst;		</a>
+<a name="ln99">}		</a>
+<a name="ln100"> </a>
+<a name="ln101">static GListPtr		</a>
+<a name="ln102">add_dup_envvar(crm_alert_entry_t *entrys,		</a>
+<a name="ln103">               envvar_t *entry)		</a>
+<a name="ln104">{		</a>
+<a name="ln105">    entrys-&gt;envvars = g_list_prepend(entrys-&gt;envvars, copy_envvar_entry(entry, NULL));		</a>
+<a name="ln106">    return entrys-&gt;envvars;</a>
+<a name="ln107">}		</a>
+<a name="ln108"> </a>
+<a name="ln109">GListPtr		</a>
+<a name="ln110">crm_drop_envvars(crm_alert_entry_t *entry, int count)		</a>
+<a name="ln111">{		</a>
+<a name="ln112">    int i;		</a>
+<a name="ln113">		</a>
+<a name="ln114">    for (i = 0;		</a>
+<a name="ln115">         (entry-&gt;envvars) &amp;&amp; ((count &lt; 0) || (i &lt; count));		</a>
+<a name="ln116">         i++) {		</a>
+<a name="ln117">        free_envvar_entry((envvar_t *) g_list_first(entry-&gt;envvars)-&gt;data);		</a>
+<a name="ln118">        entry-&gt;envvars = g_list_delete_link(entry-&gt;envvars,		</a>
+<a name="ln119">                                         g_list_first(entry-&gt;envvars));		</a>
+<a name="ln120">    }		</a>
+<a name="ln121">    return entry-&gt;envvars;		</a>
+<a name="ln122">}		</a>
+<a name="ln123"> </a>
+<a name="ln124">static GListPtr		</a>
+<a name="ln125">copy_envvar_list_remove_dupes(crm_alert_entry_t *entry)		</a>
+<a name="ln126">{		</a>
+<a name="ln127">    GListPtr dst = NULL, ls, ld;		</a>
+<a name="ln128"> </a>
+<a name="ln129">    /* we are adding to the front so variable dupes coming via		</a>
+<a name="ln130">     * recipient-section have got precedence over those in the		</a>
+<a name="ln131">     * global section - we don't expect that many variables here		</a>
+<a name="ln132">     * that it pays off to go for a hash-table to make dupe elimination		</a>
+<a name="ln133">     * more efficient - maybe later when we might decide to do more		</a>
+<a name="ln134">     * with the variables than cycling through them		</a>
+<a name="ln135">     */		</a>
+<a name="ln136"> </a>
+<a name="ln137">    for (ls = g_list_first(entry-&gt;envvars); ls; ls = g_list_next(ls)) {		</a>
+<a name="ln138">        for (ld = g_list_first(dst); ld; ld = g_list_next(ld)) {		</a>
+<a name="ln139">            if (!strcmp(((envvar_t *)(ls-&gt;data))-&gt;name,		</a>
+<a name="ln140">                        ((envvar_t *)(ld-&gt;data))-&gt;name)) {		</a>
+<a name="ln141">                break;		</a>
+<a name="ln142">            }		</a>
+<a name="ln143">        }		</a>
+<a name="ln144">        if (!ld) {		</a>
+<a name="ln145">            dst = g_list_prepend(dst,		</a>
+<a name="ln146">                    copy_envvar_entry((envvar_t *)(ls-&gt;data), NULL));		</a>
+<a name="ln147">        }		</a>
+<a name="ln148">    }		</a>
+<a name="ln149"> </a>
+<a name="ln150">    return dst;		</a>
+<a name="ln151">}		</a>
+<a name="ln152"> </a>
+<a name="ln153">void		</a>
+<a name="ln154">crm_add_dup_alert_list_entry(crm_alert_entry_t *entry)		</a>
+<a name="ln155">{		</a>
+<a name="ln156">    crm_alert_entry_t *new_entry =		</a>
+<a name="ln157">        (crm_alert_entry_t *) calloc(1, sizeof(crm_alert_entry_t));		</a>
+<a name="ln158"> </a>
+<a name="ln159">    CRM_ASSERT(new_entry);		</a>
+<a name="ln160">    *new_entry = (crm_alert_entry_t) {		</a>
+<a name="ln161">        .id = strdup(entry-&gt;id),		</a>
+<a name="ln162">        .path = strdup(entry-&gt;path),		</a>
+<a name="ln163">        .timeout = entry-&gt;timeout,		</a>
+<a name="ln164">        .tstamp_format = entry-&gt;tstamp_format?strdup(entry-&gt;tstamp_format):NULL,		</a>
+<a name="ln165">        .recipient = entry-&gt;recipient?strdup(entry-&gt;recipient):NULL,		</a>
+<a name="ln166">        .envvars = entry-&gt;envvars?		</a>
+<a name="ln167">            copy_envvar_list_remove_dupes(entry)		</a>
+<a name="ln168">            :NULL		</a>
+<a name="ln169">    };		</a>
+<a name="ln170">    crm_alert_list = g_list_prepend(crm_alert_list, new_entry);		</a>
+<a name="ln171">}		</a>
+<a name="ln172"> </a>
+<a name="ln173">GListPtr		</a>
+<a name="ln174">crm_get_envvars_from_cib(xmlNode *basenode, crm_alert_entry_t *entry, int *count)		</a>
+<a name="ln175">{		</a>
+<a name="ln176">    xmlNode *envvar;		</a>
+<a name="ln177">    xmlNode *pair;		</a>
+<a name="ln178"> </a>
+<a name="ln179">    if ((!basenode) ||		</a>
+<a name="ln180">        (!(envvar = first_named_child(basenode, XML_TAG_ATTR_SETS)))) {		</a>
+<a name="ln181">        return entry-&gt;envvars;		</a>
+<a name="ln182">    }		</a>
+<a name="ln183"> </a>
+<a name="ln184">    for (pair = first_named_child(envvar, XML_CIB_TAG_NVPAIR);		</a>
+<a name="ln185">         pair; pair = __xml_next(pair)) {		</a>
+<a name="ln186"> </a>
+<a name="ln187">        envvar_t envvar_entry = (envvar_t) {		</a>
+<a name="ln188">            .name = (char *) crm_element_value(pair, XML_NVPAIR_ATTR_NAME),		</a>
+<a name="ln189">            .value = (char *) crm_element_value(pair, XML_NVPAIR_ATTR_VALUE)		</a>
+<a name="ln190">        };		</a>
+<a name="ln191">        crm_trace(&quot;Found environment variable %s = '%s'&quot;, envvar_entry.name,		</a>
+<a name="ln192">                  envvar_entry.value?envvar_entry.value:&quot;&quot;);		</a>
+<a name="ln193">        (*count)++;		</a>
+<a name="ln194">        add_dup_envvar(entry, &amp;envvar_entry);		</a>
+<a name="ln195">    }		</a>
+<a name="ln196"> </a>
+<a name="ln197">    return entry-&gt;envvars;		</a>
+<a name="ln198">}</a>
+<a name="ln199"> </a>
+<a name="ln200">void</a>
+<a name="ln201">crm_set_alert_key(enum crm_alert_keys_e name, const char *value)</a>
+<a name="ln202">{</a>
+<a name="ln203">    const char **key;</a>
+<a name="ln204"> </a>
+<a name="ln205">    for (key = crm_alert_keys[name]; *key; key++) {</a>
+<a name="ln206">        crm_trace(&quot;Setting alert key %s = '%s'&quot;, *key, value);</a>
+<a name="ln207">        if (value) {</a>
+<a name="ln208">            setenv(*key, value, 1);</a>
+<a name="ln209">        } else {</a>
+<a name="ln210">            unsetenv(*key);</a>
+<a name="ln211">        }</a>
+<a name="ln212">    }</a>
+<a name="ln213">}</a>
+<a name="ln214"> </a>
+<a name="ln215">void</a>
+<a name="ln216">crm_set_alert_key_int(enum crm_alert_keys_e name, int value)</a>
+<a name="ln217">{</a>
+<a name="ln218">    char *s = crm_itoa(value);</a>
+<a name="ln219"> </a>
+<a name="ln220">    crm_set_alert_key(name, s);</a>
+<a name="ln221">    free(s);</a>
+<a name="ln222">}</a>
+<a name="ln223"> </a>
+<a name="ln224">void</a>
+<a name="ln225">crm_unset_alert_keys()</a>
+<a name="ln226">{</a>
+<a name="ln227">    const char **key;</a>
+<a name="ln228">    enum crm_alert_keys_e name;</a>
+<a name="ln229"> </a>
+<a name="ln230">    for(name = 0; name &lt; DIMOF(crm_alert_keys); name++) {</a>
+<a name="ln231">        for(key = crm_alert_keys[name]; *key; key++) {</a>
+<a name="ln232">            crm_trace(&quot;Unsetting alert key %s&quot;, *key);</a>
+<a name="ln233">            unsetenv(*key);</a>
+<a name="ln234">        }</a>
+<a name="ln235">    }</a>
+<a name="ln236">}</a>
+<a name="ln237"> </a>
+<a name="ln238">void</a>
+<a name="ln239">crm_set_envvar_list(crm_alert_entry_t *entry)</a>
+<a name="ln240">{</a>
+<a name="ln241">    GListPtr l;</a>
+<a name="ln242"> </a>
+<a name="ln243">    for (l = g_list_first(entry-&gt;envvars); l; l = g_list_next(l)) {</a>
+<a name="ln244">        envvar_t *env = (envvar_t *)(l-&gt;data);</a>
+<a name="ln245"> </a>
+<a name="ln246">        crm_trace(&quot;Setting environment variable %s = '%s'&quot;, env-&gt;name,</a>
+<a name="ln247">                  env-&gt;value?env-&gt;value:&quot;&quot;);</a>
+<a name="ln248">        if (env-&gt;value) {</a>
+<a name="ln249">            setenv(env-&gt;name, env-&gt;value, 1);</a>
+<a name="ln250">        } else {</a>
+<a name="ln251">            unsetenv(env-&gt;name);</a>
+<a name="ln252">        }</a>
+<a name="ln253">    }</a>
+<a name="ln254">}</a>
+<a name="ln255"> </a>
+<a name="ln256">void</a>
+<a name="ln257">crm_unset_envvar_list(crm_alert_entry_t *entry)</a>
+<a name="ln258">{</a>
+<a name="ln259">    GListPtr l;</a>
+<a name="ln260"> </a>
+<a name="ln261">    for (l = g_list_first(entry-&gt;envvars); l; l = g_list_next(l)) {</a>
+<a name="ln262">        envvar_t *env = (envvar_t *)(l-&gt;data);</a>
+<a name="ln263"> </a>
+<a name="ln264">        crm_trace(&quot;Unsetting environment variable %s&quot;, env-&gt;name);</a>
+<a name="ln265">        unsetenv(env-&gt;name);</a>
+<a name="ln266">    }</a>
+<a name="ln267">}</a>
+
+</code></pre>
+<div class="balloon" rel="138"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The null pointer is passed into 'g_list_first' function. Inspect the first argument.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

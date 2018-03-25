@@ -1,0 +1,663 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/param.h&gt;</a>
+<a name="ln26">#include &lt;crm/crm.h&gt;</a>
+<a name="ln27">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln30">#include &lt;crm/transition.h&gt;</a>
+<a name="ln31">#include &lt;sys/stat.h&gt;</a>
+<a name="ln32"> </a>
+<a name="ln33">CRM_TRACE_INIT_DATA(transitioner);</a>
+<a name="ln34"> </a>
+<a name="ln35">gboolean (*cache_check_fn)(lrmd_rsc_info_t *rsc, const char *node_name) = NULL;</a>
+<a name="ln36"> </a>
+<a name="ln37">static crm_action_t *</a>
+<a name="ln38">unpack_action(synapse_t * parent, xmlNode * xml_action)</a>
+<a name="ln39">{</a>
+<a name="ln40">    crm_action_t *action = NULL;</a>
+<a name="ln41">    const char *value = crm_element_value(xml_action, XML_ATTR_ID);</a>
+<a name="ln42">    xmlNode *rsc_xml = NULL;</a>
+<a name="ln43"> </a>
+<a name="ln44">    if (value == NULL) {</a>
+<a name="ln45">        crm_err(&quot;Actions must have an id!&quot;);</a>
+<a name="ln46">        crm_log_xml_trace(xml_action, &quot;Action with missing id&quot;);</a>
+<a name="ln47">        return NULL;</a>
+<a name="ln48">    }</a>
+<a name="ln49"> </a>
+<a name="ln50">    action = calloc(1, sizeof(crm_action_t));</a>
+<a name="ln51">    if (action == NULL) {</a>
+<a name="ln52">        crm_perror(LOG_CRIT, &quot;Cannot unpack action&quot;);</a>
+<a name="ln53">        crm_log_xml_trace(xml_action, &quot;Lost action&quot;);</a>
+<a name="ln54">        return NULL;</a>
+<a name="ln55">    }</a>
+<a name="ln56"> </a>
+<a name="ln57">    action-&gt;id = crm_parse_int(value, NULL);</a>
+<a name="ln58">    if (action-&gt;id &gt; parent-&gt;graph-&gt;max_action_id) {</a>
+<a name="ln59">        parent-&gt;graph-&gt;max_action_id = action-&gt;id;</a>
+<a name="ln60">    }</a>
+<a name="ln61"> </a>
+<a name="ln62">    action-&gt;type = action_type_rsc;</a>
+<a name="ln63">    action-&gt;xml = copy_xml(xml_action);</a>
+<a name="ln64">    action-&gt;synapse = parent;</a>
+<a name="ln65"> </a>
+<a name="ln66">    if (safe_str_eq(crm_element_name(action-&gt;xml), XML_GRAPH_TAG_RSC_OP)) {</a>
+<a name="ln67">        action-&gt;type = action_type_rsc;</a>
+<a name="ln68"> </a>
+<a name="ln69">    } else if (safe_str_eq(crm_element_name(action-&gt;xml), XML_GRAPH_TAG_PSEUDO_EVENT)) {</a>
+<a name="ln70">        action-&gt;type = action_type_pseudo;</a>
+<a name="ln71"> </a>
+<a name="ln72">    } else if (safe_str_eq(crm_element_name(action-&gt;xml), XML_GRAPH_TAG_CRM_EVENT)) {</a>
+<a name="ln73">        action-&gt;type = action_type_crm;</a>
+<a name="ln74">    }</a>
+<a name="ln75"> </a>
+<a name="ln76">    action-&gt;params = xml2list(action-&gt;xml);</a>
+<a name="ln77"> </a>
+<a name="ln78">    value = g_hash_table_lookup(action-&gt;params, &quot;CRM_meta_timeout&quot;);</a>
+<a name="ln79">    if (value != NULL) {</a>
+<a name="ln80">        action-&gt;timeout = crm_parse_int(value, NULL);</a>
+<a name="ln81">    }</a>
+<a name="ln82"> </a>
+<a name="ln83">    /* Take start-delay into account for the timeout of the action timer */</a>
+<a name="ln84">    value = g_hash_table_lookup(action-&gt;params, &quot;CRM_meta_start_delay&quot;);</a>
+<a name="ln85">    if (value != NULL) {</a>
+<a name="ln86">        action-&gt;timeout += crm_parse_int(value, NULL);</a>
+<a name="ln87">    }</a>
+<a name="ln88"> </a>
+<a name="ln89">    value = g_hash_table_lookup(action-&gt;params, &quot;CRM_meta_interval&quot;);</a>
+<a name="ln90">    if (value != NULL) {</a>
+<a name="ln91">        action-&gt;interval = crm_parse_int(value, NULL);</a>
+<a name="ln92">    }</a>
+<a name="ln93"> </a>
+<a name="ln94">    value = g_hash_table_lookup(action-&gt;params, &quot;CRM_meta_can_fail&quot;);</a>
+<a name="ln95">    if (value != NULL) {</a>
+<a name="ln96">        crm_str_to_boolean(value, &amp;(action-&gt;can_fail));</a>
+<a name="ln97">    }</a>
+<a name="ln98"> </a>
+<a name="ln99">    crm_trace(&quot;Action %d has timer set to %dms&quot;, action-&gt;id, action-&gt;timeout);</a>
+<a name="ln100"> </a>
+<a name="ln101">    action-&gt;task = crm_element_value_copy(action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln102"> </a>
+<a name="ln103">    rsc_xml = find_xml_node(action-&gt;xml, XML_CIB_TAG_RESOURCE, FALSE);</a>
+<a name="ln104">    if (!rsc_xml) {</a>
+<a name="ln105">        return action;</a>
+<a name="ln106">    }</a>
+<a name="ln107"> </a>
+<a name="ln108">    value = crm_element_value(rsc_xml, XML_ATTR_ID_LONG);</a>
+<a name="ln109">    if (value != NULL) {</a>
+<a name="ln110">        g_hash_table_insert(action-&gt;params, strdup(XML_ATTR_ID_LONG), strdup(value));</a>
+<a name="ln111">    }</a>
+<a name="ln112"> </a>
+<a name="ln113">    action-&gt;rsc_info = calloc(1, sizeof(lrmd_rsc_info_t));</a>
+<a name="ln114">    action-&gt;rsc_info-&gt;id = crm_element_value_copy(rsc_xml, XML_ATTR_ID);</a>
+<a name="ln115">    action-&gt;rsc_info-&gt;class = crm_element_value_copy(rsc_xml, XML_AGENT_ATTR_CLASS);</a>
+<a name="ln116">    action-&gt;rsc_info-&gt;provider = crm_element_value_copy(rsc_xml, XML_AGENT_ATTR_PROVIDER);</a>
+<a name="ln117">    action-&gt;rsc_info-&gt;type = crm_element_value_copy(rsc_xml, XML_ATTR_TYPE);</a>
+<a name="ln118"> </a>
+<a name="ln119">    return action;</a>
+<a name="ln120">}</a>
+<a name="ln121"> </a>
+<a name="ln122">static synapse_t *</a>
+<a name="ln123">unpack_synapse(crm_graph_t * new_graph, xmlNode * xml_synapse)</a>
+<a name="ln124">{</a>
+<a name="ln125">    const char *value = NULL;</a>
+<a name="ln126">    xmlNode *inputs = NULL;</a>
+<a name="ln127">    xmlNode *action_set = NULL;</a>
+<a name="ln128">    synapse_t *new_synapse = NULL;</a>
+<a name="ln129"> </a>
+<a name="ln130">    CRM_CHECK(xml_synapse != NULL, return NULL);</a>
+<a name="ln131">    crm_trace(&quot;looking in synapse %s&quot;, ID(xml_synapse));</a>
+<a name="ln132"> </a>
+<a name="ln133">    new_synapse = calloc(1, sizeof(synapse_t));</a>
+<a name="ln134">    new_synapse-&gt;id = crm_parse_int(ID(xml_synapse), NULL);</a>
+<a name="ln135"> </a>
+<a name="ln136">    value = crm_element_value(xml_synapse, XML_CIB_ATTR_PRIORITY);</a>
+<a name="ln137">    if (value != NULL) {</a>
+<a name="ln138">        new_synapse-&gt;priority = crm_parse_int(value, NULL);</a>
+<a name="ln139">    }</a>
+<a name="ln140"> </a>
+<a name="ln141">    CRM_CHECK(new_synapse-&gt;id &gt;= 0, free(new_synapse);</a>
+<a name="ln142">              return NULL);</a>
+<a name="ln143"> </a>
+<a name="ln144">    new_graph-&gt;num_synapses++;</a>
+<a name="ln145"> </a>
+<a name="ln146">    new_synapse-&gt;graph = new_graph;</a>
+<a name="ln147"> </a>
+<a name="ln148">    crm_trace(&quot;look for actions in synapse %s&quot;, crm_element_value(xml_synapse, XML_ATTR_ID));</a>
+<a name="ln149"> </a>
+<a name="ln150">    for (action_set = __xml_first_child(xml_synapse); action_set != NULL;</a>
+<a name="ln151">         action_set = __xml_next(action_set)) {</a>
+<a name="ln152">        if (crm_str_eq((const char *)action_set-&gt;name, &quot;action_set&quot;, TRUE)) {</a>
+<a name="ln153">            xmlNode *action = NULL;</a>
+<a name="ln154"> </a>
+<a name="ln155">            for (action = __xml_first_child(action_set); action != NULL;</a>
+<a name="ln156">                 action = __xml_next(action)) {</a>
+<a name="ln157">                crm_action_t *new_action = unpack_action(new_synapse, action);</a>
+<a name="ln158"> </a>
+<a name="ln159">                if (new_action == NULL) {</a>
+<a name="ln160">                    continue;</a>
+<a name="ln161">                }</a>
+<a name="ln162"> </a>
+<a name="ln163">                new_graph-&gt;num_actions++;</a>
+<a name="ln164"> </a>
+<a name="ln165">                crm_trace(&quot;Adding action %d to synapse %d&quot;, new_action-&gt;id, new_synapse-&gt;id);</a>
+<a name="ln166"> </a>
+<a name="ln167">                new_synapse-&gt;actions = g_list_append(new_synapse-&gt;actions, new_action);</a>
+<a name="ln168">            }</a>
+<a name="ln169">        }</a>
+<a name="ln170">    }</a>
+<a name="ln171"> </a>
+<a name="ln172">    crm_trace(&quot;look for inputs in synapse %s&quot;, ID(xml_synapse));</a>
+<a name="ln173"> </a>
+<a name="ln174">    for (inputs = __xml_first_child(xml_synapse); inputs != NULL; inputs = __xml_next(inputs)) {</a>
+<a name="ln175">        if (crm_str_eq((const char *)inputs-&gt;name, &quot;inputs&quot;, TRUE)) {</a>
+<a name="ln176">            xmlNode *trigger = NULL;</a>
+<a name="ln177"> </a>
+<a name="ln178">            for (trigger = __xml_first_child(inputs); trigger != NULL;</a>
+<a name="ln179">                 trigger = __xml_next(trigger)) {</a>
+<a name="ln180">                xmlNode *input = NULL;</a>
+<a name="ln181"> </a>
+<a name="ln182">                for (input = __xml_first_child(trigger); input != NULL; input = __xml_next(input)) {</a>
+<a name="ln183">                    crm_action_t *new_input = unpack_action(new_synapse, input);</a>
+<a name="ln184"> </a>
+<a name="ln185">                    if (new_input == NULL) {</a>
+<a name="ln186">                        continue;</a>
+<a name="ln187">                    }</a>
+<a name="ln188"> </a>
+<a name="ln189">                    crm_trace(&quot;Adding input %d to synapse %d&quot;, new_input-&gt;id, new_synapse-&gt;id);</a>
+<a name="ln190"> </a>
+<a name="ln191">                    new_synapse-&gt;inputs = g_list_append(new_synapse-&gt;inputs, new_input);</a>
+<a name="ln192">                }</a>
+<a name="ln193">            }</a>
+<a name="ln194">        }</a>
+<a name="ln195">    }</a>
+<a name="ln196"> </a>
+<a name="ln197">    return new_synapse;</a>
+<a name="ln198">}</a>
+<a name="ln199"> </a>
+<a name="ln200">static char *</a>
+<a name="ln201">generate_metadata_key(lrmd_rsc_info_t *rsc, const char *node)</a>
+<a name="ln202">{</a>
+<a name="ln203">    char *ra_key = NULL;</a>
+<a name="ln204">    char *result = NULL;</a>
+<a name="ln205"> </a>
+<a name="ln206">    if (!rsc) {</a>
+<a name="ln207">        return NULL;</a>
+<a name="ln208">    }</a>
+<a name="ln209"> </a>
+<a name="ln210">    ra_key = crm_generate_ra_key(rsc-&gt;class, rsc-&gt;provider, rsc-&gt;type);</a>
+<a name="ln211">    result = crm_concat(ra_key, node, '_');</a>
+<a name="ln212">    free(ra_key);</a>
+<a name="ln213"> </a>
+<a name="ln214">    return result;</a>
+<a name="ln215">}</a>
+<a name="ln216"> </a>
+<a name="ln217">static gboolean</a>
+<a name="ln218">has_injected_metadata_for(crm_action_t *action, GHashTable *injected_metadata)</a>
+<a name="ln219">{</a>
+<a name="ln220">    const char *node = NULL;</a>
+<a name="ln221">    char *key = NULL;</a>
+<a name="ln222">    gboolean result = FALSE;</a>
+<a name="ln223"> </a>
+<a name="ln224">    CRM_CHECK(action, return FALSE);</a>
+<a name="ln225"> </a>
+<a name="ln226">    node = crm_meta_value(action-&gt;params, XML_LRM_ATTR_TARGET);</a>
+<a name="ln227">    key = generate_metadata_key(action-&gt;rsc_info, node);</a>
+<a name="ln228"> </a>
+<a name="ln229">    if (!key) {</a>
+<a name="ln230">        return FALSE;</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    result = g_hash_table_lookup(injected_metadata, key) != NULL;</a>
+<a name="ln234">    free(key);</a>
+<a name="ln235"> </a>
+<a name="ln236">    return result;</a>
+<a name="ln237">}</a>
+<a name="ln238"> </a>
+<a name="ln239">static gboolean</a>
+<a name="ln240">has_cached_metadata_for(crm_action_t *action)</a>
+<a name="ln241">{</a>
+<a name="ln242">    const char *node = NULL;</a>
+<a name="ln243"> </a>
+<a name="ln244">    CRM_CHECK(action, return FALSE);</a>
+<a name="ln245"> </a>
+<a name="ln246">    if (!action-&gt;rsc_info || !cache_check_fn) {</a>
+<a name="ln247">        return FALSE;</a>
+<a name="ln248">    }</a>
+<a name="ln249"> </a>
+<a name="ln250">    node = crm_meta_value(action-&gt;params, XML_LRM_ATTR_TARGET);</a>
+<a name="ln251"> </a>
+<a name="ln252">    return cache_check_fn(action-&gt;rsc_info, node);</a>
+<a name="ln253">}</a>
+<a name="ln254"> </a>
+<a name="ln255">static void destroy_action(crm_action_t * action);</a>
+<a name="ln256"> </a>
+<a name="ln257">static GListPtr</a>
+<a name="ln258">prepend_probe_action(GListPtr actions, synapse_t *synapse)</a>
+<a name="ln259">{</a>
+<a name="ln260">    GListPtr lpc;</a>
+<a name="ln261"> </a>
+<a name="ln262">    for (lpc = synapse-&gt;actions; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln263">        crm_action_t *action = (crm_action_t *) lpc-&gt;data;</a>
+<a name="ln264"> </a>
+<a name="ln265">        if (action-&gt;type == action_type_rsc &amp;&amp; action-&gt;interval == 0 &amp;&amp;</a>
+<a name="ln266">            safe_str_eq(action-&gt;task, RSC_STATUS)) {</a>
+<a name="ln267">                actions = g_list_prepend(actions, action);</a>
+<a name="ln268">        }</a>
+<a name="ln269">    }</a>
+<a name="ln270"> </a>
+<a name="ln271">    return actions;</a>
+<a name="ln272">}</a>
+<a name="ln273"> </a>
+<a name="ln274">static GListPtr</a>
+<a name="ln275">prepend_start_action(GListPtr actions, synapse_t *synapse)</a>
+<a name="ln276">{</a>
+<a name="ln277">    GListPtr lpc;</a>
+<a name="ln278"> </a>
+<a name="ln279">    for (lpc = synapse-&gt;actions; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln280">        crm_action_t *action = (crm_action_t *) lpc-&gt;data;</a>
+<a name="ln281"> </a>
+<a name="ln282">        if (action-&gt;type == action_type_rsc &amp;&amp; safe_str_eq(action-&gt;task, RSC_START)) {</a>
+<a name="ln283">            actions = g_list_prepend(actions, action);</a>
+<a name="ln284">        }</a>
+<a name="ln285">    }</a>
+<a name="ln286"> </a>
+<a name="ln287">    return actions;</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">static GListPtr</a>
+<a name="ln291">prepend_other_action(GListPtr actions, synapse_t *synapse, GHashTable *injected)</a>
+<a name="ln292">{</a>
+<a name="ln293">    GListPtr lpc;</a>
+<a name="ln294"> </a>
+<a name="ln295">    for (lpc = synapse-&gt;actions; lpc != NULL; lpc = lpc-&gt;next) {</a>
+<a name="ln296">        crm_action_t *action = (crm_action_t *) lpc-&gt;data;</a>
+<a name="ln297"> </a>
+<a name="ln298">        if (action-&gt;type == action_type_rsc &amp;&amp; !has_cached_metadata_for(action) &amp;&amp;</a>
+<a name="ln299">                !has_injected_metadata_for(action, injected)) {</a>
+<a name="ln300">            actions = g_list_prepend(actions, action);</a>
+<a name="ln301">        }</a>
+<a name="ln302">    }</a>
+<a name="ln303"> </a>
+<a name="ln304">    return actions;</a>
+<a name="ln305">}</a>
+<a name="ln306"> </a>
+<a name="ln307">static void</a>
+<a name="ln308">inject_metadata(crm_action_t *action, GHashTable *injected)</a>
+<a name="ln309">{</a>
+<a name="ln310">    crm_action_t *new_input = NULL;</a>
+<a name="ln311">    synapse_t *new_synapse = NULL;</a>
+<a name="ln312">    xmlNode *synapse = NULL;</a>
+<a name="ln313">    xmlNode *action_set = NULL;</a>
+<a name="ln314">    xmlNode *op = NULL;</a>
+<a name="ln315">    xmlNode *rsc = NULL;</a>
+<a name="ln316">    xmlNode *attrs = NULL;</a>
+<a name="ln317">    char *key = NULL;</a>
+<a name="ln318">    const char *long_id = NULL;</a>
+<a name="ln319">    const char *node = NULL;</a>
+<a name="ln320">    const char *node_uuid = NULL;</a>
+<a name="ln321">    crm_graph_t *graph = NULL;</a>
+<a name="ln322"> </a>
+<a name="ln323">    CRM_CHECK(action, return);</a>
+<a name="ln324"> </a>
+<a name="ln325">    if (!action-&gt;rsc_info) {</a>
+<a name="ln326">        return;</a>
+<a name="ln327">    }</a>
+<a name="ln328"> </a>
+<a name="ln329">    graph = action-&gt;synapse-&gt;graph;</a>
+<a name="ln330"> </a>
+<a name="ln331">    key = generate_op_key(action-&gt;rsc_info-&gt;id, RSC_METADATA, 0);</a>
+<a name="ln332"> </a>
+<a name="ln333">    node = crm_meta_value(action-&gt;params, XML_LRM_ATTR_TARGET);</a>
+<a name="ln334">    node_uuid = crm_meta_value(action-&gt;params, XML_LRM_ATTR_TARGET_UUID);</a>
+<a name="ln335"> </a>
+<a name="ln336">    synapse = create_xml_node(NULL, &quot;synapse&quot;);</a>
+<a name="ln337">    // graph-&gt;num_synapses will be incremented later when whe synapse is unpacked</a>
+<a name="ln338">    crm_xml_add_int(synapse, XML_ATTR_ID, graph-&gt;num_synapses);</a>
+<a name="ln339"> </a>
+<a name="ln340">    action_set = create_xml_node(synapse, &quot;action_set&quot;);</a>
+<a name="ln341"> </a>
+<a name="ln342">    op = create_xml_node(action_set, XML_GRAPH_TAG_RSC_OP);</a>
+<a name="ln343">    crm_xml_add_int(op, XML_ATTR_ID, graph-&gt;max_action_id + 1);</a>
+<a name="ln344">    crm_xml_add(op, XML_LRM_ATTR_TASK, RSC_METADATA);</a>
+<a name="ln345">    crm_xml_add(op, XML_LRM_ATTR_TARGET, node);</a>
+<a name="ln346">    crm_xml_add(op, XML_LRM_ATTR_TARGET_UUID, node_uuid);</a>
+<a name="ln347">    crm_xml_add(op, XML_LRM_ATTR_TASK_KEY, key);</a>
+<a name="ln348">    free(key);</a>
+<a name="ln349"> </a>
+<a name="ln350">    rsc = create_xml_node(op, XML_CIB_TAG_RESOURCE);</a>
+<a name="ln351">    crm_xml_add(rsc, XML_ATTR_ID, action-&gt;rsc_info-&gt;id);</a>
+<a name="ln352">    crm_xml_add(rsc, XML_AGENT_ATTR_CLASS, action-&gt;rsc_info-&gt;class);</a>
+<a name="ln353">    crm_xml_add(rsc, XML_AGENT_ATTR_PROVIDER, action-&gt;rsc_info-&gt;provider);</a>
+<a name="ln354">    crm_xml_add(rsc, XML_ATTR_TYPE, action-&gt;rsc_info-&gt;type);</a>
+<a name="ln355"> </a>
+<a name="ln356">    long_id = g_hash_table_lookup(action-&gt;params, XML_ATTR_ID_LONG);</a>
+<a name="ln357">    if (long_id) {</a>
+<a name="ln358">        crm_xml_add(rsc, XML_ATTR_ID_LONG, long_id);</a>
+<a name="ln359">    }</a>
+<a name="ln360"> </a>
+<a name="ln361">    attrs = create_xml_node(op, XML_TAG_ATTRS);</a>
+<a name="ln362">    crm_xml_add_int(attrs, CRM_META &quot;_&quot; XML_ATTR_TIMEOUT, CRMD_METADATA_CALL_TIMEOUT);</a>
+<a name="ln363">    crm_xml_add(attrs, CRM_META &quot;_&quot; XML_LRM_ATTR_TARGET, node);</a>
+<a name="ln364">    crm_xml_add(attrs, CRM_META &quot;_&quot; XML_LRM_ATTR_TARGET_UUID, node_uuid);</a>
+<a name="ln365">    crm_xml_add(attrs, XML_ATTR_CRM_VERSION, g_hash_table_lookup(action-&gt;params, XML_ATTR_CRM_VERSION));</a>
+<a name="ln366">    crm_xml_add(attrs, &quot;CRM_meta_on_fail&quot;, &quot;ignore&quot;);</a>
+<a name="ln367">    crm_xml_add(attrs, &quot;CRM_meta_can_fail&quot;, &quot;true&quot;);</a>
+<a name="ln368"> </a>
+<a name="ln369">    new_input = unpack_action(action-&gt;synapse, op);</a>
+<a name="ln370">    if (!new_input) {</a>
+<a name="ln371">        free_xml(synapse);</a>
+<a name="ln372">        return;</a>
+<a name="ln373">    }</a>
+<a name="ln374"> </a>
+<a name="ln375">    new_synapse = unpack_synapse(graph, synapse);</a>
+<a name="ln376">    free_xml(synapse);</a>
+<a name="ln377"> </a>
+<a name="ln378">    if (!new_synapse) {</a>
+<a name="ln379">        destroy_action(new_input);</a>
+<a name="ln380">        return;</a>
+<a name="ln381">    }</a>
+<a name="ln382"> </a>
+<a name="ln383">    action-&gt;synapse-&gt;inputs = g_list_append(action-&gt;synapse-&gt;inputs, new_input);</a>
+<a name="ln384"> </a>
+<a name="ln385">    graph-&gt;synapses = g_list_prepend(graph-&gt;synapses, new_synapse);</a>
+<a name="ln386"> </a>
+<a name="ln387">    key = generate_metadata_key(action-&gt;rsc_info, node);</a>
+<a name="ln388"> </a>
+<a name="ln389">    if (!key) {</a>
+<a name="ln390">        return;</a>
+<a name="ln391">    }</a>
+<a name="ln392"> </a>
+<a name="ln393">    g_hash_table_replace(injected, key, key);</a>
+<a name="ln394">}</a>
+<a name="ln395"> </a>
+<a name="ln396">static void</a>
+<a name="ln397">inject_metadata_for(GListPtr actions, GHashTable *injected)</a>
+<a name="ln398">{</a>
+<a name="ln399">    GListPtr iter;</a>
+<a name="ln400"> </a>
+<a name="ln401">    for (iter = actions; iter != NULL; iter = iter-&gt;next) {</a>
+<a name="ln402">        crm_action_t *action = (crm_action_t *) iter-&gt;data;</a>
+<a name="ln403"> </a>
+<a name="ln404">        if (!has_injected_metadata_for(action, injected)) {</a>
+<a name="ln405">            inject_metadata(action, injected);</a>
+<a name="ln406">        }</a>
+<a name="ln407">    }</a>
+<a name="ln408">}</a>
+<a name="ln409"> </a>
+<a name="ln410">crm_graph_t *</a>
+<a name="ln411">unpack_graph(xmlNode * xml_graph, const char *reference)</a>
+<a name="ln412">{</a>
+<a name="ln413">/*</a>
+<a name="ln414">  &lt;transition_graph&gt;</a>
+<a name="ln415">  &lt;synapse&gt;</a>
+<a name="ln416">  &lt;action_set&gt;</a>
+<a name="ln417">  &lt;rsc_op id=&quot;2&quot;</a>
+<a name="ln418">  ...</a>
+<a name="ln419">  &lt;inputs&gt;</a>
+<a name="ln420">  &lt;rsc_op id=&quot;2&quot;</a>
+<a name="ln421">  ...</a>
+<a name="ln422">*/</a>
+<a name="ln423">    crm_graph_t *new_graph = NULL;</a>
+<a name="ln424">    const char *t_id = NULL;</a>
+<a name="ln425">    const char *time = NULL;</a>
+<a name="ln426">    xmlNode *synapse = NULL;</a>
+<a name="ln427">    GListPtr sIter = NULL;</a>
+<a name="ln428">    GListPtr start_actions = NULL;</a>
+<a name="ln429">    GListPtr probe_actions = NULL;</a>
+<a name="ln430">    GListPtr other_actions = NULL;</a>
+<a name="ln431">    GHashTable *injected = NULL;</a>
+<a name="ln432"> </a>
+<a name="ln433">    new_graph = calloc(1, sizeof(crm_graph_t));</a>
+<a name="ln434"> </a>
+<a name="ln435">    new_graph-&gt;id = -1;</a>
+<a name="ln436">    new_graph-&gt;abort_priority = 0;</a>
+<a name="ln437">    new_graph-&gt;network_delay = -1;</a>
+<a name="ln438">    new_graph-&gt;transition_timeout = -1;</a>
+<a name="ln439">    new_graph-&gt;stonith_timeout = -1;</a>
+<a name="ln440">    new_graph-&gt;completion_action = tg_done;</a>
+<a name="ln441">    new_graph-&gt;max_action_id = 0;</a>
+<a name="ln442"> </a>
+<a name="ln443">    if (reference) {</a>
+<a name="ln444">        new_graph-&gt;source = strdup(reference);</a>
+<a name="ln445">    } else {</a>
+<a name="ln446">        new_graph-&gt;source = strdup(&quot;unknown&quot;);</a>
+<a name="ln447">    }</a>
+<a name="ln448"> </a>
+<a name="ln449">    if (xml_graph != NULL) {</a>
+<a name="ln450">        t_id = crm_element_value(xml_graph, &quot;transition_id&quot;);</a>
+<a name="ln451">        CRM_CHECK(t_id != NULL, free(new_graph);</a>
+<a name="ln452">                  return NULL);</a>
+<a name="ln453">        new_graph-&gt;id = crm_parse_int(t_id, &quot;-1&quot;);</a>
+<a name="ln454"> </a>
+<a name="ln455">        time = crm_element_value(xml_graph, &quot;cluster-delay&quot;);</a>
+<a name="ln456">        CRM_CHECK(time != NULL, free(new_graph);</a>
+<a name="ln457">                  return NULL);</a>
+<a name="ln458">        new_graph-&gt;network_delay = crm_get_msec(time);</a>
+<a name="ln459"> </a>
+<a name="ln460">        time = crm_element_value(xml_graph, &quot;stonith-timeout&quot;);</a>
+<a name="ln461">        if (time == NULL) {</a>
+<a name="ln462">            new_graph-&gt;stonith_timeout = new_graph-&gt;network_delay;</a>
+<a name="ln463">        } else {</a>
+<a name="ln464">            new_graph-&gt;stonith_timeout = crm_get_msec(time);</a>
+<a name="ln465">        }</a>
+<a name="ln466"> </a>
+<a name="ln467">        t_id = crm_element_value(xml_graph, &quot;batch-limit&quot;);</a>
+<a name="ln468">        new_graph-&gt;batch_limit = crm_parse_int(t_id, &quot;0&quot;);</a>
+<a name="ln469"> </a>
+<a name="ln470">        t_id = crm_element_value(xml_graph, &quot;migration-limit&quot;);</a>
+<a name="ln471">        new_graph-&gt;migration_limit = crm_parse_int(t_id, &quot;-1&quot;);</a>
+<a name="ln472">    }</a>
+<a name="ln473"> </a>
+<a name="ln474">    for (synapse = __xml_first_child(xml_graph); synapse != NULL; synapse = __xml_next(synapse)) {</a>
+<a name="ln475">        if (crm_str_eq((const char *)synapse-&gt;name, &quot;synapse&quot;, TRUE)) {</a>
+<a name="ln476">            synapse_t *new_synapse = unpack_synapse(new_graph, synapse);</a>
+<a name="ln477"> </a>
+<a name="ln478">            if (new_synapse != NULL) {</a>
+<a name="ln479">                new_graph-&gt;synapses = g_list_append(new_graph-&gt;synapses, new_synapse);</a>
+<a name="ln480">                probe_actions = prepend_probe_action(probe_actions, new_synapse);</a>
+<a name="ln481">                start_actions = prepend_start_action(start_actions, new_synapse);</a>
+<a name="ln482">            }</a>
+<a name="ln483">        }</a>
+<a name="ln484">    }</a>
+<a name="ln485"> </a>
+<a name="ln486">    injected = g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, NULL);</a>
+<a name="ln487"> </a>
+<a name="ln488">    inject_metadata_for(probe_actions, injected);</a>
+<a name="ln489">    inject_metadata_for(start_actions, injected);</a>
+<a name="ln490"> </a>
+<a name="ln491">    for (sIter = new_graph-&gt;synapses; sIter != NULL; sIter = sIter-&gt;next) {</a>
+<a name="ln492">        synapse_t *synapse = (synapse_t*) sIter-&gt;data;</a>
+<a name="ln493"> </a>
+<a name="ln494">        other_actions = prepend_other_action(other_actions, synapse, injected);</a>
+<a name="ln495">    }</a>
+<a name="ln496"> </a>
+<a name="ln497">    inject_metadata_for(other_actions, injected);</a>
+<a name="ln498"> </a>
+<a name="ln499">    g_hash_table_destroy(injected);</a>
+<a name="ln500">    g_list_free(start_actions);</a>
+<a name="ln501">    g_list_free(probe_actions);</a>
+<a name="ln502">    g_list_free(other_actions);</a>
+<a name="ln503"> </a>
+<a name="ln504">    crm_debug(&quot;Unpacked transition %d: %d actions in %d synapses&quot;,</a>
+<a name="ln505">              new_graph-&gt;id, new_graph-&gt;num_actions, new_graph-&gt;num_synapses);</a>
+<a name="ln506"> </a>
+<a name="ln507">    return new_graph;</a>
+<a name="ln508">}</a>
+<a name="ln509"> </a>
+<a name="ln510">static void</a>
+<a name="ln511">destroy_action(crm_action_t * action)</a>
+<a name="ln512">{</a>
+<a name="ln513">    if (action-&gt;timer &amp;&amp; action-&gt;timer-&gt;source_id != 0) {</a>
+<a name="ln514">        crm_warn(&quot;Cancelling timer for action %d (src=%d)&quot;, action-&gt;id, action-&gt;timer-&gt;source_id);</a>
+<a name="ln515">        g_source_remove(action-&gt;timer-&gt;source_id);</a>
+<a name="ln516">    }</a>
+<a name="ln517">    if (action-&gt;params) {</a>
+<a name="ln518">        g_hash_table_destroy(action-&gt;params);</a>
+<a name="ln519">    }</a>
+<a name="ln520">    free_xml(action-&gt;xml);</a>
+<a name="ln521">    free(action-&gt;timer);</a>
+<a name="ln522">    free(action-&gt;task);</a>
+<a name="ln523">    lrmd_free_rsc_info(action-&gt;rsc_info);</a>
+<a name="ln524">    free(action);</a>
+<a name="ln525">}</a>
+<a name="ln526"> </a>
+<a name="ln527">static void</a>
+<a name="ln528">destroy_synapse(synapse_t * synapse)</a>
+<a name="ln529">{</a>
+<a name="ln530">    while (g_list_length(synapse-&gt;actions) &gt; 0) {</a>
+<a name="ln531">        crm_action_t *action = g_list_nth_data(synapse-&gt;actions, 0);</a>
+<a name="ln532"> </a>
+<a name="ln533">        synapse-&gt;actions = g_list_remove(synapse-&gt;actions, action);</a>
+<a name="ln534">        destroy_action(action);</a>
+<a name="ln535">    }</a>
+<a name="ln536"> </a>
+<a name="ln537">    while (g_list_length(synapse-&gt;inputs) &gt; 0) {</a>
+<a name="ln538">        crm_action_t *action = g_list_nth_data(synapse-&gt;inputs, 0);</a>
+<a name="ln539"> </a>
+<a name="ln540">        synapse-&gt;inputs = g_list_remove(synapse-&gt;inputs, action);</a>
+<a name="ln541">        destroy_action(action);</a>
+<a name="ln542">    }</a>
+<a name="ln543">    free(synapse);</a>
+<a name="ln544">}</a>
+<a name="ln545"> </a>
+<a name="ln546">void</a>
+<a name="ln547">destroy_graph(crm_graph_t * graph)</a>
+<a name="ln548">{</a>
+<a name="ln549">    if (graph == NULL) {</a>
+<a name="ln550">        return;</a>
+<a name="ln551">    }</a>
+<a name="ln552">    while (g_list_length(graph-&gt;synapses) &gt; 0) {</a>
+<a name="ln553">        synapse_t *synapse = g_list_nth_data(graph-&gt;synapses, 0);</a>
+<a name="ln554"> </a>
+<a name="ln555">        graph-&gt;synapses = g_list_remove(graph-&gt;synapses, synapse);</a>
+<a name="ln556">        destroy_synapse(synapse);</a>
+<a name="ln557">    }</a>
+<a name="ln558"> </a>
+<a name="ln559">    free(graph-&gt;source);</a>
+<a name="ln560">    free(graph);</a>
+<a name="ln561">}</a>
+<a name="ln562"> </a>
+<a name="ln563">lrmd_event_data_t *</a>
+<a name="ln564">convert_graph_action(xmlNode * resource, crm_action_t * action, int status, int rc)</a>
+<a name="ln565">{</a>
+<a name="ln566">    xmlNode *xop = NULL;</a>
+<a name="ln567">    lrmd_event_data_t *op = NULL;</a>
+<a name="ln568">    GHashTableIter iter;</a>
+<a name="ln569">    const char *name = NULL;</a>
+<a name="ln570">    const char *value = NULL;</a>
+<a name="ln571">    xmlNode *action_resource = NULL;</a>
+<a name="ln572"> </a>
+<a name="ln573">    CRM_CHECK(action != NULL, return NULL);</a>
+<a name="ln574">    CRM_CHECK(action-&gt;type == action_type_rsc, return NULL);</a>
+<a name="ln575"> </a>
+<a name="ln576">    action_resource = first_named_child(action-&gt;xml, XML_CIB_TAG_RESOURCE);</a>
+<a name="ln577">    CRM_CHECK(action_resource != NULL, crm_log_xml_warn(action-&gt;xml, &quot;Bad&quot;);</a>
+<a name="ln578">              return NULL);</a>
+<a name="ln579"> </a>
+<a name="ln580">    op = calloc(1, sizeof(lrmd_event_data_t));</a>
+<a name="ln581"> </a>
+<a name="ln582">    op-&gt;rsc_id = strdup(ID(action_resource));</a>
+<a name="ln583">    op-&gt;interval = action-&gt;interval;</a>
+<a name="ln584">    op-&gt;op_type = strdup(action-&gt;task);</a>
+<a name="ln585"> </a>
+<a name="ln586">    op-&gt;rc = rc;</a>
+<a name="ln587">    op-&gt;op_status = status;</a>
+<a name="ln588">    op-&gt;t_run = time(NULL);</a>
+<a name="ln589">    op-&gt;t_rcchange = op-&gt;t_run;</a>
+<a name="ln590"> </a>
+<a name="ln591">    op-&gt;params = g_hash_table_new_full(crm_str_hash, g_str_equal,</a>
+<a name="ln592">                                       g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln593"> </a>
+<a name="ln594">    g_hash_table_iter_init(&amp;iter, action-&gt;params);</a>
+<a name="ln595">    while (g_hash_table_iter_next(&amp;iter, (void **)&amp;name, (void **)&amp;value)) {</a>
+<a name="ln596">        if (safe_str_eq(name, XML_ATTR_ID_LONG)) {</a>
+<a name="ln597">            continue;</a>
+<a name="ln598">        }</a>
+<a name="ln599"> </a>
+<a name="ln600">        g_hash_table_insert(op-&gt;params, strdup(name), strdup(value));</a>
+<a name="ln601">    }</a>
+<a name="ln602"> </a>
+<a name="ln603">    for (xop = __xml_first_child(resource); xop != NULL; xop = __xml_next(xop)) {</a>
+<a name="ln604">        int tmp = 0;</a>
+<a name="ln605"> </a>
+<a name="ln606">        crm_element_value_int(xop, XML_LRM_ATTR_CALLID, &amp;tmp);</a>
+<a name="ln607">        crm_debug(&quot;Got call_id=%d for %s&quot;, tmp, ID(resource));</a>
+<a name="ln608">        if (tmp &gt; op-&gt;call_id) {</a>
+<a name="ln609">            op-&gt;call_id = tmp;</a>
+<a name="ln610">        }</a>
+<a name="ln611">    }</a>
+<a name="ln612"> </a>
+<a name="ln613">    op-&gt;call_id++;</a>
+<a name="ln614">    return op;</a>
+<a name="ln615">}</a>
+
+</code></pre>
+<div class="balloon" rel="110"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 110, 110.</p></div>
+<div class="balloon" rel="114"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'action->rsc_info'. Check lines: 114, 113.</p></div>
+<div class="balloon" rel="134"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_synapse'. Check lines: 134, 133.</p></div>
+<div class="balloon" rel="141"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (new_synapse->id >= 0) == (0).</p></div>
+<div class="balloon" rel="393"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V549/" target="_blank">V549</a> The second argument of 'g_hash_table_replace' function is equal to the third argument.</p></div>
+<div class="balloon" rel="435"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'new_graph'. Check lines: 435, 433.</p></div>
+<div class="balloon" rel="582"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op'. Check lines: 582, 580.</p></div>
+<div class="balloon" rel="600"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 600, 600.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

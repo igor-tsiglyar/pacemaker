@@ -1,0 +1,316 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;stdio.h&gt;</a>
+<a name="ln25">#include &lt;string.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">/*</a>
+<a name="ln28"> * From xpath2.c</a>
+<a name="ln29"> *</a>
+<a name="ln30"> * All the elements returned by an XPath query are pointers to</a>
+<a name="ln31"> * elements from the tree *except* namespace nodes where the XPath</a>
+<a name="ln32"> * semantic is different from the implementation in libxml2 tree.</a>
+<a name="ln33"> * As a result when a returned node set is freed when</a>
+<a name="ln34"> * xmlXPathFreeObject() is called, that routine must check the</a>
+<a name="ln35"> * element type. But node from the returned set may have been removed</a>
+<a name="ln36"> * by xmlNodeSetContent() resulting in access to freed data.</a>
+<a name="ln37"> *</a>
+<a name="ln38"> * This can be exercised by running</a>
+<a name="ln39"> *       valgrind xpath2 test3.xml '//discarded' discarded</a>
+<a name="ln40"> *</a>
+<a name="ln41"> * There is 2 ways around it:</a>
+<a name="ln42"> *   - make a copy of the pointers to the nodes from the result set</a>
+<a name="ln43"> *     then call xmlXPathFreeObject() and then modify the nodes</a>
+<a name="ln44"> * or</a>
+<a name="ln45"> * - remove the references from the node set, if they are not</a>
+<a name="ln46">       namespace nodes, before calling xmlXPathFreeObject().</a>
+<a name="ln47"> */</a>
+<a name="ln48">void</a>
+<a name="ln49">freeXpathObject(xmlXPathObjectPtr xpathObj)</a>
+<a name="ln50">{</a>
+<a name="ln51">    int lpc, max = numXpathResults(xpathObj);</a>
+<a name="ln52"> </a>
+<a name="ln53">    if (xpathObj == NULL) {</a>
+<a name="ln54">        return;</a>
+<a name="ln55">    }</a>
+<a name="ln56"> </a>
+<a name="ln57">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln58">        if (xpathObj-&gt;nodesetval-&gt;nodeTab[lpc] &amp;&amp; xpathObj-&gt;nodesetval-&gt;nodeTab[lpc]-&gt;type != XML_NAMESPACE_DECL) {</a>
+<a name="ln59">            xpathObj-&gt;nodesetval-&gt;nodeTab[lpc] = NULL;</a>
+<a name="ln60">        }</a>
+<a name="ln61">    }</a>
+<a name="ln62"> </a>
+<a name="ln63">    /* _Now_ it's safe to free it */</a>
+<a name="ln64">    xmlXPathFreeObject(xpathObj);</a>
+<a name="ln65">}</a>
+<a name="ln66"> </a>
+<a name="ln67">xmlNode *</a>
+<a name="ln68">getXpathResult(xmlXPathObjectPtr xpathObj, int index)</a>
+<a name="ln69">{</a>
+<a name="ln70">    xmlNode *match = NULL;</a>
+<a name="ln71">    int max = numXpathResults(xpathObj);</a>
+<a name="ln72"> </a>
+<a name="ln73">    CRM_CHECK(index &gt;= 0, return NULL);</a>
+<a name="ln74">    CRM_CHECK(xpathObj != NULL, return NULL);</a>
+<a name="ln75"> </a>
+<a name="ln76">    if (index &gt;= max) {</a>
+<a name="ln77">        crm_err(&quot;Requested index %d of only %d items&quot;, index, max);</a>
+<a name="ln78">        return NULL;</a>
+<a name="ln79"> </a>
+<a name="ln80">    } else if(xpathObj-&gt;nodesetval-&gt;nodeTab[index] == NULL) {</a>
+<a name="ln81">        /* Previously requested */</a>
+<a name="ln82">        return NULL;</a>
+<a name="ln83">    }</a>
+<a name="ln84"> </a>
+<a name="ln85">    match = xpathObj-&gt;nodesetval-&gt;nodeTab[index];</a>
+<a name="ln86">    CRM_CHECK(match != NULL, return NULL);</a>
+<a name="ln87"> </a>
+<a name="ln88">    if (xpathObj-&gt;nodesetval-&gt;nodeTab[index]-&gt;type != XML_NAMESPACE_DECL) {</a>
+<a name="ln89">        /* See the comment for freeXpathObject() */</a>
+<a name="ln90">        xpathObj-&gt;nodesetval-&gt;nodeTab[index] = NULL;</a>
+<a name="ln91">    }</a>
+<a name="ln92"> </a>
+<a name="ln93">    if (match-&gt;type == XML_DOCUMENT_NODE) {</a>
+<a name="ln94">        /* Will happen if section = '/' */</a>
+<a name="ln95">        match = match-&gt;children;</a>
+<a name="ln96"> </a>
+<a name="ln97">    } else if (match-&gt;type != XML_ELEMENT_NODE</a>
+<a name="ln98">               &amp;&amp; match-&gt;parent &amp;&amp; match-&gt;parent-&gt;type == XML_ELEMENT_NODE) {</a>
+<a name="ln99">        /* Return the parent instead */</a>
+<a name="ln100">        match = match-&gt;parent;</a>
+<a name="ln101"> </a>
+<a name="ln102">    } else if (match-&gt;type != XML_ELEMENT_NODE) {</a>
+<a name="ln103">        /* We only support searching nodes */</a>
+<a name="ln104">        crm_err(&quot;We only support %d not %d&quot;, XML_ELEMENT_NODE, match-&gt;type);</a>
+<a name="ln105">        match = NULL;</a>
+<a name="ln106">    }</a>
+<a name="ln107">    return match;</a>
+<a name="ln108">}</a>
+<a name="ln109"> </a>
+<a name="ln110">void</a>
+<a name="ln111">dedupXpathResults(xmlXPathObjectPtr xpathObj)</a>
+<a name="ln112">{</a>
+<a name="ln113">    int lpc, max = numXpathResults(xpathObj);</a>
+<a name="ln114"> </a>
+<a name="ln115">    if (xpathObj == NULL) {</a>
+<a name="ln116">        return;</a>
+<a name="ln117">    }</a>
+<a name="ln118"> </a>
+<a name="ln119">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln120">        xmlNode *xml = NULL;</a>
+<a name="ln121">        gboolean dedup = FALSE;</a>
+<a name="ln122"> </a>
+<a name="ln123">        if (xpathObj-&gt;nodesetval-&gt;nodeTab[lpc] == NULL) {</a>
+<a name="ln124">            continue;</a>
+<a name="ln125">        }</a>
+<a name="ln126"> </a>
+<a name="ln127">        xml = xpathObj-&gt;nodesetval-&gt;nodeTab[lpc]-&gt;parent;</a>
+<a name="ln128"> </a>
+<a name="ln129">        for (; xml; xml = xml-&gt;parent) {</a>
+<a name="ln130">            int lpc2 = 0;</a>
+<a name="ln131"> </a>
+<a name="ln132">            for (lpc2 = 0; lpc2 &lt; max; lpc2++) {</a>
+<a name="ln133">                if (xpathObj-&gt;nodesetval-&gt;nodeTab[lpc2] == xml) {</a>
+<a name="ln134">                    xpathObj-&gt;nodesetval-&gt;nodeTab[lpc] = NULL;</a>
+<a name="ln135">                    dedup = TRUE;</a>
+<a name="ln136">                    break;</a>
+<a name="ln137">                }</a>
+<a name="ln138">            }</a>
+<a name="ln139"> </a>
+<a name="ln140">            if (dedup) {</a>
+<a name="ln141">                break;</a>
+<a name="ln142">            }</a>
+<a name="ln143">        }</a>
+<a name="ln144">    }</a>
+<a name="ln145">}</a>
+<a name="ln146"> </a>
+<a name="ln147">/* the caller needs to check if the result contains a xmlDocPtr or xmlNodePtr */</a>
+<a name="ln148">xmlXPathObjectPtr</a>
+<a name="ln149">xpath_search(xmlNode * xml_top, const char *path)</a>
+<a name="ln150">{</a>
+<a name="ln151">    xmlDocPtr doc = NULL;</a>
+<a name="ln152">    xmlXPathObjectPtr xpathObj = NULL;</a>
+<a name="ln153">    xmlXPathContextPtr xpathCtx = NULL;</a>
+<a name="ln154">    const xmlChar *xpathExpr = (const xmlChar *)path;</a>
+<a name="ln155"> </a>
+<a name="ln156">    CRM_CHECK(path != NULL, return NULL);</a>
+<a name="ln157">    CRM_CHECK(xml_top != NULL, return NULL);</a>
+<a name="ln158">    CRM_CHECK(strlen(path) &gt; 0, return NULL);</a>
+<a name="ln159"> </a>
+<a name="ln160">    doc = getDocPtr(xml_top);</a>
+<a name="ln161"> </a>
+<a name="ln162">    xpathCtx = xmlXPathNewContext(doc);</a>
+<a name="ln163">    CRM_ASSERT(xpathCtx != NULL);</a>
+<a name="ln164"> </a>
+<a name="ln165">    xpathObj = xmlXPathEvalExpression(xpathExpr, xpathCtx);</a>
+<a name="ln166">    xmlXPathFreeContext(xpathCtx);</a>
+<a name="ln167">    return xpathObj;</a>
+<a name="ln168">}</a>
+<a name="ln169"> </a>
+<a name="ln170">/*!</a>
+<a name="ln171"> * \brief Run a supplied function for each result of an xpath search</a>
+<a name="ln172"> *</a>
+<a name="ln173"> * \param[in] xml            XML to search</a>
+<a name="ln174"> * \param[in] xpath          XPath search string</a>
+<a name="ln175"> * \param[in] helper         Function to call for each result</a>
+<a name="ln176"> * \param[in/out] user_data  Data to pass to supplied function</a>
+<a name="ln177"> *</a>
+<a name="ln178"> * \note The helper function will be passed the XML node of the result,</a>
+<a name="ln179"> *       and the supplied user_data. This function does not otherwise</a>
+<a name="ln180"> *       use user_data.</a>
+<a name="ln181"> */</a>
+<a name="ln182">void</a>
+<a name="ln183">crm_foreach_xpath_result(xmlNode *xml, const char *xpath,</a>
+<a name="ln184">                         void (*helper)(xmlNode*, void*), void *user_data)</a>
+<a name="ln185">{</a>
+<a name="ln186">    xmlXPathObjectPtr xpathObj = xpath_search(xml, xpath);</a>
+<a name="ln187">    int nresults = numXpathResults(xpathObj);</a>
+<a name="ln188">    int i;</a>
+<a name="ln189"> </a>
+<a name="ln190">    for (i = 0; i &lt; nresults; i++) {</a>
+<a name="ln191">        xmlNode *result = getXpathResult(xpathObj, i);</a>
+<a name="ln192"> </a>
+<a name="ln193">        CRM_LOG_ASSERT(result != NULL);</a>
+<a name="ln194">        if (result) {</a>
+<a name="ln195">            (*helper)(result, user_data);</a>
+<a name="ln196">        }</a>
+<a name="ln197">    }</a>
+<a name="ln198">    freeXpathObject(xpathObj);</a>
+<a name="ln199">}</a>
+<a name="ln200"> </a>
+<a name="ln201">xmlNode *</a>
+<a name="ln202">get_xpath_object_relative(const char *xpath, xmlNode * xml_obj, int error_level)</a>
+<a name="ln203">{</a>
+<a name="ln204">    int len = 0;</a>
+<a name="ln205">    xmlNode *result = NULL;</a>
+<a name="ln206">    char *xpath_full = NULL;</a>
+<a name="ln207">    char *xpath_prefix = NULL;</a>
+<a name="ln208"> </a>
+<a name="ln209">    if (xml_obj == NULL || xpath == NULL) {</a>
+<a name="ln210">        return NULL;</a>
+<a name="ln211">    }</a>
+<a name="ln212"> </a>
+<a name="ln213">    xpath_prefix = (char *)xmlGetNodePath(xml_obj);</a>
+<a name="ln214"> </a>
+<a name="ln215">    len = strlen(xpath_prefix) + strlen(xpath) + 1;</a>
+<a name="ln216">    xpath_full = malloc(len);</a>
+<a name="ln217">    strcpy(xpath_full, xpath_prefix);</a>
+<a name="ln218">    strcat(xpath_full, xpath);</a>
+<a name="ln219"> </a>
+<a name="ln220">    result = get_xpath_object(xpath_full, xml_obj, error_level);</a>
+<a name="ln221"> </a>
+<a name="ln222">    free(xpath_prefix);</a>
+<a name="ln223">    free(xpath_full);</a>
+<a name="ln224">    return result;</a>
+<a name="ln225">}</a>
+<a name="ln226"> </a>
+<a name="ln227">xmlNode *</a>
+<a name="ln228">get_xpath_object(const char *xpath, xmlNode * xml_obj, int error_level)</a>
+<a name="ln229">{</a>
+<a name="ln230">    int max;</a>
+<a name="ln231">    xmlNode *result = NULL;</a>
+<a name="ln232">    xmlXPathObjectPtr xpathObj = NULL;</a>
+<a name="ln233">    char *nodePath = NULL;</a>
+<a name="ln234">    char *matchNodePath = NULL;</a>
+<a name="ln235"> </a>
+<a name="ln236">    if (xpath == NULL) {</a>
+<a name="ln237">        return xml_obj;         /* or return NULL? */</a>
+<a name="ln238">    }</a>
+<a name="ln239"> </a>
+<a name="ln240">    xpathObj = xpath_search(xml_obj, xpath);</a>
+<a name="ln241">    nodePath = (char *)xmlGetNodePath(xml_obj);</a>
+<a name="ln242">    max = numXpathResults(xpathObj);</a>
+<a name="ln243"> </a>
+<a name="ln244">    if (max &lt; 1) {</a>
+<a name="ln245">        do_crm_log(error_level, &quot;No match for %s in %s&quot;, xpath, crm_str(nodePath));</a>
+<a name="ln246">        crm_log_xml_explicit(xml_obj, &quot;Unexpected Input&quot;);</a>
+<a name="ln247"> </a>
+<a name="ln248">    } else if (max &gt; 1) {</a>
+<a name="ln249">        int lpc = 0;</a>
+<a name="ln250"> </a>
+<a name="ln251">        do_crm_log(error_level, &quot;Too many matches for %s in %s&quot;, xpath, crm_str(nodePath));</a>
+<a name="ln252"> </a>
+<a name="ln253">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln254">            xmlNode *match = getXpathResult(xpathObj, lpc);</a>
+<a name="ln255"> </a>
+<a name="ln256">            CRM_LOG_ASSERT(match != NULL);</a>
+<a name="ln257">            if(match != NULL) {</a>
+<a name="ln258">                matchNodePath = (char *)xmlGetNodePath(match);</a>
+<a name="ln259">                do_crm_log(error_level, &quot;%s[%d] = %s&quot;, xpath, lpc, crm_str(matchNodePath));</a>
+<a name="ln260">                free(matchNodePath);</a>
+<a name="ln261">            }</a>
+<a name="ln262">        }</a>
+<a name="ln263">        crm_log_xml_explicit(xml_obj, &quot;Bad Input&quot;);</a>
+<a name="ln264"> </a>
+<a name="ln265">    } else {</a>
+<a name="ln266">        result = getXpathResult(xpathObj, 0);</a>
+<a name="ln267">    }</a>
+<a name="ln268"> </a>
+<a name="ln269">    freeXpathObject(xpathObj);</a>
+<a name="ln270">    free(nodePath);</a>
+<a name="ln271"> </a>
+<a name="ln272">    return result;</a>
+<a name="ln273">}</a>
+
+</code></pre>
+<div class="balloon" rel="73"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (index >= 0) == (0).</p></div>
+<div class="balloon" rel="158"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0: (strlen(path) > 0) == (0).</p></div>
+<div class="balloon" rel="217"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strcpy' function. Inspect the first argument. Check lines: 217, 216.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

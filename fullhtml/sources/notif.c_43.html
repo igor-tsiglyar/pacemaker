@@ -1,0 +1,791 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;allocate.h&gt;</a>
+<a name="ln25">#include &lt;notif.h&gt;</a>
+<a name="ln26">#include &lt;utils.h&gt;</a>
+<a name="ln27"> </a>
+<a name="ln28">typedef struct notify_entry_s {</a>
+<a name="ln29">    resource_t *rsc;</a>
+<a name="ln30">    node_t *node;</a>
+<a name="ln31">} notify_entry_t;</a>
+<a name="ln32"> </a>
+<a name="ln33">static gint</a>
+<a name="ln34">sort_notify_entries(gconstpointer a, gconstpointer b)</a>
+<a name="ln35">{</a>
+<a name="ln36">    int tmp;</a>
+<a name="ln37">    const notify_entry_t *entry_a = a;</a>
+<a name="ln38">    const notify_entry_t *entry_b = b;</a>
+<a name="ln39"> </a>
+<a name="ln40">    if (entry_a == NULL &amp;&amp; entry_b == NULL) {</a>
+<a name="ln41">        return 0;</a>
+<a name="ln42">    }</a>
+<a name="ln43">    if (entry_a == NULL) {</a>
+<a name="ln44">        return 1;</a>
+<a name="ln45">    }</a>
+<a name="ln46">    if (entry_b == NULL) {</a>
+<a name="ln47">        return -1;</a>
+<a name="ln48">    }</a>
+<a name="ln49"> </a>
+<a name="ln50">    if (entry_a-&gt;rsc == NULL &amp;&amp; entry_b-&gt;rsc == NULL) {</a>
+<a name="ln51">        return 0;</a>
+<a name="ln52">    }</a>
+<a name="ln53">    if (entry_a-&gt;rsc == NULL) {</a>
+<a name="ln54">        return 1;</a>
+<a name="ln55">    }</a>
+<a name="ln56">    if (entry_b-&gt;rsc == NULL) {</a>
+<a name="ln57">        return -1;</a>
+<a name="ln58">    }</a>
+<a name="ln59"> </a>
+<a name="ln60">    tmp = strcmp(entry_a-&gt;rsc-&gt;id, entry_b-&gt;rsc-&gt;id);</a>
+<a name="ln61">    if (tmp != 0) {</a>
+<a name="ln62">        return tmp;</a>
+<a name="ln63">    }</a>
+<a name="ln64"> </a>
+<a name="ln65">    if (entry_a-&gt;node == NULL &amp;&amp; entry_b-&gt;node == NULL) {</a>
+<a name="ln66">        return 0;</a>
+<a name="ln67">    }</a>
+<a name="ln68">    if (entry_a-&gt;node == NULL) {</a>
+<a name="ln69">        return 1;</a>
+<a name="ln70">    }</a>
+<a name="ln71">    if (entry_b-&gt;node == NULL) {</a>
+<a name="ln72">        return -1;</a>
+<a name="ln73">    }</a>
+<a name="ln74"> </a>
+<a name="ln75">    return strcmp(entry_a-&gt;node-&gt;details-&gt;id, entry_b-&gt;node-&gt;details-&gt;id);</a>
+<a name="ln76">}</a>
+<a name="ln77"> </a>
+<a name="ln78">static notify_entry_t *dup_notify_entry(notify_entry_t *entry)</a>
+<a name="ln79">{</a>
+<a name="ln80">    notify_entry_t *dup = malloc(sizeof(notify_entry_t));</a>
+<a name="ln81"> </a>
+<a name="ln82">    CRM_ASSERT(dup != NULL);</a>
+<a name="ln83">    dup-&gt;rsc = entry-&gt;rsc;</a>
+<a name="ln84">    dup-&gt;node = entry-&gt;node;</a>
+<a name="ln85">    return dup;</a>
+<a name="ln86">}</a>
+<a name="ln87"> </a>
+<a name="ln88">static char *</a>
+<a name="ln89">expand_node_list(GListPtr list)</a>
+<a name="ln90">{</a>
+<a name="ln91">    GListPtr gIter = NULL;</a>
+<a name="ln92">    char *node_list = NULL;</a>
+<a name="ln93"> </a>
+<a name="ln94">    if (list == NULL) {</a>
+<a name="ln95">        return strdup(&quot; &quot;);</a>
+<a name="ln96">    }</a>
+<a name="ln97"> </a>
+<a name="ln98">    for (gIter = list; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln99">        node_t *node = (node_t *) gIter-&gt;data;</a>
+<a name="ln100"> </a>
+<a name="ln101">        if (node-&gt;details-&gt;uname) {</a>
+<a name="ln102">            int existing_len = 0;</a>
+<a name="ln103">            int len = 2 + strlen(node-&gt;details-&gt;uname);</a>
+<a name="ln104"> </a>
+<a name="ln105">            if(node_list) {</a>
+<a name="ln106">                existing_len = strlen(node_list);</a>
+<a name="ln107">            }</a>
+<a name="ln108">            crm_trace(&quot;Adding %s (%dc) at offset %d&quot;, node-&gt;details-&gt;uname, len - 2, existing_len);</a>
+<a name="ln109">            node_list = realloc_safe(node_list, len + existing_len);</a>
+<a name="ln110">            sprintf(node_list + existing_len, &quot;%s%s&quot;, existing_len == 0 ? &quot;&quot;:&quot; &quot;, node-&gt;details-&gt;uname);</a>
+<a name="ln111">        }</a>
+<a name="ln112">    }</a>
+<a name="ln113"> </a>
+<a name="ln114">    return node_list;</a>
+<a name="ln115">}</a>
+<a name="ln116"> </a>
+<a name="ln117">static void</a>
+<a name="ln118">expand_list(GListPtr list, char **rsc_list, char **node_list)</a>
+<a name="ln119">{</a>
+<a name="ln120">    GListPtr gIter = NULL;</a>
+<a name="ln121">    const char *uname = NULL;</a>
+<a name="ln122">    const char *rsc_id = NULL;</a>
+<a name="ln123">    const char *last_rsc_id = NULL;</a>
+<a name="ln124"> </a>
+<a name="ln125">    if (rsc_list) {</a>
+<a name="ln126">        *rsc_list = NULL;</a>
+<a name="ln127">    }</a>
+<a name="ln128"> </a>
+<a name="ln129">    if (list == NULL) {</a>
+<a name="ln130">        if (rsc_list) {</a>
+<a name="ln131">            *rsc_list = strdup(&quot; &quot;);</a>
+<a name="ln132">        }</a>
+<a name="ln133">        if (node_list) {</a>
+<a name="ln134">            *node_list = strdup(&quot; &quot;);</a>
+<a name="ln135">        }</a>
+<a name="ln136">        return;</a>
+<a name="ln137">    }</a>
+<a name="ln138"> </a>
+<a name="ln139">    if (node_list) {</a>
+<a name="ln140">        *node_list = NULL;</a>
+<a name="ln141">    }</a>
+<a name="ln142"> </a>
+<a name="ln143">    for (gIter = list; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln144">        notify_entry_t *entry = (notify_entry_t *) gIter-&gt;data;</a>
+<a name="ln145"> </a>
+<a name="ln146">        CRM_LOG_ASSERT(entry != NULL);</a>
+<a name="ln147">        CRM_LOG_ASSERT(entry &amp;&amp; entry-&gt;rsc != NULL);</a>
+<a name="ln148"> </a>
+<a name="ln149">        if(entry == NULL || entry-&gt;rsc == NULL) {</a>
+<a name="ln150">            continue;</a>
+<a name="ln151">        }</a>
+<a name="ln152"> </a>
+<a name="ln153">        /* Uh, why? */</a>
+<a name="ln154">        CRM_LOG_ASSERT(node_list == NULL || entry-&gt;node != NULL);</a>
+<a name="ln155">        if(node_list != NULL &amp;&amp; entry-&gt;node == NULL) {</a>
+<a name="ln156">            continue;</a>
+<a name="ln157">        }</a>
+<a name="ln158"> </a>
+<a name="ln159">        uname = NULL;</a>
+<a name="ln160">        rsc_id = entry-&gt;rsc-&gt;id;</a>
+<a name="ln161">        CRM_ASSERT(rsc_id != NULL);</a>
+<a name="ln162"> </a>
+<a name="ln163">        /* filter dups */</a>
+<a name="ln164">        if (safe_str_eq(rsc_id, last_rsc_id)) {</a>
+<a name="ln165">            continue;</a>
+<a name="ln166">        }</a>
+<a name="ln167">        last_rsc_id = rsc_id;</a>
+<a name="ln168"> </a>
+<a name="ln169">        if (rsc_list != NULL) {</a>
+<a name="ln170">            int existing_len = 0;</a>
+<a name="ln171">            int len = 2 + strlen(rsc_id);       /* +1 space, +1 EOS */</a>
+<a name="ln172"> </a>
+<a name="ln173">            if (rsc_list &amp;&amp; *rsc_list) {</a>
+<a name="ln174">                existing_len = strlen(*rsc_list);</a>
+<a name="ln175">            }</a>
+<a name="ln176"> </a>
+<a name="ln177">            crm_trace(&quot;Adding %s (%dc) at offset %d&quot;, rsc_id, len - 2, existing_len);</a>
+<a name="ln178">            *rsc_list = realloc_safe(*rsc_list, len + existing_len);</a>
+<a name="ln179">            sprintf(*rsc_list + existing_len, &quot;%s%s&quot;, existing_len == 0 ? &quot;&quot;:&quot; &quot;, rsc_id);</a>
+<a name="ln180">        }</a>
+<a name="ln181"> </a>
+<a name="ln182">        if (entry-&gt;node != NULL) {</a>
+<a name="ln183">            uname = entry-&gt;node-&gt;details-&gt;uname;</a>
+<a name="ln184">        }</a>
+<a name="ln185"> </a>
+<a name="ln186">        if (node_list != NULL &amp;&amp; uname) {</a>
+<a name="ln187">            int existing_len = 0;</a>
+<a name="ln188">            int len = 2 + strlen(uname);</a>
+<a name="ln189"> </a>
+<a name="ln190">            if (node_list &amp;&amp; *node_list) {</a>
+<a name="ln191">                existing_len = strlen(*node_list);</a>
+<a name="ln192">            }</a>
+<a name="ln193"> </a>
+<a name="ln194">            crm_trace(&quot;Adding %s (%dc) at offset %d&quot;, uname, len - 2, existing_len);</a>
+<a name="ln195">            *node_list = realloc_safe(*node_list, len + existing_len);</a>
+<a name="ln196">            sprintf(*node_list + existing_len, &quot;%s%s&quot;, existing_len == 0 ? &quot;&quot;:&quot; &quot;, uname);</a>
+<a name="ln197">        }</a>
+<a name="ln198">    }</a>
+<a name="ln199"> </a>
+<a name="ln200">}</a>
+<a name="ln201"> </a>
+<a name="ln202">static void</a>
+<a name="ln203">dup_attr(gpointer key, gpointer value, gpointer user_data)</a>
+<a name="ln204">{</a>
+<a name="ln205">    add_hash_param(user_data, key, value);</a>
+<a name="ln206">}</a>
+<a name="ln207"> </a>
+<a name="ln208">static action_t *</a>
+<a name="ln209">pe_notify(resource_t * rsc, node_t * node, action_t * op, action_t * confirm,</a>
+<a name="ln210">          notify_data_t * n_data, pe_working_set_t * data_set)</a>
+<a name="ln211">{</a>
+<a name="ln212">    char *key = NULL;</a>
+<a name="ln213">    action_t *trigger = NULL;</a>
+<a name="ln214">    const char *value = NULL;</a>
+<a name="ln215">    const char *task = NULL;</a>
+<a name="ln216"> </a>
+<a name="ln217">    if (op == NULL || confirm == NULL) {</a>
+<a name="ln218">        pe_rsc_trace(rsc, &quot;Op=%p confirm=%p&quot;, op, confirm);</a>
+<a name="ln219">        return NULL;</a>
+<a name="ln220">    }</a>
+<a name="ln221"> </a>
+<a name="ln222">    CRM_CHECK(rsc != NULL, return NULL);</a>
+<a name="ln223">    CRM_CHECK(node != NULL, return NULL);</a>
+<a name="ln224"> </a>
+<a name="ln225">    if (node-&gt;details-&gt;online == FALSE) {</a>
+<a name="ln226">        pe_rsc_trace(rsc, &quot;Skipping notification for %s: node offline&quot;, rsc-&gt;id);</a>
+<a name="ln227">        return NULL;</a>
+<a name="ln228">    } else if (is_set(op-&gt;flags, pe_action_runnable) == FALSE) {</a>
+<a name="ln229">        pe_rsc_trace(rsc, &quot;Skipping notification for %s: not runnable&quot;, op-&gt;uuid);</a>
+<a name="ln230">        return NULL;</a>
+<a name="ln231">    }</a>
+<a name="ln232"> </a>
+<a name="ln233">    value = g_hash_table_lookup(op-&gt;meta, &quot;notify_type&quot;);</a>
+<a name="ln234">    task = g_hash_table_lookup(op-&gt;meta, &quot;notify_operation&quot;);</a>
+<a name="ln235"> </a>
+<a name="ln236">    pe_rsc_trace(rsc, &quot;Creating notify actions for %s: %s (%s-%s)&quot;, op-&gt;uuid, rsc-&gt;id, value, task);</a>
+<a name="ln237"> </a>
+<a name="ln238">    key = generate_notify_key(rsc-&gt;id, value, task);</a>
+<a name="ln239">    trigger = custom_action(rsc, key, op-&gt;task, node,</a>
+<a name="ln240">                            is_set(op-&gt;flags, pe_action_optional), TRUE, data_set);</a>
+<a name="ln241">    g_hash_table_foreach(op-&gt;meta, dup_attr, trigger-&gt;meta);</a>
+<a name="ln242">    g_hash_table_foreach(n_data-&gt;keys, dup_attr, trigger-&gt;meta);</a>
+<a name="ln243"> </a>
+<a name="ln244">    /* pseudo_notify before notify */</a>
+<a name="ln245">    pe_rsc_trace(rsc, &quot;Ordering %s before %s (%d-&gt;%d)&quot;, op-&gt;uuid, trigger-&gt;uuid, trigger-&gt;id,</a>
+<a name="ln246">                 op-&gt;id);</a>
+<a name="ln247"> </a>
+<a name="ln248">    order_actions(op, trigger, pe_order_optional);</a>
+<a name="ln249">    order_actions(trigger, confirm, pe_order_optional);</a>
+<a name="ln250">    return trigger;</a>
+<a name="ln251">}</a>
+<a name="ln252"> </a>
+<a name="ln253">static void</a>
+<a name="ln254">pe_post_notify(resource_t * rsc, node_t * node, notify_data_t * n_data, pe_working_set_t * data_set)</a>
+<a name="ln255">{</a>
+<a name="ln256">    action_t *notify = NULL;</a>
+<a name="ln257"> </a>
+<a name="ln258">    CRM_CHECK(rsc != NULL, return);</a>
+<a name="ln259"> </a>
+<a name="ln260">    if (n_data-&gt;post == NULL) {</a>
+<a name="ln261">        return;                 /* Nothing to do */</a>
+<a name="ln262">    }</a>
+<a name="ln263"> </a>
+<a name="ln264">    notify = pe_notify(rsc, node, n_data-&gt;post, n_data-&gt;post_done, n_data, data_set);</a>
+<a name="ln265"> </a>
+<a name="ln266">    if (notify != NULL) {</a>
+<a name="ln267">        notify-&gt;priority = INFINITY;</a>
+<a name="ln268">    }</a>
+<a name="ln269"> </a>
+<a name="ln270">    if (n_data-&gt;post_done) {</a>
+<a name="ln271">        GListPtr gIter = rsc-&gt;actions;</a>
+<a name="ln272"> </a>
+<a name="ln273">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln274">            action_t *mon = (action_t *) gIter-&gt;data;</a>
+<a name="ln275">            const char *interval = g_hash_table_lookup(mon-&gt;meta, &quot;interval&quot;);</a>
+<a name="ln276"> </a>
+<a name="ln277">            if (interval == NULL || safe_str_eq(interval, &quot;0&quot;)) {</a>
+<a name="ln278">                pe_rsc_trace(rsc, &quot;Skipping %s: interval&quot;, mon-&gt;uuid);</a>
+<a name="ln279">                continue;</a>
+<a name="ln280">            } else if (safe_str_eq(mon-&gt;task, RSC_CANCEL)) {</a>
+<a name="ln281">                pe_rsc_trace(rsc, &quot;Skipping %s: cancel&quot;, mon-&gt;uuid);</a>
+<a name="ln282">                continue;</a>
+<a name="ln283">            }</a>
+<a name="ln284"> </a>
+<a name="ln285">            order_actions(n_data-&gt;post_done, mon, pe_order_optional);</a>
+<a name="ln286">        }</a>
+<a name="ln287">    }</a>
+<a name="ln288">}</a>
+<a name="ln289"> </a>
+<a name="ln290">notify_data_t *</a>
+<a name="ln291">create_notification_boundaries(resource_t * rsc, const char *action, action_t * start,</a>
+<a name="ln292">                               action_t * end, pe_working_set_t * data_set)</a>
+<a name="ln293">{</a>
+<a name="ln294">    /* Create the pseudo ops that precede and follow the actual notifications */</a>
+<a name="ln295"> </a>
+<a name="ln296">    /*</a>
+<a name="ln297">     * Creates two sequences (conditional on start and end being supplied):</a>
+<a name="ln298">     *   pre_notify -&gt; pre_notify_complete -&gt; start, and</a>
+<a name="ln299">     *   end -&gt; post_notify -&gt; post_notify_complete</a>
+<a name="ln300">     *</a>
+<a name="ln301">     * 'start' and 'end' may be the same event or ${X} and ${X}ed as per clones</a>
+<a name="ln302">     */</a>
+<a name="ln303">    char *key = NULL;</a>
+<a name="ln304">    notify_data_t *n_data = NULL;</a>
+<a name="ln305"> </a>
+<a name="ln306">    if (is_not_set(rsc-&gt;flags, pe_rsc_notify)) {</a>
+<a name="ln307">        return NULL;</a>
+<a name="ln308">    }</a>
+<a name="ln309"> </a>
+<a name="ln310">    n_data = calloc(1, sizeof(notify_data_t));</a>
+<a name="ln311">    n_data-&gt;action = action;</a>
+<a name="ln312">    n_data-&gt;keys =</a>
+<a name="ln313">        g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln314"> </a>
+<a name="ln315">    if (start) {</a>
+<a name="ln316">        /* create pre-event notification wrappers */</a>
+<a name="ln317">        key = generate_notify_key(rsc-&gt;id, &quot;pre&quot;, start-&gt;task);</a>
+<a name="ln318">        n_data-&gt;pre =</a>
+<a name="ln319">            custom_action(rsc, key, RSC_NOTIFY, NULL, is_set(start-&gt;flags, pe_action_optional),</a>
+<a name="ln320">                          TRUE, data_set);</a>
+<a name="ln321"> </a>
+<a name="ln322">        update_action_flags(n_data-&gt;pre, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln323">        update_action_flags(n_data-&gt;pre, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln324"> </a>
+<a name="ln325">        add_hash_param(n_data-&gt;pre-&gt;meta, &quot;notify_type&quot;, &quot;pre&quot;);</a>
+<a name="ln326">        add_hash_param(n_data-&gt;pre-&gt;meta, &quot;notify_operation&quot;, n_data-&gt;action);</a>
+<a name="ln327"> </a>
+<a name="ln328">        add_hash_param(n_data-&gt;pre-&gt;meta, &quot;notify_key_type&quot;, &quot;pre&quot;);</a>
+<a name="ln329">        add_hash_param(n_data-&gt;pre-&gt;meta, &quot;notify_key_operation&quot;, start-&gt;task);</a>
+<a name="ln330"> </a>
+<a name="ln331">        /* create pre_notify_complete */</a>
+<a name="ln332">        key = generate_notify_key(rsc-&gt;id, &quot;confirmed-pre&quot;, start-&gt;task);</a>
+<a name="ln333">        n_data-&gt;pre_done =</a>
+<a name="ln334">            custom_action(rsc, key, RSC_NOTIFIED, NULL, is_set(start-&gt;flags, pe_action_optional),</a>
+<a name="ln335">                          TRUE, data_set);</a>
+<a name="ln336"> </a>
+<a name="ln337">        update_action_flags(n_data-&gt;pre_done, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln338">        update_action_flags(n_data-&gt;pre_done, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln339"> </a>
+<a name="ln340">        add_hash_param(n_data-&gt;pre_done-&gt;meta, &quot;notify_type&quot;, &quot;pre&quot;);</a>
+<a name="ln341">        add_hash_param(n_data-&gt;pre_done-&gt;meta, &quot;notify_operation&quot;, n_data-&gt;action);</a>
+<a name="ln342"> </a>
+<a name="ln343">        add_hash_param(n_data-&gt;pre_done-&gt;meta, &quot;notify_key_type&quot;, &quot;confirmed-pre&quot;);</a>
+<a name="ln344">        add_hash_param(n_data-&gt;pre_done-&gt;meta, &quot;notify_key_operation&quot;, start-&gt;task);</a>
+<a name="ln345"> </a>
+<a name="ln346">        order_actions(n_data-&gt;pre_done, start, pe_order_optional);</a>
+<a name="ln347">        order_actions(n_data-&gt;pre, n_data-&gt;pre_done, pe_order_optional);</a>
+<a name="ln348">    }</a>
+<a name="ln349"> </a>
+<a name="ln350">    if (end) {</a>
+<a name="ln351">        /* create post-event notification wrappers */</a>
+<a name="ln352">        key = generate_notify_key(rsc-&gt;id, &quot;post&quot;, end-&gt;task);</a>
+<a name="ln353">        n_data-&gt;post =</a>
+<a name="ln354">            custom_action(rsc, key, RSC_NOTIFY, NULL, is_set(end-&gt;flags, pe_action_optional), TRUE,</a>
+<a name="ln355">                          data_set);</a>
+<a name="ln356"> </a>
+<a name="ln357">        n_data-&gt;post-&gt;priority = INFINITY;</a>
+<a name="ln358">        update_action_flags(n_data-&gt;post, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln359">        if (is_set(end-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln360">            update_action_flags(n_data-&gt;post, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln361">        } else {</a>
+<a name="ln362">            update_action_flags(n_data-&gt;post, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln363">        }</a>
+<a name="ln364"> </a>
+<a name="ln365">        add_hash_param(n_data-&gt;post-&gt;meta, &quot;notify_type&quot;, &quot;post&quot;);</a>
+<a name="ln366">        add_hash_param(n_data-&gt;post-&gt;meta, &quot;notify_operation&quot;, n_data-&gt;action);</a>
+<a name="ln367"> </a>
+<a name="ln368">        add_hash_param(n_data-&gt;post-&gt;meta, &quot;notify_key_type&quot;, &quot;post&quot;);</a>
+<a name="ln369">        add_hash_param(n_data-&gt;post-&gt;meta, &quot;notify_key_operation&quot;, end-&gt;task);</a>
+<a name="ln370"> </a>
+<a name="ln371">        /* create post_notify_complete */</a>
+<a name="ln372">        key = generate_notify_key(rsc-&gt;id, &quot;confirmed-post&quot;, end-&gt;task);</a>
+<a name="ln373">        n_data-&gt;post_done =</a>
+<a name="ln374">            custom_action(rsc, key, RSC_NOTIFIED, NULL, is_set(end-&gt;flags, pe_action_optional),</a>
+<a name="ln375">                          TRUE, data_set);</a>
+<a name="ln376"> </a>
+<a name="ln377">        n_data-&gt;post_done-&gt;priority = INFINITY;</a>
+<a name="ln378">        update_action_flags(n_data-&gt;post_done, pe_action_pseudo, __FUNCTION__, __LINE__);</a>
+<a name="ln379">        if (is_set(end-&gt;flags, pe_action_runnable)) {</a>
+<a name="ln380">            update_action_flags(n_data-&gt;post_done, pe_action_runnable, __FUNCTION__, __LINE__);</a>
+<a name="ln381">        } else {</a>
+<a name="ln382">            update_action_flags(n_data-&gt;post_done, pe_action_runnable | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln383">        }</a>
+<a name="ln384"> </a>
+<a name="ln385">        add_hash_param(n_data-&gt;post_done-&gt;meta, &quot;notify_type&quot;, &quot;post&quot;);</a>
+<a name="ln386">        add_hash_param(n_data-&gt;post_done-&gt;meta, &quot;notify_operation&quot;, n_data-&gt;action);</a>
+<a name="ln387"> </a>
+<a name="ln388">        add_hash_param(n_data-&gt;post_done-&gt;meta, &quot;notify_key_type&quot;, &quot;confirmed-post&quot;);</a>
+<a name="ln389">        add_hash_param(n_data-&gt;post_done-&gt;meta, &quot;notify_key_operation&quot;, end-&gt;task);</a>
+<a name="ln390"> </a>
+<a name="ln391">        order_actions(end, n_data-&gt;post, pe_order_implies_then);</a>
+<a name="ln392">        order_actions(n_data-&gt;post, n_data-&gt;post_done, pe_order_implies_then);</a>
+<a name="ln393">    }</a>
+<a name="ln394"> </a>
+<a name="ln395">    if (start &amp;&amp; end) {</a>
+<a name="ln396">        order_actions(n_data-&gt;pre_done, n_data-&gt;post, pe_order_optional);</a>
+<a name="ln397">    }</a>
+<a name="ln398"> </a>
+<a name="ln399">    if (safe_str_eq(action, RSC_STOP)) {</a>
+<a name="ln400">        action_t *all_stopped = get_pseudo_op(ALL_STOPPED, data_set);</a>
+<a name="ln401"> </a>
+<a name="ln402">        order_actions(n_data-&gt;post_done, all_stopped, pe_order_optional);</a>
+<a name="ln403">    }</a>
+<a name="ln404"> </a>
+<a name="ln405">    return n_data;</a>
+<a name="ln406">}</a>
+<a name="ln407"> </a>
+<a name="ln408">void</a>
+<a name="ln409">collect_notification_data(resource_t * rsc, gboolean state, gboolean activity,</a>
+<a name="ln410">                          notify_data_t * n_data)</a>
+<a name="ln411">{</a>
+<a name="ln412"> </a>
+<a name="ln413">    if(n_data-&gt;allowed_nodes == NULL) {</a>
+<a name="ln414">        n_data-&gt;allowed_nodes = rsc-&gt;allowed_nodes;</a>
+<a name="ln415">    }</a>
+<a name="ln416"> </a>
+<a name="ln417">    if (rsc-&gt;children) {</a>
+<a name="ln418">        GListPtr gIter = rsc-&gt;children;</a>
+<a name="ln419"> </a>
+<a name="ln420">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln421">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln422"> </a>
+<a name="ln423">            collect_notification_data(child, state, activity, n_data);</a>
+<a name="ln424">        }</a>
+<a name="ln425">        return;</a>
+<a name="ln426">    }</a>
+<a name="ln427"> </a>
+<a name="ln428">    if (state) {</a>
+<a name="ln429">        notify_entry_t *entry = NULL;</a>
+<a name="ln430"> </a>
+<a name="ln431">        entry = calloc(1, sizeof(notify_entry_t));</a>
+<a name="ln432">        entry-&gt;rsc = rsc;</a>
+<a name="ln433">        if (rsc-&gt;running_on) {</a>
+<a name="ln434">            /* we only take the first one */</a>
+<a name="ln435">            entry-&gt;node = rsc-&gt;running_on-&gt;data;</a>
+<a name="ln436">        }</a>
+<a name="ln437"> </a>
+<a name="ln438">        pe_rsc_trace(rsc, &quot;%s state: %s&quot;, rsc-&gt;id, role2text(rsc-&gt;role));</a>
+<a name="ln439"> </a>
+<a name="ln440">        switch (rsc-&gt;role) {</a>
+<a name="ln441">            case RSC_ROLE_STOPPED:</a>
+<a name="ln442">                n_data-&gt;inactive = g_list_prepend(n_data-&gt;inactive, entry);</a>
+<a name="ln443">                break;</a>
+<a name="ln444">            case RSC_ROLE_STARTED:</a>
+<a name="ln445">                n_data-&gt;active = g_list_prepend(n_data-&gt;active, entry);</a>
+<a name="ln446">                break;</a>
+<a name="ln447">            case RSC_ROLE_SLAVE:</a>
+<a name="ln448">                n_data-&gt;slave = g_list_prepend(n_data-&gt;slave, entry);</a>
+<a name="ln449">                n_data-&gt;active = g_list_prepend(n_data-&gt;active,</a>
+<a name="ln450">                                                dup_notify_entry(entry));</a>
+<a name="ln451">                break;</a>
+<a name="ln452">            case RSC_ROLE_MASTER:</a>
+<a name="ln453">                n_data-&gt;master = g_list_prepend(n_data-&gt;master, entry);</a>
+<a name="ln454">                n_data-&gt;active = g_list_prepend(n_data-&gt;active,</a>
+<a name="ln455">                                                dup_notify_entry(entry));</a>
+<a name="ln456">                break;</a>
+<a name="ln457">            default:</a>
+<a name="ln458">                crm_err(&quot;Unsupported notify role&quot;);</a>
+<a name="ln459">                free(entry);</a>
+<a name="ln460">                break;</a>
+<a name="ln461">        }</a>
+<a name="ln462">    }</a>
+<a name="ln463"> </a>
+<a name="ln464">    if (activity) {</a>
+<a name="ln465">        notify_entry_t *entry = NULL;</a>
+<a name="ln466">        enum action_tasks task;</a>
+<a name="ln467"> </a>
+<a name="ln468">        GListPtr gIter = rsc-&gt;actions;</a>
+<a name="ln469"> </a>
+<a name="ln470">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln471">            action_t *op = (action_t *) gIter-&gt;data;</a>
+<a name="ln472"> </a>
+<a name="ln473">            if (is_set(op-&gt;flags, pe_action_optional) == FALSE &amp;&amp; op-&gt;node != NULL) {</a>
+<a name="ln474"> </a>
+<a name="ln475">                entry = calloc(1, sizeof(notify_entry_t));</a>
+<a name="ln476">                entry-&gt;node = op-&gt;node;</a>
+<a name="ln477">                entry-&gt;rsc = rsc;</a>
+<a name="ln478"> </a>
+<a name="ln479">                task = text2task(op-&gt;task);</a>
+<a name="ln480">                switch (task) {</a>
+<a name="ln481">                    case start_rsc:</a>
+<a name="ln482">                        n_data-&gt;start = g_list_prepend(n_data-&gt;start, entry);</a>
+<a name="ln483">                        break;</a>
+<a name="ln484">                    case stop_rsc:</a>
+<a name="ln485">                        n_data-&gt;stop = g_list_prepend(n_data-&gt;stop, entry);</a>
+<a name="ln486">                        break;</a>
+<a name="ln487">                    case action_promote:</a>
+<a name="ln488">                        n_data-&gt;promote = g_list_prepend(n_data-&gt;promote, entry);</a>
+<a name="ln489">                        break;</a>
+<a name="ln490">                    case action_demote:</a>
+<a name="ln491">                        n_data-&gt;demote = g_list_prepend(n_data-&gt;demote, entry);</a>
+<a name="ln492">                        break;</a>
+<a name="ln493">                    default:</a>
+<a name="ln494">                        free(entry);</a>
+<a name="ln495">                        break;</a>
+<a name="ln496">                }</a>
+<a name="ln497">            }</a>
+<a name="ln498">        }</a>
+<a name="ln499">    }</a>
+<a name="ln500">}</a>
+<a name="ln501"> </a>
+<a name="ln502">gboolean</a>
+<a name="ln503">expand_notification_data(notify_data_t * n_data, pe_working_set_t * data_set)</a>
+<a name="ln504">{</a>
+<a name="ln505">    /* Expand the notification entries into a key=value hashtable</a>
+<a name="ln506">     * This hashtable is later used in action2xml()</a>
+<a name="ln507">     */</a>
+<a name="ln508">    gboolean required = FALSE;</a>
+<a name="ln509">    char *rsc_list = NULL;</a>
+<a name="ln510">    char *node_list = NULL;</a>
+<a name="ln511">    GListPtr nodes = NULL;</a>
+<a name="ln512"> </a>
+<a name="ln513">    if (n_data-&gt;stop) {</a>
+<a name="ln514">        n_data-&gt;stop = g_list_sort(n_data-&gt;stop, sort_notify_entries);</a>
+<a name="ln515">    }</a>
+<a name="ln516">    expand_list(n_data-&gt;stop, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln517">    if (rsc_list != NULL &amp;&amp; safe_str_neq(&quot; &quot;, rsc_list)) {</a>
+<a name="ln518">        if (safe_str_eq(n_data-&gt;action, RSC_STOP)) {</a>
+<a name="ln519">            required = TRUE;</a>
+<a name="ln520">        }</a>
+<a name="ln521">    }</a>
+<a name="ln522">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_stop_resource&quot;), rsc_list);</a>
+<a name="ln523">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_stop_uname&quot;), node_list);</a>
+<a name="ln524"> </a>
+<a name="ln525">    if (n_data-&gt;start) {</a>
+<a name="ln526">        n_data-&gt;start = g_list_sort(n_data-&gt;start, sort_notify_entries);</a>
+<a name="ln527">        if (rsc_list &amp;&amp; safe_str_eq(n_data-&gt;action, RSC_START)) {</a>
+<a name="ln528">            required = TRUE;</a>
+<a name="ln529">        }</a>
+<a name="ln530">    }</a>
+<a name="ln531">    expand_list(n_data-&gt;start, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln532">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_start_resource&quot;), rsc_list);</a>
+<a name="ln533">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_start_uname&quot;), node_list);</a>
+<a name="ln534"> </a>
+<a name="ln535">    if (n_data-&gt;demote) {</a>
+<a name="ln536">        n_data-&gt;demote = g_list_sort(n_data-&gt;demote, sort_notify_entries);</a>
+<a name="ln537">        if (safe_str_eq(n_data-&gt;action, RSC_DEMOTE)) {</a>
+<a name="ln538">            required = TRUE;</a>
+<a name="ln539">        }</a>
+<a name="ln540">    }</a>
+<a name="ln541"> </a>
+<a name="ln542">    expand_list(n_data-&gt;demote, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln543">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_demote_resource&quot;), rsc_list);</a>
+<a name="ln544">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_demote_uname&quot;), node_list);</a>
+<a name="ln545"> </a>
+<a name="ln546">    if (n_data-&gt;promote) {</a>
+<a name="ln547">        n_data-&gt;promote = g_list_sort(n_data-&gt;promote, sort_notify_entries);</a>
+<a name="ln548">        if (safe_str_eq(n_data-&gt;action, RSC_PROMOTE)) {</a>
+<a name="ln549">            required = TRUE;</a>
+<a name="ln550">        }</a>
+<a name="ln551">    }</a>
+<a name="ln552">    expand_list(n_data-&gt;promote, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln553">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_promote_resource&quot;), rsc_list);</a>
+<a name="ln554">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_promote_uname&quot;), node_list);</a>
+<a name="ln555"> </a>
+<a name="ln556">    if (n_data-&gt;active) {</a>
+<a name="ln557">        n_data-&gt;active = g_list_sort(n_data-&gt;active, sort_notify_entries);</a>
+<a name="ln558">    }</a>
+<a name="ln559">    expand_list(n_data-&gt;active, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln560">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_active_resource&quot;), rsc_list);</a>
+<a name="ln561">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_active_uname&quot;), node_list);</a>
+<a name="ln562"> </a>
+<a name="ln563">    if (n_data-&gt;slave) {</a>
+<a name="ln564">        n_data-&gt;slave = g_list_sort(n_data-&gt;slave, sort_notify_entries);</a>
+<a name="ln565">    }</a>
+<a name="ln566">    expand_list(n_data-&gt;slave, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln567">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_slave_resource&quot;), rsc_list);</a>
+<a name="ln568">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_slave_uname&quot;), node_list);</a>
+<a name="ln569"> </a>
+<a name="ln570">    if (n_data-&gt;master) {</a>
+<a name="ln571">        n_data-&gt;master = g_list_sort(n_data-&gt;master, sort_notify_entries);</a>
+<a name="ln572">    }</a>
+<a name="ln573">    expand_list(n_data-&gt;master, &amp;rsc_list, &amp;node_list);</a>
+<a name="ln574">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_master_resource&quot;), rsc_list);</a>
+<a name="ln575">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_master_uname&quot;), node_list);</a>
+<a name="ln576"> </a>
+<a name="ln577">    if (n_data-&gt;inactive) {</a>
+<a name="ln578">        n_data-&gt;inactive = g_list_sort(n_data-&gt;inactive, sort_notify_entries);</a>
+<a name="ln579">    }</a>
+<a name="ln580">    expand_list(n_data-&gt;inactive, &amp;rsc_list, NULL);</a>
+<a name="ln581">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_inactive_resource&quot;), rsc_list);</a>
+<a name="ln582"> </a>
+<a name="ln583">    nodes = g_hash_table_get_values(n_data-&gt;allowed_nodes);</a>
+<a name="ln584">    node_list = expand_node_list(nodes);</a>
+<a name="ln585">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_available_uname&quot;), node_list);</a>
+<a name="ln586">    g_list_free(nodes);</a>
+<a name="ln587"> </a>
+<a name="ln588">    node_list = expand_node_list(data_set-&gt;nodes);</a>
+<a name="ln589">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_all_uname&quot;), node_list);</a>
+<a name="ln590"> </a>
+<a name="ln591">    if (required &amp;&amp; n_data-&gt;pre) {</a>
+<a name="ln592">        update_action_flags(n_data-&gt;pre, pe_action_optional | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln593">        update_action_flags(n_data-&gt;pre_done, pe_action_optional | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln594">    }</a>
+<a name="ln595"> </a>
+<a name="ln596">    if (required &amp;&amp; n_data-&gt;post) {</a>
+<a name="ln597">        update_action_flags(n_data-&gt;post, pe_action_optional | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln598">        update_action_flags(n_data-&gt;post_done, pe_action_optional | pe_action_clear, __FUNCTION__, __LINE__);</a>
+<a name="ln599">    }</a>
+<a name="ln600">    return required;</a>
+<a name="ln601">}</a>
+<a name="ln602"> </a>
+<a name="ln603">void</a>
+<a name="ln604">create_notifications(resource_t * rsc, notify_data_t * n_data, pe_working_set_t * data_set)</a>
+<a name="ln605">{</a>
+<a name="ln606">    GListPtr gIter = NULL;</a>
+<a name="ln607">    action_t *stop = NULL;</a>
+<a name="ln608">    action_t *start = NULL;</a>
+<a name="ln609">    enum action_tasks task = text2task(n_data-&gt;action);</a>
+<a name="ln610"> </a>
+<a name="ln611">    if (rsc-&gt;children) {</a>
+<a name="ln612">        gIter = rsc-&gt;children;</a>
+<a name="ln613">        for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln614">            resource_t *child = (resource_t *) gIter-&gt;data;</a>
+<a name="ln615"> </a>
+<a name="ln616">            create_notifications(child, n_data, data_set);</a>
+<a name="ln617">        }</a>
+<a name="ln618">        return;</a>
+<a name="ln619">    }</a>
+<a name="ln620"> </a>
+<a name="ln621">    /* Copy notification details into standard ops */</a>
+<a name="ln622"> </a>
+<a name="ln623">    gIter = rsc-&gt;actions;</a>
+<a name="ln624">    for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln625">        action_t *op = (action_t *) gIter-&gt;data;</a>
+<a name="ln626"> </a>
+<a name="ln627">        if (is_set(op-&gt;flags, pe_action_optional) == FALSE &amp;&amp; op-&gt;node != NULL) {</a>
+<a name="ln628">            enum action_tasks t = text2task(op-&gt;task);</a>
+<a name="ln629"> </a>
+<a name="ln630">            switch (t) {</a>
+<a name="ln631">                case start_rsc:</a>
+<a name="ln632">                case stop_rsc:</a>
+<a name="ln633">                case action_promote:</a>
+<a name="ln634">                case action_demote:</a>
+<a name="ln635">                    g_hash_table_foreach(n_data-&gt;keys, dup_attr, op-&gt;meta);</a>
+<a name="ln636">                    break;</a>
+<a name="ln637">                default:</a>
+<a name="ln638">                    break;</a>
+<a name="ln639">            }</a>
+<a name="ln640">        }</a>
+<a name="ln641">    }</a>
+<a name="ln642"> </a>
+<a name="ln643">    pe_rsc_trace(rsc, &quot;Creating notifications for: %s.%s (%s-&gt;%s)&quot;,</a>
+<a name="ln644">                 n_data-&gt;action, rsc-&gt;id, role2text(rsc-&gt;role), role2text(rsc-&gt;next_role));</a>
+<a name="ln645"> </a>
+<a name="ln646">    stop = find_first_action(rsc-&gt;actions, NULL, RSC_STOP, NULL);</a>
+<a name="ln647">    start = find_first_action(rsc-&gt;actions, NULL, RSC_START, NULL);</a>
+<a name="ln648"> </a>
+<a name="ln649">    /* stop / demote */</a>
+<a name="ln650">    if (rsc-&gt;role != RSC_ROLE_STOPPED) {</a>
+<a name="ln651">        if (task == stop_rsc || task == action_demote) {</a>
+<a name="ln652">            gIter = rsc-&gt;running_on;</a>
+<a name="ln653">            for (; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln654">                node_t *current_node = (node_t *) gIter-&gt;data;</a>
+<a name="ln655"> </a>
+<a name="ln656">                /* if this stop action is a pseudo action as a result of the current</a>
+<a name="ln657">                 * node being fenced, this stop action is implied by the fencing </a>
+<a name="ln658">                 * action. There's no reason to send the fenced node a stop notification */ </a>
+<a name="ln659">                if (stop &amp;&amp;</a>
+<a name="ln660">                    is_set(stop-&gt;flags, pe_action_pseudo) &amp;&amp;</a>
+<a name="ln661">                    current_node-&gt;details-&gt;unclean) {</a>
+<a name="ln662"> </a>
+<a name="ln663">                    continue;</a>
+<a name="ln664">                }</a>
+<a name="ln665"> </a>
+<a name="ln666">                pe_notify(rsc, current_node, n_data-&gt;pre, n_data-&gt;pre_done, n_data, data_set);</a>
+<a name="ln667">                if (task == action_demote || stop == NULL</a>
+<a name="ln668">                    || is_set(stop-&gt;flags, pe_action_optional)) {</a>
+<a name="ln669">                    pe_post_notify(rsc, current_node, n_data, data_set);</a>
+<a name="ln670">                }</a>
+<a name="ln671">            }</a>
+<a name="ln672">        }</a>
+<a name="ln673">    }</a>
+<a name="ln674"> </a>
+<a name="ln675">    /* start / promote */</a>
+<a name="ln676">    if (rsc-&gt;next_role != RSC_ROLE_STOPPED) {</a>
+<a name="ln677">        if (rsc-&gt;allocated_to == NULL) {</a>
+<a name="ln678">            pe_proc_err(&quot;Next role '%s' but %s is not allocated&quot;, role2text(rsc-&gt;next_role),</a>
+<a name="ln679">                        rsc-&gt;id);</a>
+<a name="ln680"> </a>
+<a name="ln681">        } else if (task == start_rsc || task == action_promote) {</a>
+<a name="ln682">            if (task != start_rsc || start == NULL || is_set(start-&gt;flags, pe_action_optional)) {</a>
+<a name="ln683">                pe_notify(rsc, rsc-&gt;allocated_to, n_data-&gt;pre, n_data-&gt;pre_done, n_data, data_set);</a>
+<a name="ln684">            }</a>
+<a name="ln685">            pe_post_notify(rsc, rsc-&gt;allocated_to, n_data, data_set);</a>
+<a name="ln686">        }</a>
+<a name="ln687">    }</a>
+<a name="ln688">}</a>
+<a name="ln689"> </a>
+<a name="ln690">void</a>
+<a name="ln691">free_notification_data(notify_data_t * n_data)</a>
+<a name="ln692">{</a>
+<a name="ln693">    if (n_data == NULL) {</a>
+<a name="ln694">        return;</a>
+<a name="ln695">    }</a>
+<a name="ln696"> </a>
+<a name="ln697">    g_list_free_full(n_data-&gt;stop, free);</a>
+<a name="ln698">    g_list_free_full(n_data-&gt;start, free);</a>
+<a name="ln699">    g_list_free_full(n_data-&gt;demote, free);</a>
+<a name="ln700">    g_list_free_full(n_data-&gt;promote, free);</a>
+<a name="ln701">    g_list_free_full(n_data-&gt;master, free);</a>
+<a name="ln702">    g_list_free_full(n_data-&gt;slave, free);</a>
+<a name="ln703">    g_list_free_full(n_data-&gt;active, free);</a>
+<a name="ln704">    g_list_free_full(n_data-&gt;inactive, free);</a>
+<a name="ln705">    g_hash_table_destroy(n_data-&gt;keys);</a>
+<a name="ln706">    free(n_data);</a>
+<a name="ln707">}</a>
+<a name="ln708"> </a>
+<a name="ln709">void</a>
+<a name="ln710">create_secondary_notification(pe_action_t *action, resource_t *rsc,</a>
+<a name="ln711">                              pe_action_t *stonith_op,</a>
+<a name="ln712">                              pe_working_set_t *data_set)</a>
+<a name="ln713">{</a>
+<a name="ln714">    notify_data_t *n_data;</a>
+<a name="ln715"> </a>
+<a name="ln716">    crm_info(&quot;Creating secondary notification for %s&quot;, action-&gt;uuid);</a>
+<a name="ln717">    n_data = create_notification_boundaries(rsc, RSC_STOP, NULL, stonith_op,</a>
+<a name="ln718">                                            data_set);</a>
+<a name="ln719">    collect_notification_data(rsc, TRUE, FALSE, n_data);</a>
+<a name="ln720">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_stop_resource&quot;),</a>
+<a name="ln721">                        strdup(rsc-&gt;id));</a>
+<a name="ln722">    g_hash_table_insert(n_data-&gt;keys, strdup(&quot;notify_stop_uname&quot;),</a>
+<a name="ln723">                        strdup(action-&gt;node-&gt;details-&gt;uname));</a>
+<a name="ln724">    create_notifications(uber_parent(rsc), n_data, data_set);</a>
+<a name="ln725">    free_notification_data(n_data);</a>
+<a name="ln726">}</a>
+
+</code></pre>
+<div class="balloon" rel="83"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'dup'. Check lines: 83, 80.</p></div>
+<div class="balloon" rel="173"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: rsc_list.</p></div>
+<div class="balloon" rel="190"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V560/" target="_blank">V560</a> A part of conditional expression is always true: node_list.</p></div>
+<div class="balloon" rel="311"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'n_data'. Check lines: 311, 310.</p></div>
+<div class="balloon" rel="432"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'entry'. Check lines: 432, 431.</p></div>
+<div class="balloon" rel="476"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'entry'. Check lines: 476, 475.</p></div>
+<div class="balloon" rel="522"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 522, 522.</p></div>
+<div class="balloon" rel="523"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 523, 523.</p></div>
+<div class="balloon" rel="532"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 532, 532.</p></div>
+<div class="balloon" rel="533"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 533, 533.</p></div>
+<div class="balloon" rel="543"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 543, 543.</p></div>
+<div class="balloon" rel="544"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 544, 544.</p></div>
+<div class="balloon" rel="553"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 553, 553.</p></div>
+<div class="balloon" rel="554"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 554, 554.</p></div>
+<div class="balloon" rel="560"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 560, 560.</p></div>
+<div class="balloon" rel="561"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 561, 561.</p></div>
+<div class="balloon" rel="567"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 567, 567.</p></div>
+<div class="balloon" rel="568"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 568, 568.</p></div>
+<div class="balloon" rel="574"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 574, 574.</p></div>
+<div class="balloon" rel="575"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 575, 575.</p></div>
+<div class="balloon" rel="581"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 581, 581.</p></div>
+<div class="balloon" rel="585"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 585, 585.</p></div>
+<div class="balloon" rel="589"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 589, 589.</p></div>
+<div class="balloon" rel="720"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 720, 720.</p></div>
+<div class="balloon" rel="722"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 722, 722.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

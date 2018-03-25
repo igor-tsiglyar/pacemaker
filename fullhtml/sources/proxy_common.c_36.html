@@ -1,0 +1,365 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (c) 2015 David Vossel &lt;davidvossel@gmail.com&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This library is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU Lesser General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2.1 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This library is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * Lesser General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU Lesser General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> *</a>
+<a name="ln22"> */</a>
+<a name="ln23"> </a>
+<a name="ln24">#include &lt;crm_internal.h&gt;</a>
+<a name="ln25"> </a>
+<a name="ln26">#include &lt;glib.h&gt;</a>
+<a name="ln27">#include &lt;unistd.h&gt;</a>
+<a name="ln28"> </a>
+<a name="ln29">#include &lt;crm/crm.h&gt;</a>
+<a name="ln30">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln31">#include &lt;crm/services.h&gt;</a>
+<a name="ln32">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln33"> </a>
+<a name="ln34">#include &lt;crm/pengine/status.h&gt;</a>
+<a name="ln35">#include &lt;crm/cib.h&gt;</a>
+<a name="ln36">#include &lt;crm/lrmd.h&gt;</a>
+<a name="ln37"> </a>
+<a name="ln38">int lrmd_internal_proxy_send(lrmd_t * lrmd, xmlNode *msg);</a>
+<a name="ln39">GHashTable *proxy_table = NULL;</a>
+<a name="ln40"> </a>
+<a name="ln41">static void</a>
+<a name="ln42">remote_proxy_notify_destroy(lrmd_t *lrmd, const char *session_id)</a>
+<a name="ln43">{</a>
+<a name="ln44">    /* sending to the remote node that an ipc connection has been destroyed */</a>
+<a name="ln45">    xmlNode *msg = create_xml_node(NULL, T_LRMD_IPC_PROXY);</a>
+<a name="ln46">    crm_xml_add(msg, F_LRMD_IPC_OP, LRMD_IPC_OP_DESTROY);</a>
+<a name="ln47">    crm_xml_add(msg, F_LRMD_IPC_SESSION, session_id);</a>
+<a name="ln48">    lrmd_internal_proxy_send(lrmd, msg);</a>
+<a name="ln49">    free_xml(msg);</a>
+<a name="ln50">}</a>
+<a name="ln51"> </a>
+<a name="ln52">/*!</a>
+<a name="ln53"> * \brief Send an acknowledgment of a remote proxy shutdown request.</a>
+<a name="ln54"> *</a>
+<a name="ln55"> * \param[in] lrmd  Connection to proxy</a>
+<a name="ln56"> */</a>
+<a name="ln57">void</a>
+<a name="ln58">remote_proxy_ack_shutdown(lrmd_t *lrmd)</a>
+<a name="ln59">{</a>
+<a name="ln60">    xmlNode *msg = create_xml_node(NULL, T_LRMD_IPC_PROXY);</a>
+<a name="ln61">    crm_xml_add(msg, F_LRMD_IPC_OP, LRMD_IPC_OP_SHUTDOWN_ACK);</a>
+<a name="ln62">    lrmd_internal_proxy_send(lrmd, msg);</a>
+<a name="ln63">    free_xml(msg);</a>
+<a name="ln64">}</a>
+<a name="ln65"> </a>
+<a name="ln66">/*!</a>
+<a name="ln67"> * \brief We're not gonna shutdown as response to</a>
+<a name="ln68"> *        a remote proxy shutdown request.</a>
+<a name="ln69"> *</a>
+<a name="ln70"> * \param[in] lrmd  Connection to proxy</a>
+<a name="ln71"> */</a>
+<a name="ln72">void</a>
+<a name="ln73">remote_proxy_nack_shutdown(lrmd_t *lrmd)</a>
+<a name="ln74">{</a>
+<a name="ln75">    xmlNode *msg = create_xml_node(NULL, T_LRMD_IPC_PROXY);</a>
+<a name="ln76">    crm_xml_add(msg, F_LRMD_IPC_OP, LRMD_IPC_OP_SHUTDOWN_NACK);</a>
+<a name="ln77">    lrmd_internal_proxy_send(lrmd, msg);</a>
+<a name="ln78">    free_xml(msg);</a>
+<a name="ln79">}</a>
+<a name="ln80"> </a>
+<a name="ln81">void</a>
+<a name="ln82">remote_proxy_relay_event(remote_proxy_t *proxy, xmlNode *msg)</a>
+<a name="ln83">{</a>
+<a name="ln84">    /* sending to the remote node an event msg. */</a>
+<a name="ln85">    xmlNode *event = create_xml_node(NULL, T_LRMD_IPC_PROXY);</a>
+<a name="ln86">    crm_xml_add(event, F_LRMD_IPC_OP, LRMD_IPC_OP_EVENT);</a>
+<a name="ln87">    crm_xml_add(event, F_LRMD_IPC_SESSION, proxy-&gt;session_id);</a>
+<a name="ln88">    add_message_xml(event, F_LRMD_IPC_MSG, msg);</a>
+<a name="ln89">    crm_log_xml_explicit(event, &quot;EventForProxy&quot;);</a>
+<a name="ln90">    lrmd_internal_proxy_send(proxy-&gt;lrm, event);</a>
+<a name="ln91">    free_xml(event);</a>
+<a name="ln92">}</a>
+<a name="ln93"> </a>
+<a name="ln94">void</a>
+<a name="ln95">remote_proxy_relay_response(remote_proxy_t *proxy, xmlNode *msg, int msg_id)</a>
+<a name="ln96">{</a>
+<a name="ln97">    /* sending to the remote node a response msg. */</a>
+<a name="ln98">    xmlNode *response = create_xml_node(NULL, T_LRMD_IPC_PROXY);</a>
+<a name="ln99">    crm_xml_add(response, F_LRMD_IPC_OP, LRMD_IPC_OP_RESPONSE);</a>
+<a name="ln100">    crm_xml_add(response, F_LRMD_IPC_SESSION, proxy-&gt;session_id);</a>
+<a name="ln101">    crm_xml_add_int(response, F_LRMD_IPC_MSG_ID, msg_id);</a>
+<a name="ln102">    add_message_xml(response, F_LRMD_IPC_MSG, msg);</a>
+<a name="ln103">    lrmd_internal_proxy_send(proxy-&gt;lrm, response);</a>
+<a name="ln104">    free_xml(response);</a>
+<a name="ln105">}</a>
+<a name="ln106"> </a>
+<a name="ln107">static void</a>
+<a name="ln108">remote_proxy_end_session(remote_proxy_t *proxy)</a>
+<a name="ln109">{</a>
+<a name="ln110">    if (proxy == NULL) {</a>
+<a name="ln111">        return;</a>
+<a name="ln112">    }</a>
+<a name="ln113">    crm_trace(&quot;ending session ID %s&quot;, proxy-&gt;session_id);</a>
+<a name="ln114"> </a>
+<a name="ln115">    if (proxy-&gt;source) {</a>
+<a name="ln116">        mainloop_del_ipc_client(proxy-&gt;source);</a>
+<a name="ln117">    }</a>
+<a name="ln118">}</a>
+<a name="ln119"> </a>
+<a name="ln120">void</a>
+<a name="ln121">remote_proxy_free(gpointer data)</a>
+<a name="ln122">{</a>
+<a name="ln123">    remote_proxy_t *proxy = data;</a>
+<a name="ln124"> </a>
+<a name="ln125">    crm_trace(&quot;freed proxy session ID %s&quot;, proxy-&gt;session_id);</a>
+<a name="ln126">    free(proxy-&gt;node_name);</a>
+<a name="ln127">    free(proxy-&gt;session_id);</a>
+<a name="ln128">    free(proxy);</a>
+<a name="ln129">}</a>
+<a name="ln130"> </a>
+<a name="ln131">int</a>
+<a name="ln132">remote_proxy_dispatch(const char *buffer, ssize_t length, gpointer userdata)</a>
+<a name="ln133">{</a>
+<a name="ln134">    /* Async responses from cib and friends back to clients via pacemaker_remoted */</a>
+<a name="ln135">    xmlNode *xml = NULL;</a>
+<a name="ln136">    uint32_t flags = 0;</a>
+<a name="ln137">    remote_proxy_t *proxy = userdata;</a>
+<a name="ln138"> </a>
+<a name="ln139">    xml = string2xml(buffer);</a>
+<a name="ln140">    if (xml == NULL) {</a>
+<a name="ln141">        crm_warn(&quot;Received a NULL msg from IPC service.&quot;);</a>
+<a name="ln142">        return 1;</a>
+<a name="ln143">    }</a>
+<a name="ln144"> </a>
+<a name="ln145">    flags = crm_ipc_buffer_flags(proxy-&gt;ipc);</a>
+<a name="ln146">    if (flags &amp; crm_ipc_proxied_relay_response) {</a>
+<a name="ln147">        crm_trace(&quot;Passing response back to %.8s on %s: %.200s - request id: %d&quot;, proxy-&gt;session_id, proxy-&gt;node_name, buffer, proxy-&gt;last_request_id);</a>
+<a name="ln148">        remote_proxy_relay_response(proxy, xml, proxy-&gt;last_request_id);</a>
+<a name="ln149">        proxy-&gt;last_request_id = 0;</a>
+<a name="ln150"> </a>
+<a name="ln151">    } else {</a>
+<a name="ln152">        crm_trace(&quot;Passing event back to %.8s on %s: %.200s&quot;, proxy-&gt;session_id, proxy-&gt;node_name, buffer);</a>
+<a name="ln153">        remote_proxy_relay_event(proxy, xml);</a>
+<a name="ln154">    }</a>
+<a name="ln155">    free_xml(xml);</a>
+<a name="ln156">    return 1;</a>
+<a name="ln157">}</a>
+<a name="ln158"> </a>
+<a name="ln159"> </a>
+<a name="ln160">void</a>
+<a name="ln161">remote_proxy_disconnected(gpointer userdata)</a>
+<a name="ln162">{</a>
+<a name="ln163">    remote_proxy_t *proxy = userdata;</a>
+<a name="ln164"> </a>
+<a name="ln165">    crm_trace(&quot;destroying %p&quot;, proxy);</a>
+<a name="ln166"> </a>
+<a name="ln167">    proxy-&gt;source = NULL;</a>
+<a name="ln168">    proxy-&gt;ipc = NULL;</a>
+<a name="ln169"> </a>
+<a name="ln170">    if(proxy-&gt;lrm) {</a>
+<a name="ln171">        remote_proxy_notify_destroy(proxy-&gt;lrm, proxy-&gt;session_id);</a>
+<a name="ln172">        proxy-&gt;lrm = NULL;</a>
+<a name="ln173">    }</a>
+<a name="ln174"> </a>
+<a name="ln175">    g_hash_table_remove(proxy_table, proxy-&gt;session_id);</a>
+<a name="ln176">}</a>
+<a name="ln177"> </a>
+<a name="ln178">remote_proxy_t *</a>
+<a name="ln179">remote_proxy_new(lrmd_t *lrmd, struct ipc_client_callbacks *proxy_callbacks,</a>
+<a name="ln180">                 const char *node_name, const char *session_id, const char *channel)</a>
+<a name="ln181">{</a>
+<a name="ln182">    remote_proxy_t *proxy = NULL;</a>
+<a name="ln183"> </a>
+<a name="ln184">    if(channel == NULL) {</a>
+<a name="ln185">        crm_err(&quot;No channel specified to proxy&quot;);</a>
+<a name="ln186">        remote_proxy_notify_destroy(lrmd, session_id);</a>
+<a name="ln187">        return NULL;</a>
+<a name="ln188">    }</a>
+<a name="ln189"> </a>
+<a name="ln190">    proxy = calloc(1, sizeof(remote_proxy_t));</a>
+<a name="ln191"> </a>
+<a name="ln192">    proxy-&gt;node_name = strdup(node_name);</a>
+<a name="ln193">    proxy-&gt;session_id = strdup(session_id);</a>
+<a name="ln194">    proxy-&gt;lrm = lrmd;</a>
+<a name="ln195"> </a>
+<a name="ln196">    if (safe_str_eq(crm_system_name, CRM_SYSTEM_CRMD)</a>
+<a name="ln197">        &amp;&amp; safe_str_eq(channel, CRM_SYSTEM_CRMD)) {</a>
+<a name="ln198">        /* The crmd doesn't need to connect to itself */</a>
+<a name="ln199">        proxy-&gt;is_local = TRUE;</a>
+<a name="ln200"> </a>
+<a name="ln201">    } else {</a>
+<a name="ln202">        proxy-&gt;source = mainloop_add_ipc_client(channel, G_PRIORITY_LOW, 0, proxy, proxy_callbacks);</a>
+<a name="ln203">        proxy-&gt;ipc = mainloop_get_ipc_client(proxy-&gt;source);</a>
+<a name="ln204">        if (proxy-&gt;source == NULL) {</a>
+<a name="ln205">            remote_proxy_free(proxy);</a>
+<a name="ln206">            remote_proxy_notify_destroy(lrmd, session_id);</a>
+<a name="ln207">            return NULL;</a>
+<a name="ln208">        }</a>
+<a name="ln209">    }</a>
+<a name="ln210"> </a>
+<a name="ln211">    crm_trace(&quot;new remote proxy client established to %s on %s, session id %s&quot;,</a>
+<a name="ln212">              channel, node_name, session_id);</a>
+<a name="ln213">    g_hash_table_insert(proxy_table, proxy-&gt;session_id, proxy);</a>
+<a name="ln214"> </a>
+<a name="ln215">    return proxy;</a>
+<a name="ln216">}</a>
+<a name="ln217"> </a>
+<a name="ln218">void</a>
+<a name="ln219">remote_proxy_cb(lrmd_t *lrmd, const char *node_name, xmlNode *msg)</a>
+<a name="ln220">{</a>
+<a name="ln221">    const char *op = crm_element_value(msg, F_LRMD_IPC_OP);</a>
+<a name="ln222">    const char *session = crm_element_value(msg, F_LRMD_IPC_SESSION);</a>
+<a name="ln223">    remote_proxy_t *proxy = g_hash_table_lookup(proxy_table, session);</a>
+<a name="ln224">    int msg_id = 0;</a>
+<a name="ln225"> </a>
+<a name="ln226">    /* sessions are raw ipc connections to IPC,</a>
+<a name="ln227">     * all we do is proxy requests/responses exactly</a>
+<a name="ln228">     * like they are given to us at the ipc level. */</a>
+<a name="ln229"> </a>
+<a name="ln230">    CRM_CHECK(op != NULL, return);</a>
+<a name="ln231">    CRM_CHECK(session != NULL, return);</a>
+<a name="ln232"> </a>
+<a name="ln233">    crm_element_value_int(msg, F_LRMD_IPC_MSG_ID, &amp;msg_id);</a>
+<a name="ln234">    /* This is msg from remote ipc client going to real ipc server */</a>
+<a name="ln235"> </a>
+<a name="ln236">    if (safe_str_eq(op, LRMD_IPC_OP_DESTROY)) {</a>
+<a name="ln237">        remote_proxy_end_session(proxy);</a>
+<a name="ln238"> </a>
+<a name="ln239">    } else if (safe_str_eq(op, LRMD_IPC_OP_REQUEST)) {</a>
+<a name="ln240">        int flags = 0;</a>
+<a name="ln241">        xmlNode *request = get_message_xml(msg, F_LRMD_IPC_MSG);</a>
+<a name="ln242">        const char *name = crm_element_value(msg, F_LRMD_IPC_CLIENT);</a>
+<a name="ln243"> </a>
+<a name="ln244">        CRM_CHECK(request != NULL, return);</a>
+<a name="ln245"> </a>
+<a name="ln246">        if (proxy == NULL) {</a>
+<a name="ln247">            /* proxy connection no longer exists */</a>
+<a name="ln248">            remote_proxy_notify_destroy(lrmd, session);</a>
+<a name="ln249">            return;</a>
+<a name="ln250">        }</a>
+<a name="ln251"> </a>
+<a name="ln252">        /* crmd requests MUST be handled by the crmd, not us */</a>
+<a name="ln253">        CRM_CHECK(proxy-&gt;is_local == FALSE,</a>
+<a name="ln254">                  remote_proxy_end_session(proxy); return);</a>
+<a name="ln255"> </a>
+<a name="ln256">        if (crm_ipc_connected(proxy-&gt;ipc) == FALSE) {</a>
+<a name="ln257">            remote_proxy_end_session(proxy);</a>
+<a name="ln258">            return;</a>
+<a name="ln259">        }</a>
+<a name="ln260">        proxy-&gt;last_request_id = 0;</a>
+<a name="ln261">        crm_element_value_int(msg, F_LRMD_IPC_MSG_FLAGS, &amp;flags);</a>
+<a name="ln262">        crm_xml_add(request, XML_ACL_TAG_ROLE, &quot;pacemaker-remote&quot;);</a>
+<a name="ln263"> </a>
+<a name="ln264">#if ENABLE_ACL</a>
+<a name="ln265">        CRM_ASSERT(node_name);</a>
+<a name="ln266">        crm_acl_get_set_user(request, F_LRMD_IPC_USER, node_name);</a>
+<a name="ln267">#endif</a>
+<a name="ln268"> </a>
+<a name="ln269">        if(is_set(flags, crm_ipc_proxied)) {</a>
+<a name="ln270">            const char *type = crm_element_value(request, F_TYPE);</a>
+<a name="ln271">            int rc = 0;</a>
+<a name="ln272"> </a>
+<a name="ln273">            if (safe_str_eq(type, T_ATTRD)</a>
+<a name="ln274">                &amp;&amp; crm_element_value(request, F_ATTRD_HOST) == NULL) {</a>
+<a name="ln275">                crm_xml_add(request, F_ATTRD_HOST, proxy-&gt;node_name);</a>
+<a name="ln276">            }</a>
+<a name="ln277"> </a>
+<a name="ln278">            rc = crm_ipc_send(proxy-&gt;ipc, request, flags, 5000, NULL);</a>
+<a name="ln279"> </a>
+<a name="ln280">            if(rc &lt; 0) {</a>
+<a name="ln281">                xmlNode *op_reply = create_xml_node(NULL, &quot;nack&quot;);</a>
+<a name="ln282"> </a>
+<a name="ln283">                crm_err(&quot;Could not relay %s request %d from %s to %s for %s: %s (%d)&quot;,</a>
+<a name="ln284">                         op, msg_id, proxy-&gt;node_name, crm_ipc_name(proxy-&gt;ipc), name, pcmk_strerror(rc), rc);</a>
+<a name="ln285"> </a>
+<a name="ln286">                /* Send a n'ack so the caller doesn't block */</a>
+<a name="ln287">                crm_xml_add(op_reply, &quot;function&quot;, __FUNCTION__);</a>
+<a name="ln288">                crm_xml_add_int(op_reply, &quot;line&quot;, __LINE__);</a>
+<a name="ln289">                crm_xml_add_int(op_reply, &quot;rc&quot;, rc);</a>
+<a name="ln290">                remote_proxy_relay_response(proxy, op_reply, msg_id);</a>
+<a name="ln291">                free_xml(op_reply);</a>
+<a name="ln292"> </a>
+<a name="ln293">            } else {</a>
+<a name="ln294">                crm_trace(&quot;Relayed %s request %d from %s to %s for %s&quot;,</a>
+<a name="ln295">                          op, msg_id, proxy-&gt;node_name, crm_ipc_name(proxy-&gt;ipc), name);</a>
+<a name="ln296">                proxy-&gt;last_request_id = msg_id;</a>
+<a name="ln297">            }</a>
+<a name="ln298"> </a>
+<a name="ln299">        } else {</a>
+<a name="ln300">            int rc = pcmk_ok;</a>
+<a name="ln301">            xmlNode *op_reply = NULL;</a>
+<a name="ln302">            /* For backwards compatibility with pacemaker_remoted &lt;= 1.1.10 */</a>
+<a name="ln303"> </a>
+<a name="ln304">            crm_trace(&quot;Relaying %s request %d from %s to %s for %s&quot;,</a>
+<a name="ln305">                      op, msg_id, proxy-&gt;node_name, crm_ipc_name(proxy-&gt;ipc), name);</a>
+<a name="ln306"> </a>
+<a name="ln307">            rc = crm_ipc_send(proxy-&gt;ipc, request, flags, 10000, &amp;op_reply);</a>
+<a name="ln308">            if(rc &lt; 0) {</a>
+<a name="ln309">                crm_err(&quot;Could not relay %s request %d from %s to %s for %s: %s (%d)&quot;,</a>
+<a name="ln310">                         op, msg_id, proxy-&gt;node_name, crm_ipc_name(proxy-&gt;ipc), name, pcmk_strerror(rc), rc);</a>
+<a name="ln311">            } else {</a>
+<a name="ln312">                crm_trace(&quot;Relayed %s request %d from %s to %s for %s&quot;,</a>
+<a name="ln313">                          op, msg_id, proxy-&gt;node_name, crm_ipc_name(proxy-&gt;ipc), name);</a>
+<a name="ln314">            }</a>
+<a name="ln315"> </a>
+<a name="ln316">            if(op_reply) {</a>
+<a name="ln317">                remote_proxy_relay_response(proxy, op_reply, msg_id);</a>
+<a name="ln318">                free_xml(op_reply);</a>
+<a name="ln319">            }</a>
+<a name="ln320">        }</a>
+<a name="ln321">    } else {</a>
+<a name="ln322">        crm_err(&quot;Unknown proxy operation: %s&quot;, op);</a>
+<a name="ln323">    }</a>
+<a name="ln324">}</a>
+
+</code></pre>
+<div class="balloon" rel="192"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'proxy'. Check lines: 192, 190.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

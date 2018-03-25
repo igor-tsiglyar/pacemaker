@@ -1,0 +1,963 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2004 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> *</a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> *</a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24"> </a>
+<a name="ln25">#include &lt;sys/stat.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &lt;crm/crm.h&gt;</a>
+<a name="ln28">#include &lt;crm/common/xml.h&gt;</a>
+<a name="ln29">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln30"> </a>
+<a name="ln31">#include &lt;tengine.h&gt;</a>
+<a name="ln32">#include &lt;te_callbacks.h&gt;</a>
+<a name="ln33">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#include &lt;crm/cluster.h&gt;        /* For ONLINESTATUS etc */</a>
+<a name="ln36"> </a>
+<a name="ln37">void te_update_confirm(const char *event, xmlNode * msg);</a>
+<a name="ln38"> </a>
+<a name="ln39">extern char *te_uuid;</a>
+<a name="ln40">gboolean shuttingdown = FALSE;</a>
+<a name="ln41">crm_graph_t *transition_graph;</a>
+<a name="ln42">crm_trigger_t *transition_trigger = NULL;</a>
+<a name="ln43"> </a>
+<a name="ln44">static unsigned long int stonith_max_attempts = 10;</a>
+<a name="ln45"> </a>
+<a name="ln46">/* #define rsc_op_template &quot;//&quot;XML_TAG_DIFF_ADDED&quot;//&quot;XML_TAG_CIB&quot;//&quot;XML_CIB_TAG_STATE&quot;[@uname='%s']&quot;//&quot;XML_LRM_TAG_RSC_OP&quot;[@id='%s]&quot; */</a>
+<a name="ln47">#define rsc_op_template &quot;//&quot;XML_TAG_DIFF_ADDED&quot;//&quot;XML_TAG_CIB&quot;//&quot;XML_LRM_TAG_RSC_OP&quot;[@id='%s']&quot;</a>
+<a name="ln48"> </a>
+<a name="ln49">static const char *</a>
+<a name="ln50">get_node_id(xmlNode * rsc_op)</a>
+<a name="ln51">{</a>
+<a name="ln52">    xmlNode *node = rsc_op;</a>
+<a name="ln53"> </a>
+<a name="ln54">    while (node != NULL &amp;&amp; safe_str_neq(XML_CIB_TAG_STATE, TYPE(node))) {</a>
+<a name="ln55">        node = node-&gt;parent;</a>
+<a name="ln56">    }</a>
+<a name="ln57"> </a>
+<a name="ln58">    CRM_CHECK(node != NULL, return NULL);</a>
+<a name="ln59">    return ID(node);</a>
+<a name="ln60">}</a>
+<a name="ln61"> </a>
+<a name="ln62">void</a>
+<a name="ln63">update_stonith_max_attempts(const char* value)</a>
+<a name="ln64">{</a>
+<a name="ln65">    if (safe_str_eq(value, INFINITY_S)) {</a>
+<a name="ln66">       stonith_max_attempts = node_score_infinity;</a>
+<a name="ln67">    }</a>
+<a name="ln68">    else {</a>
+<a name="ln69">       stonith_max_attempts = crm_int_helper(value, NULL);</a>
+<a name="ln70">    }</a>
+<a name="ln71">}</a>
+<a name="ln72">static void</a>
+<a name="ln73">te_legacy_update_diff(const char *event, xmlNode * diff)</a>
+<a name="ln74">{</a>
+<a name="ln75">    int lpc, max;</a>
+<a name="ln76">    xmlXPathObject *xpathObj = NULL;</a>
+<a name="ln77"> </a>
+<a name="ln78">    CRM_CHECK(diff != NULL, return);</a>
+<a name="ln79"> </a>
+<a name="ln80">    xml_log_patchset(LOG_TRACE, __FUNCTION__, diff);</a>
+<a name="ln81">    if (cib_config_changed(NULL, NULL, &amp;diff)) {</a>
+<a name="ln82">        abort_transition(INFINITY, tg_restart, &quot;Non-status change&quot;, diff);</a>
+<a name="ln83">        goto bail;              /* configuration changed */</a>
+<a name="ln84">    }</a>
+<a name="ln85"> </a>
+<a name="ln86">    /* Tickets Attributes - Added/Updated */</a>
+<a name="ln87">    xpathObj =</a>
+<a name="ln88">        xpath_search(diff,</a>
+<a name="ln89">                     &quot;//&quot; F_CIB_UPDATE_RESULT &quot;//&quot; XML_TAG_DIFF_ADDED &quot;//&quot; XML_CIB_TAG_TICKETS);</a>
+<a name="ln90">    if (numXpathResults(xpathObj) &gt; 0) {</a>
+<a name="ln91">        xmlNode *aborted = getXpathResult(xpathObj, 0);</a>
+<a name="ln92"> </a>
+<a name="ln93">        abort_transition(INFINITY, tg_restart, &quot;Ticket attribute: update&quot;, aborted);</a>
+<a name="ln94">        goto bail;</a>
+<a name="ln95"> </a>
+<a name="ln96">    }</a>
+<a name="ln97">    freeXpathObject(xpathObj);</a>
+<a name="ln98"> </a>
+<a name="ln99">    /* Tickets Attributes - Removed */</a>
+<a name="ln100">    xpathObj =</a>
+<a name="ln101">        xpath_search(diff,</a>
+<a name="ln102">                     &quot;//&quot; F_CIB_UPDATE_RESULT &quot;//&quot; XML_TAG_DIFF_REMOVED &quot;//&quot; XML_CIB_TAG_TICKETS);</a>
+<a name="ln103">    if (numXpathResults(xpathObj) &gt; 0) {</a>
+<a name="ln104">        xmlNode *aborted = getXpathResult(xpathObj, 0);</a>
+<a name="ln105"> </a>
+<a name="ln106">        abort_transition(INFINITY, tg_restart, &quot;Ticket attribute: removal&quot;, aborted);</a>
+<a name="ln107">        goto bail;</a>
+<a name="ln108">    }</a>
+<a name="ln109">    freeXpathObject(xpathObj);</a>
+<a name="ln110"> </a>
+<a name="ln111">    /* Transient Attributes - Added/Updated */</a>
+<a name="ln112">    xpathObj =</a>
+<a name="ln113">        xpath_search(diff,</a>
+<a name="ln114">                     &quot;//&quot; F_CIB_UPDATE_RESULT &quot;//&quot; XML_TAG_DIFF_ADDED &quot;//&quot;</a>
+<a name="ln115">                     XML_TAG_TRANSIENT_NODEATTRS &quot;//&quot; XML_CIB_TAG_NVPAIR);</a>
+<a name="ln116">    max = numXpathResults(xpathObj);</a>
+<a name="ln117"> </a>
+<a name="ln118">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln119">        xmlNode *attr = getXpathResult(xpathObj, lpc);</a>
+<a name="ln120">        const char *name = crm_element_value(attr, XML_NVPAIR_ATTR_NAME);</a>
+<a name="ln121">        const char *value = NULL;</a>
+<a name="ln122"> </a>
+<a name="ln123">        if (safe_str_eq(CRM_OP_PROBED, name)) {</a>
+<a name="ln124">            value = crm_element_value(attr, XML_NVPAIR_ATTR_VALUE);</a>
+<a name="ln125">        }</a>
+<a name="ln126"> </a>
+<a name="ln127">        if (crm_is_true(value) == FALSE) {</a>
+<a name="ln128">            abort_transition(INFINITY, tg_restart, &quot;Transient attribute: update&quot;, attr);</a>
+<a name="ln129">            crm_log_xml_trace(attr, &quot;Abort&quot;);</a>
+<a name="ln130">            goto bail;</a>
+<a name="ln131">        }</a>
+<a name="ln132">    }</a>
+<a name="ln133"> </a>
+<a name="ln134">    freeXpathObject(xpathObj);</a>
+<a name="ln135"> </a>
+<a name="ln136">    /* Transient Attributes - Removed */</a>
+<a name="ln137">    xpathObj =</a>
+<a name="ln138">        xpath_search(diff,</a>
+<a name="ln139">                     &quot;//&quot; F_CIB_UPDATE_RESULT &quot;//&quot; XML_TAG_DIFF_REMOVED &quot;//&quot;</a>
+<a name="ln140">                     XML_TAG_TRANSIENT_NODEATTRS);</a>
+<a name="ln141">    if (numXpathResults(xpathObj) &gt; 0) {</a>
+<a name="ln142">        xmlNode *aborted = getXpathResult(xpathObj, 0);</a>
+<a name="ln143"> </a>
+<a name="ln144">        abort_transition(INFINITY, tg_restart, &quot;Transient attribute: removal&quot;, aborted);</a>
+<a name="ln145">        goto bail;</a>
+<a name="ln146"> </a>
+<a name="ln147">    }</a>
+<a name="ln148">    freeXpathObject(xpathObj);</a>
+<a name="ln149"> </a>
+<a name="ln150">    /*</a>
+<a name="ln151">     * Check for and fast-track the processing of LRM refreshes</a>
+<a name="ln152">     * In large clusters this can result in _huge_ speedups</a>
+<a name="ln153">     *</a>
+<a name="ln154">     * Unfortunately we can only do so when there are no pending actions</a>
+<a name="ln155">     * Otherwise we could miss updates we're waiting for and stall</a>
+<a name="ln156">     *</a>
+<a name="ln157">     */</a>
+<a name="ln158">    xpathObj = NULL;</a>
+<a name="ln159">    if (transition_graph-&gt;pending == 0) {</a>
+<a name="ln160">        xpathObj =</a>
+<a name="ln161">            xpath_search(diff,</a>
+<a name="ln162">                         &quot;//&quot; F_CIB_UPDATE_RESULT &quot;//&quot; XML_TAG_DIFF_ADDED &quot;//&quot;</a>
+<a name="ln163">                         XML_LRM_TAG_RESOURCE);</a>
+<a name="ln164">    }</a>
+<a name="ln165"> </a>
+<a name="ln166">    max = numXpathResults(xpathObj);</a>
+<a name="ln167">    if (max &gt; 1) {</a>
+<a name="ln168">        /* Updates by, or in response to, TE actions will never contain updates</a>
+<a name="ln169">         * for more than one resource at a time</a>
+<a name="ln170">         */</a>
+<a name="ln171">        crm_debug(&quot;Detected LRM refresh - %d resources updated: Skipping all resource events&quot;, max);</a>
+<a name="ln172">        crm_log_xml_trace(diff, &quot;lrm-refresh&quot;);</a>
+<a name="ln173">        abort_transition(INFINITY, tg_restart, &quot;LRM Refresh&quot;, NULL);</a>
+<a name="ln174">        goto bail;</a>
+<a name="ln175">    }</a>
+<a name="ln176">    freeXpathObject(xpathObj);</a>
+<a name="ln177"> </a>
+<a name="ln178">    /* Process operation updates */</a>
+<a name="ln179">    xpathObj =</a>
+<a name="ln180">        xpath_search(diff,</a>
+<a name="ln181">                     &quot;//&quot; F_CIB_UPDATE_RESULT &quot;//&quot; XML_TAG_DIFF_ADDED &quot;//&quot; XML_LRM_TAG_RSC_OP);</a>
+<a name="ln182">    if (numXpathResults(xpathObj)) {</a>
+<a name="ln183">/*</a>
+<a name="ln184">    &lt;status&gt;</a>
+<a name="ln185">       &lt;node_state id=&quot;node1&quot; state=CRMD_JOINSTATE_MEMBER exp_state=&quot;active&quot;&gt;</a>
+<a name="ln186">          &lt;lrm&gt;</a>
+<a name="ln187">             &lt;lrm_resources&gt;</a>
+<a name="ln188">        	&lt;rsc_state id=&quot;&quot; rsc_id=&quot;rsc4&quot; node_id=&quot;node1&quot; rsc_state=&quot;stopped&quot;/&gt;</a>
+<a name="ln189">*/</a>
+<a name="ln190">        int lpc = 0, max = numXpathResults(xpathObj);</a>
+<a name="ln191"> </a>
+<a name="ln192">        for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln193">            xmlNode *rsc_op = getXpathResult(xpathObj, lpc);</a>
+<a name="ln194">            const char *node = get_node_id(rsc_op);</a>
+<a name="ln195"> </a>
+<a name="ln196">            process_graph_event(rsc_op, node);</a>
+<a name="ln197">        }</a>
+<a name="ln198">    }</a>
+<a name="ln199">    freeXpathObject(xpathObj);</a>
+<a name="ln200"> </a>
+<a name="ln201">    /* Detect deleted (as opposed to replaced or added) actions - eg. crm_resource -C */</a>
+<a name="ln202">    xpathObj = xpath_search(diff, &quot;//&quot; XML_TAG_DIFF_REMOVED &quot;//&quot; XML_LRM_TAG_RSC_OP);</a>
+<a name="ln203">    max = numXpathResults(xpathObj);</a>
+<a name="ln204">    for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln205">        int path_max = 0;</a>
+<a name="ln206">        const char *op_id = NULL;</a>
+<a name="ln207">        char *rsc_op_xpath = NULL;</a>
+<a name="ln208">        xmlXPathObject *op_match = NULL;</a>
+<a name="ln209">        xmlNode *match = getXpathResult(xpathObj, lpc);</a>
+<a name="ln210"> </a>
+<a name="ln211">        CRM_LOG_ASSERT(match != NULL);</a>
+<a name="ln212">        if(match == NULL) { continue; };</a>
+<a name="ln213"> </a>
+<a name="ln214">        op_id = ID(match);</a>
+<a name="ln215"> </a>
+<a name="ln216">        path_max = strlen(rsc_op_template) + strlen(op_id) + 1;</a>
+<a name="ln217">        rsc_op_xpath = calloc(1, path_max);</a>
+<a name="ln218">        snprintf(rsc_op_xpath, path_max, rsc_op_template, op_id);</a>
+<a name="ln219"> </a>
+<a name="ln220">        op_match = xpath_search(diff, rsc_op_xpath);</a>
+<a name="ln221">        if (numXpathResults(op_match) == 0) {</a>
+<a name="ln222">            /* Prevent false positives by matching cancelations too */</a>
+<a name="ln223">            const char *node = get_node_id(match);</a>
+<a name="ln224">            crm_action_t *cancelled = get_cancel_action(op_id, node);</a>
+<a name="ln225"> </a>
+<a name="ln226">            if (cancelled == NULL) {</a>
+<a name="ln227">                crm_debug(&quot;No match for deleted action %s (%s on %s)&quot;, rsc_op_xpath, op_id,</a>
+<a name="ln228">                          node);</a>
+<a name="ln229">                abort_transition(INFINITY, tg_restart, &quot;Resource op removal&quot;, match);</a>
+<a name="ln230">                freeXpathObject(op_match);</a>
+<a name="ln231">                free(rsc_op_xpath);</a>
+<a name="ln232">                goto bail;</a>
+<a name="ln233"> </a>
+<a name="ln234">            } else {</a>
+<a name="ln235">                crm_debug(&quot;Deleted lrm_rsc_op %s on %s was for graph event %d&quot;,</a>
+<a name="ln236">                          op_id, node, cancelled-&gt;id);</a>
+<a name="ln237">            }</a>
+<a name="ln238">        }</a>
+<a name="ln239"> </a>
+<a name="ln240">        freeXpathObject(op_match);</a>
+<a name="ln241">        free(rsc_op_xpath);</a>
+<a name="ln242">    }</a>
+<a name="ln243"> </a>
+<a name="ln244">  bail:</a>
+<a name="ln245">    freeXpathObject(xpathObj);</a>
+<a name="ln246">}</a>
+<a name="ln247"> </a>
+<a name="ln248">static void process_resource_updates(</a>
+<a name="ln249">    const char *node, xmlNode *xml, xmlNode *change, const char *op, const char *xpath) </a>
+<a name="ln250">{</a>
+<a name="ln251">    xmlNode *cIter = NULL;</a>
+<a name="ln252">    xmlNode *rsc = NULL;</a>
+<a name="ln253">    xmlNode *rsc_op = NULL;</a>
+<a name="ln254">    int num_resources = 0;</a>
+<a name="ln255"> </a>
+<a name="ln256">    if(xml == NULL) {</a>
+<a name="ln257">        return;</a>
+<a name="ln258"> </a>
+<a name="ln259">    } else if(strcmp((const char*)xml-&gt;name, XML_CIB_TAG_LRM) == 0) {</a>
+<a name="ln260">        xml = first_named_child(xml, XML_LRM_TAG_RESOURCES);</a>
+<a name="ln261">        crm_trace(&quot;Got %p in %s&quot;, xml, XML_CIB_TAG_LRM);</a>
+<a name="ln262">    }</a>
+<a name="ln263"> </a>
+<a name="ln264">    CRM_ASSERT(strcmp((const char*)xml-&gt;name, XML_LRM_TAG_RESOURCES) == 0);</a>
+<a name="ln265"> </a>
+<a name="ln266">    for(cIter = xml-&gt;children; cIter; cIter = cIter-&gt;next) {</a>
+<a name="ln267">        num_resources++;</a>
+<a name="ln268">    }</a>
+<a name="ln269"> </a>
+<a name="ln270">    if(num_resources &gt; 1) {</a>
+<a name="ln271">        /*</a>
+<a name="ln272">         * Check for and fast-track the processing of LRM refreshes</a>
+<a name="ln273">         * In large clusters this can result in _huge_ speedups</a>
+<a name="ln274">         *</a>
+<a name="ln275">         * Unfortunately we can only do so when there are no pending actions</a>
+<a name="ln276">         * Otherwise we could miss updates we're waiting for and stall</a>
+<a name="ln277">         *</a>
+<a name="ln278">         */</a>
+<a name="ln279"> </a>
+<a name="ln280">        crm_debug(&quot;Detected LRM refresh - %d resources updated&quot;, num_resources);</a>
+<a name="ln281">        crm_log_xml_trace(change, &quot;lrm-refresh&quot;);</a>
+<a name="ln282">        abort_transition(INFINITY, tg_restart, &quot;LRM Refresh&quot;, NULL);</a>
+<a name="ln283">        return;</a>
+<a name="ln284">    }</a>
+<a name="ln285"> </a>
+<a name="ln286">    for (rsc = __xml_first_child(xml); rsc != NULL; rsc = __xml_next(rsc)) {</a>
+<a name="ln287">        crm_trace(&quot;Processing %s&quot;, ID(rsc));</a>
+<a name="ln288">        for (rsc_op = __xml_first_child(rsc); rsc_op != NULL; rsc_op = __xml_next(rsc_op)) {</a>
+<a name="ln289">            crm_trace(&quot;Processing %s&quot;, ID(rsc_op));</a>
+<a name="ln290">            process_graph_event(rsc_op, node);</a>
+<a name="ln291">        }</a>
+<a name="ln292">    }</a>
+<a name="ln293">}</a>
+<a name="ln294"> </a>
+<a name="ln295">#define NODE_PATT &quot;/lrm[@id=&quot;</a>
+<a name="ln296">static char *get_node_from_xpath(const char *xpath) </a>
+<a name="ln297">{</a>
+<a name="ln298">    char *nodeid = NULL;</a>
+<a name="ln299">    char *tmp = strstr(xpath, NODE_PATT);</a>
+<a name="ln300"> </a>
+<a name="ln301">    if(tmp) {</a>
+<a name="ln302">        tmp += strlen(NODE_PATT);</a>
+<a name="ln303">        tmp += 1;</a>
+<a name="ln304"> </a>
+<a name="ln305">        nodeid = strdup(tmp);</a>
+<a name="ln306">        tmp = strstr(nodeid, &quot;\'&quot;);</a>
+<a name="ln307">        CRM_ASSERT(tmp);</a>
+<a name="ln308">        tmp[0] = 0;</a>
+<a name="ln309">    }</a>
+<a name="ln310">    return nodeid;</a>
+<a name="ln311">}</a>
+<a name="ln312"> </a>
+<a name="ln313">static char *extract_node_uuid(const char *xpath) </a>
+<a name="ln314">{</a>
+<a name="ln315">    char *mutable_path = strdup(xpath);</a>
+<a name="ln316">    char *node_uuid = NULL;</a>
+<a name="ln317">    char *search = NULL;</a>
+<a name="ln318">    char *match = NULL;</a>
+<a name="ln319"> </a>
+<a name="ln320">    match = strstr(mutable_path, &quot;node_state[@id=\'&quot;);</a>
+<a name="ln321">    if (match == NULL) {</a>
+<a name="ln322">        free(mutable_path);</a>
+<a name="ln323">        return NULL;</a>
+<a name="ln324">    }</a>
+<a name="ln325">    match += strlen(&quot;node_state[@id=\'&quot;);</a>
+<a name="ln326"> </a>
+<a name="ln327">    search = strchr(match, '\'');</a>
+<a name="ln328">    if (search == NULL) {</a>
+<a name="ln329">        free(mutable_path);</a>
+<a name="ln330">        return NULL;</a>
+<a name="ln331">    }</a>
+<a name="ln332">    search[0] = 0;</a>
+<a name="ln333"> </a>
+<a name="ln334">    node_uuid = strdup(match);</a>
+<a name="ln335">    free(mutable_path);</a>
+<a name="ln336">    return node_uuid;</a>
+<a name="ln337">}</a>
+<a name="ln338"> </a>
+<a name="ln339">static void</a>
+<a name="ln340">abort_unless_down(const char *xpath, const char *op, xmlNode *change,</a>
+<a name="ln341">                  const char *reason)</a>
+<a name="ln342">{</a>
+<a name="ln343">    char *node_uuid = NULL;</a>
+<a name="ln344">    crm_action_t *down = NULL;</a>
+<a name="ln345"> </a>
+<a name="ln346">    if(safe_str_neq(op, &quot;delete&quot;)) {</a>
+<a name="ln347">        abort_transition(INFINITY, tg_restart, reason, change);</a>
+<a name="ln348">        return;</a>
+<a name="ln349">    }</a>
+<a name="ln350"> </a>
+<a name="ln351">    node_uuid = extract_node_uuid(xpath);</a>
+<a name="ln352">    if(node_uuid == NULL) {</a>
+<a name="ln353">        crm_err(&quot;Could not extract node ID from %s&quot;, xpath);</a>
+<a name="ln354">        abort_transition(INFINITY, tg_restart, reason, change);</a>
+<a name="ln355">        return;</a>
+<a name="ln356">    }</a>
+<a name="ln357"> </a>
+<a name="ln358">    down = match_down_event(node_uuid, TRUE);</a>
+<a name="ln359">    if(down == NULL || down-&gt;executed == false) {</a>
+<a name="ln360">        crm_trace(&quot;Not expecting %s to be down (%s)&quot;, node_uuid, xpath);</a>
+<a name="ln361">        abort_transition(INFINITY, tg_restart, reason, change);</a>
+<a name="ln362">    } else {</a>
+<a name="ln363">        crm_trace(&quot;Expecting changes to %s (%s)&quot;, node_uuid, xpath);</a>
+<a name="ln364">    }</a>
+<a name="ln365">    free(node_uuid);</a>
+<a name="ln366">}</a>
+<a name="ln367"> </a>
+<a name="ln368">void</a>
+<a name="ln369">te_update_diff(const char *event, xmlNode * msg)</a>
+<a name="ln370">{</a>
+<a name="ln371">    int rc = -EINVAL;</a>
+<a name="ln372">    int format = 1;</a>
+<a name="ln373">    xmlNode *change = NULL;</a>
+<a name="ln374">    const char *op = NULL;</a>
+<a name="ln375"> </a>
+<a name="ln376">    xmlNode *diff = NULL;</a>
+<a name="ln377"> </a>
+<a name="ln378">    int p_add[] = { 0, 0, 0 };</a>
+<a name="ln379">    int p_del[] = { 0, 0, 0 };</a>
+<a name="ln380"> </a>
+<a name="ln381">    CRM_CHECK(msg != NULL, return);</a>
+<a name="ln382">    crm_element_value_int(msg, F_CIB_RC, &amp;rc);</a>
+<a name="ln383"> </a>
+<a name="ln384">    if (transition_graph == NULL) {</a>
+<a name="ln385">        crm_trace(&quot;No graph&quot;);</a>
+<a name="ln386">        return;</a>
+<a name="ln387"> </a>
+<a name="ln388">    } else if (rc &lt; pcmk_ok) {</a>
+<a name="ln389">        crm_trace(&quot;Filter rc=%d (%s)&quot;, rc, pcmk_strerror(rc));</a>
+<a name="ln390">        return;</a>
+<a name="ln391"> </a>
+<a name="ln392">    } else if (transition_graph-&gt;complete == TRUE</a>
+<a name="ln393">               &amp;&amp; fsa_state != S_IDLE</a>
+<a name="ln394">               &amp;&amp; fsa_state != S_TRANSITION_ENGINE &amp;&amp; fsa_state != S_POLICY_ENGINE) {</a>
+<a name="ln395">        crm_trace(&quot;Filter state=%s, complete=%d&quot;, fsa_state2string(fsa_state),</a>
+<a name="ln396">                  transition_graph-&gt;complete);</a>
+<a name="ln397">        return;</a>
+<a name="ln398">    }</a>
+<a name="ln399"> </a>
+<a name="ln400">    op = crm_element_value(msg, F_CIB_OPERATION);</a>
+<a name="ln401">    diff = get_message_xml(msg, F_CIB_UPDATE_RESULT);</a>
+<a name="ln402"> </a>
+<a name="ln403">    xml_patch_versions(diff, p_add, p_del);</a>
+<a name="ln404">    crm_debug(&quot;Processing (%s) diff: %d.%d.%d -&gt; %d.%d.%d (%s)&quot;, op,</a>
+<a name="ln405">              p_del[0], p_del[1], p_del[2], p_add[0], p_add[1], p_add[2],</a>
+<a name="ln406">              fsa_state2string(fsa_state));</a>
+<a name="ln407"> </a>
+<a name="ln408">    crm_element_value_int(diff, &quot;format&quot;, &amp;format);</a>
+<a name="ln409">    switch(format) {</a>
+<a name="ln410">        case 1:</a>
+<a name="ln411">            te_legacy_update_diff(event, diff);</a>
+<a name="ln412">            return;</a>
+<a name="ln413">        case 2:</a>
+<a name="ln414">            /* Cool, we know what to do here */</a>
+<a name="ln415">            crm_log_xml_trace(diff, &quot;Patch:Raw&quot;);</a>
+<a name="ln416">            break;</a>
+<a name="ln417">        default:</a>
+<a name="ln418">            crm_warn(&quot;Unknown patch format: %d&quot;, format);</a>
+<a name="ln419">            return;</a>
+<a name="ln420">    }</a>
+<a name="ln421"> </a>
+<a name="ln422">    for (change = __xml_first_child(diff); change != NULL; change = __xml_next(change)) {</a>
+<a name="ln423">        const char *name = NULL;</a>
+<a name="ln424">        const char *op = crm_element_value(change, XML_DIFF_OP);</a>
+<a name="ln425">        const char *xpath = crm_element_value(change, XML_DIFF_PATH);</a>
+<a name="ln426">        xmlNode *match = NULL;</a>
+<a name="ln427">        const char *node = NULL;</a>
+<a name="ln428"> </a>
+<a name="ln429">        if(op == NULL) {</a>
+<a name="ln430">            continue;</a>
+<a name="ln431"> </a>
+<a name="ln432">        } else if(strcmp(op, &quot;create&quot;) == 0) {</a>
+<a name="ln433">            match = change-&gt;children;</a>
+<a name="ln434"> </a>
+<a name="ln435">        } else if(strcmp(op, &quot;move&quot;) == 0) {</a>
+<a name="ln436">            continue;</a>
+<a name="ln437"> </a>
+<a name="ln438">        } else if(strcmp(op, &quot;modify&quot;) == 0) {</a>
+<a name="ln439">            match = first_named_child(change, XML_DIFF_RESULT);</a>
+<a name="ln440">            if(match) {</a>
+<a name="ln441">                match = match-&gt;children;</a>
+<a name="ln442">            }</a>
+<a name="ln443">        }</a>
+<a name="ln444"> </a>
+<a name="ln445">        if(match) {</a>
+<a name="ln446">            if (match-&gt;type == XML_COMMENT_NODE) {</a>
+<a name="ln447">                crm_trace(&quot;Ignoring %s operation for comment at %s&quot;, op, xpath);</a>
+<a name="ln448">                continue;</a>
+<a name="ln449">            }</a>
+<a name="ln450">            name = (const char *)match-&gt;name;</a>
+<a name="ln451">        }</a>
+<a name="ln452"> </a>
+<a name="ln453">        crm_trace(&quot;Handling %s operation for %s%s%s&quot;,</a>
+<a name="ln454">                  op, (xpath? xpath : &quot;CIB&quot;),</a>
+<a name="ln455">                  (name? &quot; matched by &quot; : &quot;&quot;), (name? name : &quot;&quot;));</a>
+<a name="ln456">        if(xpath == NULL) {</a>
+<a name="ln457">            /* Version field, ignore */</a>
+<a name="ln458"> </a>
+<a name="ln459">        } else if(strstr(xpath, &quot;/cib/configuration&quot;)) {</a>
+<a name="ln460">            abort_transition(INFINITY, tg_restart, &quot;Configuration change&quot;, change);</a>
+<a name="ln461">            break; /* Won't be packaged with any resource operations we may be waiting for */</a>
+<a name="ln462"> </a>
+<a name="ln463">        } else if(strstr(xpath, &quot;/&quot;XML_CIB_TAG_TICKETS) || safe_str_eq(name, XML_CIB_TAG_TICKETS)) {</a>
+<a name="ln464">            abort_transition(INFINITY, tg_restart, &quot;Ticket attribute change&quot;, change);</a>
+<a name="ln465">            break; /* Won't be packaged with any resource operations we may be waiting for */</a>
+<a name="ln466"> </a>
+<a name="ln467">        } else if(strstr(xpath, &quot;/&quot;XML_TAG_TRANSIENT_NODEATTRS&quot;[&quot;) || safe_str_eq(name, XML_TAG_TRANSIENT_NODEATTRS)) {</a>
+<a name="ln468">            abort_unless_down(xpath, op, change, &quot;Transient attribute change&quot;);</a>
+<a name="ln469">            break; /* Won't be packaged with any resource operations we may be waiting for */</a>
+<a name="ln470"> </a>
+<a name="ln471">        } else if(strstr(xpath, &quot;/&quot;XML_LRM_TAG_RSC_OP&quot;[&quot;) &amp;&amp; safe_str_eq(op, &quot;delete&quot;)) {</a>
+<a name="ln472">            crm_action_t *cancel = NULL;</a>
+<a name="ln473">            char *mutable_key = strdup(xpath);</a>
+<a name="ln474">            char *key, *node_uuid;</a>
+<a name="ln475"> </a>
+<a name="ln476">            /* Extract the part of xpath between last pair of single quotes */</a>
+<a name="ln477">            key = strrchr(mutable_key, '\'');</a>
+<a name="ln478">            if (key != NULL) {</a>
+<a name="ln479">                *key = '\0';</a>
+<a name="ln480">                key = strrchr(mutable_key, '\'');</a>
+<a name="ln481">            }</a>
+<a name="ln482">            if (key == NULL) {</a>
+<a name="ln483">                crm_warn(&quot;Ignoring malformed CIB update (resource deletion)&quot;);</a>
+<a name="ln484">                free(mutable_key);</a>
+<a name="ln485">                continue;</a>
+<a name="ln486">            }</a>
+<a name="ln487">            ++key;</a>
+<a name="ln488"> </a>
+<a name="ln489">            node_uuid = extract_node_uuid(xpath);</a>
+<a name="ln490">            cancel = get_cancel_action(key, node_uuid);</a>
+<a name="ln491">            if (cancel == NULL) {</a>
+<a name="ln492">                abort_transition(INFINITY, tg_restart, &quot;Resource operation removal&quot;, change);</a>
+<a name="ln493"> </a>
+<a name="ln494">            } else {</a>
+<a name="ln495">                crm_info(&quot;Cancellation of %s on %s confirmed (%d)&quot;, key, node_uuid, cancel-&gt;id);</a>
+<a name="ln496">                stop_te_timer(cancel-&gt;timer);</a>
+<a name="ln497">                te_action_confirmed(cancel);</a>
+<a name="ln498"> </a>
+<a name="ln499">                update_graph(transition_graph, cancel);</a>
+<a name="ln500">                trigger_graph();</a>
+<a name="ln501"> </a>
+<a name="ln502">            }</a>
+<a name="ln503">            free(mutable_key);</a>
+<a name="ln504">            free(node_uuid);</a>
+<a name="ln505"> </a>
+<a name="ln506">        } else if(strstr(xpath, &quot;/&quot;XML_CIB_TAG_LRM&quot;[&quot;) &amp;&amp; safe_str_eq(op, &quot;delete&quot;)) {</a>
+<a name="ln507">            abort_unless_down(xpath, op, change, &quot;Resource state removal&quot;);</a>
+<a name="ln508"> </a>
+<a name="ln509">        } else if(strstr(xpath, &quot;/&quot;XML_CIB_TAG_STATE&quot;[&quot;) &amp;&amp; safe_str_eq(op, &quot;delete&quot;)) {</a>
+<a name="ln510">            abort_unless_down(xpath, op, change, &quot;Node state removal&quot;);</a>
+<a name="ln511"> </a>
+<a name="ln512">        } else if(name == NULL) {</a>
+<a name="ln513">            crm_debug(&quot;No result for %s operation to %s&quot;, op, xpath);</a>
+<a name="ln514">            CRM_ASSERT(strcmp(op, &quot;delete&quot;) == 0 || strcmp(op, &quot;move&quot;) == 0);</a>
+<a name="ln515"> </a>
+<a name="ln516">        } else if(strcmp(name, XML_TAG_CIB) == 0) {</a>
+<a name="ln517">            xmlNode *state = NULL;</a>
+<a name="ln518">            xmlNode *status = first_named_child(match, XML_CIB_TAG_STATUS);</a>
+<a name="ln519">            xmlNode *config = first_named_child(match, XML_CIB_TAG_CONFIGURATION);</a>
+<a name="ln520"> </a>
+<a name="ln521">            for (state = __xml_first_child(status); state != NULL; state = __xml_next(state)) {</a>
+<a name="ln522">                xmlNode *lrm = first_named_child(state, XML_CIB_TAG_LRM);</a>
+<a name="ln523"> </a>
+<a name="ln524">                node = ID(state);</a>
+<a name="ln525">                process_resource_updates(node, lrm, change, op, xpath);</a>
+<a name="ln526">            }</a>
+<a name="ln527"> </a>
+<a name="ln528">            if(config) {</a>
+<a name="ln529">                abort_transition(INFINITY, tg_restart, &quot;Non-status-only change&quot;, change);</a>
+<a name="ln530">            }</a>
+<a name="ln531"> </a>
+<a name="ln532">        } else if(strcmp(name, XML_CIB_TAG_STATUS) == 0) {</a>
+<a name="ln533">            xmlNode *state = NULL;</a>
+<a name="ln534"> </a>
+<a name="ln535">            for (state = __xml_first_child(match); state != NULL; state = __xml_next(state)) {</a>
+<a name="ln536">                xmlNode *lrm = first_named_child(state, XML_CIB_TAG_LRM);</a>
+<a name="ln537"> </a>
+<a name="ln538">                node = ID(state);</a>
+<a name="ln539">                process_resource_updates(node, lrm, change, op, xpath);</a>
+<a name="ln540">            }</a>
+<a name="ln541"> </a>
+<a name="ln542">        } else if(strcmp(name, XML_CIB_TAG_STATE) == 0) {</a>
+<a name="ln543">            xmlNode *lrm = first_named_child(match, XML_CIB_TAG_LRM);</a>
+<a name="ln544"> </a>
+<a name="ln545">            node = ID(match);</a>
+<a name="ln546">            process_resource_updates(node, lrm, change, op, xpath);</a>
+<a name="ln547"> </a>
+<a name="ln548">        } else if(strcmp(name, XML_CIB_TAG_LRM) == 0) {</a>
+<a name="ln549">            node = ID(match);</a>
+<a name="ln550">            process_resource_updates(node, match, change, op, xpath);</a>
+<a name="ln551"> </a>
+<a name="ln552">        } else if(strcmp(name, XML_LRM_TAG_RESOURCES) == 0) {</a>
+<a name="ln553">            char *local_node = get_node_from_xpath(xpath);</a>
+<a name="ln554"> </a>
+<a name="ln555">            process_resource_updates(local_node, match, change, op, xpath);</a>
+<a name="ln556">            free(local_node);</a>
+<a name="ln557"> </a>
+<a name="ln558">        } else if(strcmp(name, XML_LRM_TAG_RESOURCE) == 0) {</a>
+<a name="ln559"> </a>
+<a name="ln560">            xmlNode *rsc_op;</a>
+<a name="ln561">            char *local_node = get_node_from_xpath(xpath);</a>
+<a name="ln562"> </a>
+<a name="ln563">            for (rsc_op = __xml_first_child(match); rsc_op != NULL; rsc_op = __xml_next(rsc_op)) {</a>
+<a name="ln564">                process_graph_event(rsc_op, local_node);</a>
+<a name="ln565">            }</a>
+<a name="ln566">            free(local_node);</a>
+<a name="ln567"> </a>
+<a name="ln568">        } else if(strcmp(name, XML_LRM_TAG_RSC_OP) == 0) {</a>
+<a name="ln569">            char *local_node = get_node_from_xpath(xpath);</a>
+<a name="ln570"> </a>
+<a name="ln571">            process_graph_event(match, local_node);</a>
+<a name="ln572">            free(local_node);</a>
+<a name="ln573"> </a>
+<a name="ln574">        } else {</a>
+<a name="ln575">            crm_err(&quot;Ignoring %s operation for %s %p, %s&quot;, op, xpath, match, name);</a>
+<a name="ln576">        }</a>
+<a name="ln577">    }</a>
+<a name="ln578">}</a>
+<a name="ln579"> </a>
+<a name="ln580"> </a>
+<a name="ln581">gboolean</a>
+<a name="ln582">process_te_message(xmlNode * msg, xmlNode * xml_data)</a>
+<a name="ln583">{</a>
+<a name="ln584">    const char *from = crm_element_value(msg, F_ORIG);</a>
+<a name="ln585">    const char *sys_to = crm_element_value(msg, F_CRM_SYS_TO);</a>
+<a name="ln586">    const char *sys_from = crm_element_value(msg, F_CRM_SYS_FROM);</a>
+<a name="ln587">    const char *ref = crm_element_value(msg, F_CRM_REFERENCE);</a>
+<a name="ln588">    const char *op = crm_element_value(msg, F_CRM_TASK);</a>
+<a name="ln589">    const char *type = crm_element_value(msg, F_CRM_MSG_TYPE);</a>
+<a name="ln590"> </a>
+<a name="ln591">    crm_trace(&quot;Processing %s (%s) message&quot;, op, ref);</a>
+<a name="ln592">    crm_log_xml_trace(msg, &quot;ipc&quot;);</a>
+<a name="ln593"> </a>
+<a name="ln594">    if (op == NULL) {</a>
+<a name="ln595">        /* error */</a>
+<a name="ln596"> </a>
+<a name="ln597">    } else if (sys_to == NULL || strcasecmp(sys_to, CRM_SYSTEM_TENGINE) != 0) {</a>
+<a name="ln598">        crm_trace(&quot;Bad sys-to %s&quot;, crm_str(sys_to));</a>
+<a name="ln599">        return FALSE;</a>
+<a name="ln600"> </a>
+<a name="ln601">    } else if (safe_str_eq(op, CRM_OP_INVOKE_LRM)</a>
+<a name="ln602">               &amp;&amp; safe_str_eq(sys_from, CRM_SYSTEM_LRMD)</a>
+<a name="ln603">/* 		  &amp;&amp; safe_str_eq(type, XML_ATTR_RESPONSE) */</a>
+<a name="ln604">        ) {</a>
+<a name="ln605">        xmlXPathObject *xpathObj = NULL;</a>
+<a name="ln606"> </a>
+<a name="ln607">        crm_log_xml_trace(msg, &quot;Processing (N)ACK&quot;);</a>
+<a name="ln608">        crm_debug(&quot;Processing (N)ACK %s from %s&quot;, crm_element_value(msg, F_CRM_REFERENCE), from);</a>
+<a name="ln609"> </a>
+<a name="ln610">        xpathObj = xpath_search(xml_data, &quot;//&quot; XML_LRM_TAG_RSC_OP);</a>
+<a name="ln611">        if (numXpathResults(xpathObj)) {</a>
+<a name="ln612">            int lpc = 0, max = numXpathResults(xpathObj);</a>
+<a name="ln613"> </a>
+<a name="ln614">            for (lpc = 0; lpc &lt; max; lpc++) {</a>
+<a name="ln615">                xmlNode *rsc_op = getXpathResult(xpathObj, lpc);</a>
+<a name="ln616">                const char *node = get_node_id(rsc_op);</a>
+<a name="ln617"> </a>
+<a name="ln618">                process_graph_event(rsc_op, node);</a>
+<a name="ln619">            }</a>
+<a name="ln620">            freeXpathObject(xpathObj);</a>
+<a name="ln621"> </a>
+<a name="ln622">        } else {</a>
+<a name="ln623">            crm_log_xml_err(msg, &quot;Invalid (N)ACK&quot;);</a>
+<a name="ln624">            freeXpathObject(xpathObj);</a>
+<a name="ln625">            return FALSE;</a>
+<a name="ln626">        }</a>
+<a name="ln627"> </a>
+<a name="ln628">    } else {</a>
+<a name="ln629">        crm_err(&quot;Unknown command: %s::%s from %s&quot;, type, op, sys_from);</a>
+<a name="ln630">    }</a>
+<a name="ln631"> </a>
+<a name="ln632">    crm_trace(&quot;finished processing message&quot;);</a>
+<a name="ln633"> </a>
+<a name="ln634">    return TRUE;</a>
+<a name="ln635">}</a>
+<a name="ln636"> </a>
+<a name="ln637">GHashTable *stonith_failures = NULL;</a>
+<a name="ln638">struct st_fail_rec {</a>
+<a name="ln639">    int count;</a>
+<a name="ln640">};</a>
+<a name="ln641"> </a>
+<a name="ln642">static gboolean</a>
+<a name="ln643">too_many_st_failures(const char *target)</a>
+<a name="ln644">{</a>
+<a name="ln645">    GHashTableIter iter;</a>
+<a name="ln646">    const char *key = NULL;</a>
+<a name="ln647">    struct st_fail_rec *value = NULL;</a>
+<a name="ln648"> </a>
+<a name="ln649">    if (stonith_failures == NULL) {</a>
+<a name="ln650">        return FALSE;</a>
+<a name="ln651">    }</a>
+<a name="ln652"> </a>
+<a name="ln653">    if (target == NULL) {</a>
+<a name="ln654">        g_hash_table_iter_init(&amp;iter, stonith_failures);</a>
+<a name="ln655">        while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; value)) {</a>
+<a name="ln656">            if (value-&gt;count &gt;= stonith_max_attempts) {</a>
+<a name="ln657">                target = (const char*)key;</a>
+<a name="ln658">                goto too_many;</a>
+<a name="ln659">            }</a>
+<a name="ln660">        }</a>
+<a name="ln661">    } else {</a>
+<a name="ln662">        value = g_hash_table_lookup(stonith_failures, target);</a>
+<a name="ln663">        if ((value != NULL) &amp;&amp; (value-&gt;count &gt;= stonith_max_attempts)) {</a>
+<a name="ln664">            goto too_many;</a>
+<a name="ln665">        }</a>
+<a name="ln666">    }</a>
+<a name="ln667">    return FALSE;</a>
+<a name="ln668"> </a>
+<a name="ln669">too_many:</a>
+<a name="ln670">    crm_warn(&quot;Too many failures (%d) to fence %s, giving up&quot;,</a>
+<a name="ln671">             value-&gt;count, target);</a>
+<a name="ln672">    return TRUE;</a>
+<a name="ln673">}</a>
+<a name="ln674"> </a>
+<a name="ln675">/*!</a>
+<a name="ln676"> * \internal</a>
+<a name="ln677"> * \brief Reset a stonith fail count</a>
+<a name="ln678"> *</a>
+<a name="ln679"> * \param[in] target  Name of node to reset, or NULL for all</a>
+<a name="ln680"> */</a>
+<a name="ln681">void</a>
+<a name="ln682">st_fail_count_reset(const char *target)</a>
+<a name="ln683">{</a>
+<a name="ln684">    if (stonith_failures == NULL) {</a>
+<a name="ln685">        return;</a>
+<a name="ln686">    }</a>
+<a name="ln687"> </a>
+<a name="ln688">    if (target) {</a>
+<a name="ln689">        struct st_fail_rec *rec = NULL;</a>
+<a name="ln690"> </a>
+<a name="ln691">        rec = g_hash_table_lookup(stonith_failures, target);</a>
+<a name="ln692">        if (rec) {</a>
+<a name="ln693">            rec-&gt;count = 0;</a>
+<a name="ln694">        }</a>
+<a name="ln695">    } else {</a>
+<a name="ln696">        GHashTableIter iter;</a>
+<a name="ln697">        const char *key = NULL;</a>
+<a name="ln698">        struct st_fail_rec *rec = NULL;</a>
+<a name="ln699"> </a>
+<a name="ln700">        g_hash_table_iter_init(&amp;iter, stonith_failures);</a>
+<a name="ln701">        while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp;key,</a>
+<a name="ln702">                                      (gpointer *) &amp;rec)) {</a>
+<a name="ln703">            rec-&gt;count = 0;</a>
+<a name="ln704">        }</a>
+<a name="ln705">    }</a>
+<a name="ln706">}</a>
+<a name="ln707"> </a>
+<a name="ln708">void</a>
+<a name="ln709">st_fail_count_increment(const char *target)</a>
+<a name="ln710">{</a>
+<a name="ln711">    struct st_fail_rec *rec = NULL;</a>
+<a name="ln712"> </a>
+<a name="ln713">    if (stonith_failures == NULL) {</a>
+<a name="ln714">        stonith_failures =</a>
+<a name="ln715">            g_hash_table_new_full(crm_str_hash, g_str_equal, g_hash_destroy_str, free);</a>
+<a name="ln716">    }</a>
+<a name="ln717"> </a>
+<a name="ln718">    rec = g_hash_table_lookup(stonith_failures, target);</a>
+<a name="ln719">    if (rec) {</a>
+<a name="ln720">        rec-&gt;count++;</a>
+<a name="ln721">    } else {</a>
+<a name="ln722">        rec = malloc(sizeof(struct st_fail_rec));</a>
+<a name="ln723">        if(rec == NULL) {</a>
+<a name="ln724">            return;</a>
+<a name="ln725">        }</a>
+<a name="ln726"> </a>
+<a name="ln727">        rec-&gt;count = 1;</a>
+<a name="ln728">        g_hash_table_insert(stonith_failures, strdup(target), rec);</a>
+<a name="ln729">    }</a>
+<a name="ln730">}</a>
+<a name="ln731"> </a>
+<a name="ln732">/*!</a>
+<a name="ln733"> * \internal</a>
+<a name="ln734"> * \brief Abort transition due to stonith failure</a>
+<a name="ln735"> *</a>
+<a name="ln736"> * \param[in] abort_action  Whether to restart or stop transition</a>
+<a name="ln737"> * \param[in] target  Don't restart if this (NULL for any) has too many failures</a>
+<a name="ln738"> * \param[in] reason  Log this stonith action XML as abort reason (or NULL)</a>
+<a name="ln739"> */</a>
+<a name="ln740">void</a>
+<a name="ln741">abort_for_stonith_failure(enum transition_action abort_action,</a>
+<a name="ln742">                          const char *target, xmlNode *reason)</a>
+<a name="ln743">{</a>
+<a name="ln744">    /* If stonith repeatedly fails, we eventually give up on starting a new</a>
+<a name="ln745">     * transition for that reason.</a>
+<a name="ln746">     */</a>
+<a name="ln747">    if ((abort_action != tg_stop) &amp;&amp; too_many_st_failures(target)) {</a>
+<a name="ln748">        abort_action = tg_stop;</a>
+<a name="ln749">    }</a>
+<a name="ln750">    abort_transition(INFINITY, abort_action, &quot;Stonith failed&quot;, reason);</a>
+<a name="ln751">}</a>
+<a name="ln752"> </a>
+<a name="ln753">void</a>
+<a name="ln754">tengine_stonith_callback(stonith_t * stonith, stonith_callback_data_t * data)</a>
+<a name="ln755">{</a>
+<a name="ln756">    char *uuid = NULL;</a>
+<a name="ln757">    int target_rc = -1;</a>
+<a name="ln758">    int stonith_id = -1;</a>
+<a name="ln759">    int transition_id = -1;</a>
+<a name="ln760">    crm_action_t *action = NULL;</a>
+<a name="ln761">    int call_id = data-&gt;call_id;</a>
+<a name="ln762">    int rc = data-&gt;rc;</a>
+<a name="ln763">    char *userdata = data-&gt;userdata;</a>
+<a name="ln764"> </a>
+<a name="ln765">    CRM_CHECK(userdata != NULL, return);</a>
+<a name="ln766">    crm_notice(&quot;Stonith operation %d/%s: %s (%d)&quot;, call_id, (char *)userdata,</a>
+<a name="ln767">               pcmk_strerror(rc), rc);</a>
+<a name="ln768"> </a>
+<a name="ln769">    if (AM_I_DC == FALSE) {</a>
+<a name="ln770">        return;</a>
+<a name="ln771">    }</a>
+<a name="ln772"> </a>
+<a name="ln773">    /* crm_info(&quot;call=%d, optype=%d, node_name=%s, result=%d, node_list=%s, action=%s&quot;, */</a>
+<a name="ln774">    /*       op-&gt;call_id, op-&gt;optype, op-&gt;node_name, op-&gt;op_result, */</a>
+<a name="ln775">    /*       (char *)op-&gt;node_list, op-&gt;private_data); */</a>
+<a name="ln776"> </a>
+<a name="ln777">    /* filter out old STONITH actions */</a>
+<a name="ln778">    CRM_CHECK(decode_transition_key(userdata, &amp;uuid, &amp;transition_id, &amp;stonith_id, &amp;target_rc),</a>
+<a name="ln779">              crm_err(&quot;Invalid event detected&quot;);</a>
+<a name="ln780">              goto bail;</a>
+<a name="ln781">        );</a>
+<a name="ln782"> </a>
+<a name="ln783">    if (transition_graph-&gt;complete || stonith_id &lt; 0 || safe_str_neq(uuid, te_uuid)</a>
+<a name="ln784">        || transition_graph-&gt;id != transition_id) {</a>
+<a name="ln785">        crm_info(&quot;Ignoring STONITH action initiated outside of the current transition&quot;);</a>
+<a name="ln786">        goto bail;</a>
+<a name="ln787">    }</a>
+<a name="ln788"> </a>
+<a name="ln789">    action = get_action(stonith_id, FALSE);</a>
+<a name="ln790">    if (action == NULL) {</a>
+<a name="ln791">        crm_err(&quot;Stonith action not matched&quot;);</a>
+<a name="ln792">        goto bail;</a>
+<a name="ln793">    }</a>
+<a name="ln794"> </a>
+<a name="ln795">    stop_te_timer(action-&gt;timer);</a>
+<a name="ln796"> </a>
+<a name="ln797">    if (rc == pcmk_ok) {</a>
+<a name="ln798">        const char *target = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln799">        const char *uuid = crm_element_value(action-&gt;xml, XML_LRM_ATTR_TARGET_UUID);</a>
+<a name="ln800">        const char *op = crm_meta_value(action-&gt;params, &quot;stonith_action&quot;); </a>
+<a name="ln801"> </a>
+<a name="ln802">        crm_debug(&quot;Stonith operation %d for %s passed&quot;, call_id, target);</a>
+<a name="ln803">        if (action-&gt;confirmed == FALSE) {</a>
+<a name="ln804">            te_action_confirmed(action);</a>
+<a name="ln805">            if (action-&gt;sent_update == FALSE &amp;&amp; safe_str_neq(&quot;on&quot;, op)) {</a>
+<a name="ln806">                send_stonith_update(action, target, uuid);</a>
+<a name="ln807">                action-&gt;sent_update = TRUE;</a>
+<a name="ln808">            }</a>
+<a name="ln809">        }</a>
+<a name="ln810">        st_fail_count_reset(target);</a>
+<a name="ln811"> </a>
+<a name="ln812">    } else {</a>
+<a name="ln813">        const char *target = crm_element_value_const(action-&gt;xml, XML_LRM_ATTR_TARGET);</a>
+<a name="ln814">        enum transition_action abort_action = tg_restart;</a>
+<a name="ln815"> </a>
+<a name="ln816">        action-&gt;failed = TRUE;</a>
+<a name="ln817">        crm_notice(&quot;Stonith operation %d for %s failed (%s): aborting transition.&quot;,</a>
+<a name="ln818">                   call_id, target, pcmk_strerror(rc));</a>
+<a name="ln819"> </a>
+<a name="ln820">        /* If no fence devices were available, there's no use in immediately</a>
+<a name="ln821">         * checking again, so don't start a new transition in that case.</a>
+<a name="ln822">         */</a>
+<a name="ln823">        if (rc == -ENODEV) {</a>
+<a name="ln824">            crm_warn(&quot;No devices found in cluster to fence %s, giving up&quot;,</a>
+<a name="ln825">                     target);</a>
+<a name="ln826">            abort_action = tg_stop;</a>
+<a name="ln827">        }</a>
+<a name="ln828"> </a>
+<a name="ln829">        abort_for_stonith_failure(abort_action, target, NULL);</a>
+<a name="ln830">    }</a>
+<a name="ln831"> </a>
+<a name="ln832">    update_graph(transition_graph, action);</a>
+<a name="ln833">    trigger_graph();</a>
+<a name="ln834"> </a>
+<a name="ln835">  bail:</a>
+<a name="ln836">    free(userdata);</a>
+<a name="ln837">    free(uuid);</a>
+<a name="ln838">    return;</a>
+<a name="ln839">}</a>
+<a name="ln840"> </a>
+<a name="ln841">void</a>
+<a name="ln842">cib_fencing_updated(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln843">{</a>
+<a name="ln844">    if (rc &lt; pcmk_ok) {</a>
+<a name="ln845">        crm_err(&quot;Fencing update %d for %s: failed - %s (%d)&quot;,</a>
+<a name="ln846">                call_id, (char *)user_data, pcmk_strerror(rc), rc);</a>
+<a name="ln847">        crm_log_xml_warn(msg, &quot;Failed update&quot;);</a>
+<a name="ln848">        abort_transition(INFINITY, tg_shutdown, &quot;CIB update failed&quot;, NULL);</a>
+<a name="ln849"> </a>
+<a name="ln850">    } else {</a>
+<a name="ln851">        crm_info(&quot;Fencing update %d for %s: complete&quot;, call_id, (char *)user_data);</a>
+<a name="ln852">    }</a>
+<a name="ln853">}</a>
+<a name="ln854"> </a>
+<a name="ln855">void</a>
+<a name="ln856">cib_action_updated(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)</a>
+<a name="ln857">{</a>
+<a name="ln858">    if (rc &lt; pcmk_ok) {</a>
+<a name="ln859">        crm_err(&quot;Update %d FAILED: %s&quot;, call_id, pcmk_strerror(rc));</a>
+<a name="ln860">    }</a>
+<a name="ln861">}</a>
+<a name="ln862"> </a>
+<a name="ln863">gboolean</a>
+<a name="ln864">action_timer_callback(gpointer data)</a>
+<a name="ln865">{</a>
+<a name="ln866">    crm_action_timer_t *timer = NULL;</a>
+<a name="ln867"> </a>
+<a name="ln868">    CRM_CHECK(data != NULL, return FALSE);</a>
+<a name="ln869"> </a>
+<a name="ln870">    timer = (crm_action_timer_t *) data;</a>
+<a name="ln871">    stop_te_timer(timer);</a>
+<a name="ln872"> </a>
+<a name="ln873">    crm_warn(&quot;Timer popped (timeout=%d, abort_level=%d, complete=%s)&quot;,</a>
+<a name="ln874">             timer-&gt;timeout,</a>
+<a name="ln875">             transition_graph-&gt;abort_priority, transition_graph-&gt;complete ? &quot;true&quot; : &quot;false&quot;);</a>
+<a name="ln876"> </a>
+<a name="ln877">    CRM_CHECK(timer-&gt;action != NULL, return FALSE);</a>
+<a name="ln878"> </a>
+<a name="ln879">    if (transition_graph-&gt;complete) {</a>
+<a name="ln880">        crm_warn(&quot;Ignoring timeout while not in transition&quot;);</a>
+<a name="ln881"> </a>
+<a name="ln882">    } else if (timer-&gt;reason == timeout_action_warn) {</a>
+<a name="ln883">        print_action(LOG_WARNING, &quot;Action missed its timeout: &quot;, timer-&gt;action);</a>
+<a name="ln884"> </a>
+<a name="ln885">        /* Don't check the FSA state</a>
+<a name="ln886">         *</a>
+<a name="ln887">         * We might also be in S_INTEGRATION or some other state waiting for this</a>
+<a name="ln888">         * action so we can close the transition and continue</a>
+<a name="ln889">         */</a>
+<a name="ln890"> </a>
+<a name="ln891">    } else {</a>
+<a name="ln892">        /* fail the action */</a>
+<a name="ln893">        gboolean send_update = TRUE;</a>
+<a name="ln894">        const char *task = crm_element_value(timer-&gt;action-&gt;xml, XML_LRM_ATTR_TASK);</a>
+<a name="ln895"> </a>
+<a name="ln896">        print_action(LOG_ERR, &quot;Aborting transition, action lost: &quot;, timer-&gt;action);</a>
+<a name="ln897"> </a>
+<a name="ln898">        timer-&gt;action-&gt;failed = TRUE;</a>
+<a name="ln899">        te_action_confirmed(timer-&gt;action);</a>
+<a name="ln900">        abort_transition(INFINITY, tg_restart, &quot;Action lost&quot;, NULL);</a>
+<a name="ln901"> </a>
+<a name="ln902">        update_graph(transition_graph, timer-&gt;action);</a>
+<a name="ln903">        trigger_graph();</a>
+<a name="ln904"> </a>
+<a name="ln905">        if (timer-&gt;action-&gt;type != action_type_rsc) {</a>
+<a name="ln906">            send_update = FALSE;</a>
+<a name="ln907">        } else if (safe_str_eq(task, RSC_CANCEL)) {</a>
+<a name="ln908">            /* we don't need to update the CIB with these */</a>
+<a name="ln909">            send_update = FALSE;</a>
+<a name="ln910">        }</a>
+<a name="ln911"> </a>
+<a name="ln912">        if (send_update) {</a>
+<a name="ln913">            cib_action_update(timer-&gt;action, PCMK_LRM_OP_TIMEOUT, PCMK_OCF_UNKNOWN_ERROR);</a>
+<a name="ln914">        }</a>
+<a name="ln915">    }</a>
+<a name="ln916"> </a>
+<a name="ln917">    return FALSE;</a>
+<a name="ln918">}</a>
+
+</code></pre>
+<div class="balloon" rel="264"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V562/" target="_blank">V562</a> It's odd to compare 0 or 1 with a value of 0.</p></div>
+<div class="balloon" rel="306"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strstr' function. Inspect the first argument. Check lines: 306, 305.</p></div>
+<div class="balloon" rel="320"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strstr' function. Inspect the first argument. Check lines: 320, 315.</p></div>
+<div class="balloon" rel="477"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strrchr' function. Inspect the first argument. Check lines: 477, 473.</p></div>
+<div class="balloon" rel="728"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 728, 728.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

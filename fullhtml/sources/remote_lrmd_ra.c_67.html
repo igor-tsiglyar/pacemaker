@@ -1,0 +1,1303 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/* </a>
+<a name="ln6"> * Copyright (C) 2013 David Vossel &lt;davidvossel@gmail.com&gt;</a>
+<a name="ln7"> * </a>
+<a name="ln8"> * This program is free software; you can redistribute it and/or</a>
+<a name="ln9"> * modify it under the terms of the GNU General Public</a>
+<a name="ln10"> * License as published by the Free Software Foundation; either</a>
+<a name="ln11"> * version 2 of the License, or (at your option) any later version.</a>
+<a name="ln12"> * </a>
+<a name="ln13"> * This software is distributed in the hope that it will be useful,</a>
+<a name="ln14"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</a>
+<a name="ln15"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU</a>
+<a name="ln16"> * General Public License for more details.</a>
+<a name="ln17"> * </a>
+<a name="ln18"> * You should have received a copy of the GNU General Public</a>
+<a name="ln19"> * License along with this library; if not, write to the Free Software</a>
+<a name="ln20"> * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA</a>
+<a name="ln21"> */</a>
+<a name="ln22"> </a>
+<a name="ln23">#include &lt;crm_internal.h&gt;</a>
+<a name="ln24">#include &lt;crm/crm.h&gt;</a>
+<a name="ln25">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &lt;crmd.h&gt;</a>
+<a name="ln28">#include &lt;crmd_fsa.h&gt;</a>
+<a name="ln29">#include &lt;crmd_messages.h&gt;</a>
+<a name="ln30">#include &lt;crmd_callbacks.h&gt;</a>
+<a name="ln31">#include &lt;crmd_lrm.h&gt;</a>
+<a name="ln32">#include &lt;crm/lrmd.h&gt;</a>
+<a name="ln33">#include &lt;crm/services.h&gt;</a>
+<a name="ln34"> </a>
+<a name="ln35">#define REMOTE_LRMD_RA &quot;remote&quot;</a>
+<a name="ln36"> </a>
+<a name="ln37">/* The max start timeout before cmd retry */</a>
+<a name="ln38">#define MAX_START_TIMEOUT_MS 10000</a>
+<a name="ln39"> </a>
+<a name="ln40">typedef struct remote_ra_cmd_s {</a>
+<a name="ln41">    /*! the local node the cmd is issued from */</a>
+<a name="ln42">    char *owner;</a>
+<a name="ln43">    /*! the remote node the cmd is executed on */</a>
+<a name="ln44">    char *rsc_id;</a>
+<a name="ln45">    /*! the action to execute */</a>
+<a name="ln46">    char *action;</a>
+<a name="ln47">    /*! some string the client wants us to give it back */</a>
+<a name="ln48">    char *userdata;</a>
+<a name="ln49">    /*! start delay in ms */</a>
+<a name="ln50">    int start_delay;</a>
+<a name="ln51">    /*! timer id used for start delay. */</a>
+<a name="ln52">    int delay_id;</a>
+<a name="ln53">    /*! timeout in ms for cmd */</a>
+<a name="ln54">    int timeout;</a>
+<a name="ln55">    int remaining_timeout;</a>
+<a name="ln56">    /*! recurring interval in ms */</a>
+<a name="ln57">    int interval;</a>
+<a name="ln58">    /*! interval timer id */</a>
+<a name="ln59">    int interval_id;</a>
+<a name="ln60">    int reported_success;</a>
+<a name="ln61">    int monitor_timeout_id;</a>
+<a name="ln62">    int takeover_timeout_id;</a>
+<a name="ln63">    /*! action parameters */</a>
+<a name="ln64">    lrmd_key_value_t *params;</a>
+<a name="ln65">    /*! executed rc */</a>
+<a name="ln66">    int rc;</a>
+<a name="ln67">    int op_status;</a>
+<a name="ln68">    int call_id;</a>
+<a name="ln69">    time_t start_time;</a>
+<a name="ln70">    gboolean cancel;</a>
+<a name="ln71">} remote_ra_cmd_t;</a>
+<a name="ln72"> </a>
+<a name="ln73">enum remote_migration_status {</a>
+<a name="ln74">    expect_takeover = 1,</a>
+<a name="ln75">    takeover_complete,</a>
+<a name="ln76">};</a>
+<a name="ln77"> </a>
+<a name="ln78">typedef struct remote_ra_data_s {</a>
+<a name="ln79">    crm_trigger_t *work;</a>
+<a name="ln80">    remote_ra_cmd_t *cur_cmd;</a>
+<a name="ln81">    GList *cmds;</a>
+<a name="ln82">    GList *recurring_cmds;</a>
+<a name="ln83"> </a>
+<a name="ln84">    enum remote_migration_status migrate_status;</a>
+<a name="ln85"> </a>
+<a name="ln86">    gboolean active;</a>
+<a name="ln87">    gboolean is_maintenance; /* kind of complex to determine from crmd-context</a>
+<a name="ln88">                              * so we have it signalled back with the</a>
+<a name="ln89">                              * transition from pengine</a>
+<a name="ln90">                              */</a>
+<a name="ln91">} remote_ra_data_t;</a>
+<a name="ln92"> </a>
+<a name="ln93">static int handle_remote_ra_start(lrm_state_t * lrm_state, remote_ra_cmd_t * cmd, int timeout_ms);</a>
+<a name="ln94">static void handle_remote_ra_stop(lrm_state_t * lrm_state, remote_ra_cmd_t * cmd);</a>
+<a name="ln95">static GList *fail_all_monitor_cmds(GList * list);</a>
+<a name="ln96"> </a>
+<a name="ln97">static void</a>
+<a name="ln98">free_cmd(gpointer user_data)</a>
+<a name="ln99">{</a>
+<a name="ln100">    remote_ra_cmd_t *cmd = user_data;</a>
+<a name="ln101"> </a>
+<a name="ln102">    if (!cmd) {</a>
+<a name="ln103">        return;</a>
+<a name="ln104">    }</a>
+<a name="ln105">    if (cmd-&gt;delay_id) {</a>
+<a name="ln106">        g_source_remove(cmd-&gt;delay_id);</a>
+<a name="ln107">    }</a>
+<a name="ln108">    if (cmd-&gt;interval_id) {</a>
+<a name="ln109">        g_source_remove(cmd-&gt;interval_id);</a>
+<a name="ln110">    }</a>
+<a name="ln111">    if (cmd-&gt;monitor_timeout_id) {</a>
+<a name="ln112">        g_source_remove(cmd-&gt;monitor_timeout_id);</a>
+<a name="ln113">    }</a>
+<a name="ln114">    if (cmd-&gt;takeover_timeout_id) {</a>
+<a name="ln115">        g_source_remove(cmd-&gt;takeover_timeout_id);</a>
+<a name="ln116">    }</a>
+<a name="ln117">    free(cmd-&gt;owner);</a>
+<a name="ln118">    free(cmd-&gt;rsc_id);</a>
+<a name="ln119">    free(cmd-&gt;action);</a>
+<a name="ln120">    free(cmd-&gt;userdata);</a>
+<a name="ln121">    lrmd_key_value_freeall(cmd-&gt;params);</a>
+<a name="ln122">    free(cmd);</a>
+<a name="ln123">}</a>
+<a name="ln124"> </a>
+<a name="ln125">static int</a>
+<a name="ln126">generate_callid(void)</a>
+<a name="ln127">{</a>
+<a name="ln128">    static int remote_ra_callid = 0;</a>
+<a name="ln129"> </a>
+<a name="ln130">    remote_ra_callid++;</a>
+<a name="ln131">    if (remote_ra_callid &lt;= 0) {</a>
+<a name="ln132">        remote_ra_callid = 1;</a>
+<a name="ln133">    }</a>
+<a name="ln134"> </a>
+<a name="ln135">    return remote_ra_callid;</a>
+<a name="ln136">}</a>
+<a name="ln137"> </a>
+<a name="ln138">static gboolean</a>
+<a name="ln139">recurring_helper(gpointer data)</a>
+<a name="ln140">{</a>
+<a name="ln141">    remote_ra_cmd_t *cmd = data;</a>
+<a name="ln142">    lrm_state_t *connection_rsc = NULL;</a>
+<a name="ln143"> </a>
+<a name="ln144">    cmd-&gt;interval_id = 0;</a>
+<a name="ln145">    connection_rsc = lrm_state_find(cmd-&gt;rsc_id);</a>
+<a name="ln146">    if (connection_rsc &amp;&amp; connection_rsc-&gt;remote_ra_data) {</a>
+<a name="ln147">        remote_ra_data_t *ra_data = connection_rsc-&gt;remote_ra_data;</a>
+<a name="ln148"> </a>
+<a name="ln149">        ra_data-&gt;recurring_cmds = g_list_remove(ra_data-&gt;recurring_cmds, cmd);</a>
+<a name="ln150"> </a>
+<a name="ln151">        ra_data-&gt;cmds = g_list_append(ra_data-&gt;cmds, cmd);</a>
+<a name="ln152">        mainloop_set_trigger(ra_data-&gt;work);</a>
+<a name="ln153">    }</a>
+<a name="ln154">    return FALSE;</a>
+<a name="ln155">}</a>
+<a name="ln156"> </a>
+<a name="ln157">static gboolean</a>
+<a name="ln158">start_delay_helper(gpointer data)</a>
+<a name="ln159">{</a>
+<a name="ln160">    remote_ra_cmd_t *cmd = data;</a>
+<a name="ln161">    lrm_state_t *connection_rsc = NULL;</a>
+<a name="ln162"> </a>
+<a name="ln163">    cmd-&gt;delay_id = 0;</a>
+<a name="ln164">    connection_rsc = lrm_state_find(cmd-&gt;rsc_id);</a>
+<a name="ln165">    if (connection_rsc &amp;&amp; connection_rsc-&gt;remote_ra_data) {</a>
+<a name="ln166">        remote_ra_data_t *ra_data = connection_rsc-&gt;remote_ra_data;</a>
+<a name="ln167"> </a>
+<a name="ln168">        mainloop_set_trigger(ra_data-&gt;work);</a>
+<a name="ln169">    }</a>
+<a name="ln170">    return FALSE;</a>
+<a name="ln171">}</a>
+<a name="ln172"> </a>
+<a name="ln173">/*!</a>
+<a name="ln174"> * \internal</a>
+<a name="ln175"> * \brief Handle cluster communication related to pacemaker_remote node joining</a>
+<a name="ln176"> *</a>
+<a name="ln177"> * \param[in] node_name  Name of newly integrated pacemaker_remote node</a>
+<a name="ln178"> */</a>
+<a name="ln179">static void</a>
+<a name="ln180">remote_node_up(const char *node_name)</a>
+<a name="ln181">{</a>
+<a name="ln182">    int call_opt, call_id = 0;</a>
+<a name="ln183">    xmlNode *update, *state;</a>
+<a name="ln184">    crm_node_t *node;</a>
+<a name="ln185"> </a>
+<a name="ln186">    CRM_CHECK(node_name != NULL, return);</a>
+<a name="ln187">    crm_info(&quot;Announcing pacemaker_remote node %s&quot;, node_name);</a>
+<a name="ln188"> </a>
+<a name="ln189">    /* Clear node's operation history. The node's transient attributes should</a>
+<a name="ln190">     * and normally will be cleared when the node leaves, but since remote node</a>
+<a name="ln191">     * state has a number of corner cases, clear them here as well, to be sure.</a>
+<a name="ln192">     */</a>
+<a name="ln193">    call_opt = crmd_cib_smart_opt();</a>
+<a name="ln194">    erase_status_tag(node_name, XML_CIB_TAG_LRM, call_opt);</a>
+<a name="ln195">    erase_status_tag(node_name, XML_TAG_TRANSIENT_NODEATTRS, call_opt);</a>
+<a name="ln196"> </a>
+<a name="ln197">    /* Clear node's probed attribute */</a>
+<a name="ln198">    update_attrd(node_name, CRM_OP_PROBED, NULL, NULL, TRUE);</a>
+<a name="ln199"> </a>
+<a name="ln200">    /* Ensure node is in the remote peer cache with member status */</a>
+<a name="ln201">    node = crm_remote_peer_get(node_name);</a>
+<a name="ln202">    CRM_CHECK(node != NULL, return);</a>
+<a name="ln203">    crm_update_peer_state(__FUNCTION__, node, CRM_NODE_MEMBER, 0);</a>
+<a name="ln204"> </a>
+<a name="ln205">    /* pacemaker_remote nodes don't participate in the membership layer,</a>
+<a name="ln206">     * so cluster nodes don't automatically get notified when they come and go.</a>
+<a name="ln207">     * We send a cluster message to the DC, and update the CIB node state entry,</a>
+<a name="ln208">     * so the DC will get it sooner (via message) or later (via CIB refresh),</a>
+<a name="ln209">     * and any other interested parties can query the CIB.</a>
+<a name="ln210">     */</a>
+<a name="ln211">    send_remote_state_message(node_name, TRUE);</a>
+<a name="ln212"> </a>
+<a name="ln213">    update = create_xml_node(NULL, XML_CIB_TAG_STATUS);</a>
+<a name="ln214">    state = create_node_state_update(node, node_update_cluster, update,</a>
+<a name="ln215">                                     __FUNCTION__);</a>
+<a name="ln216"> </a>
+<a name="ln217">    /* Clear the XML_NODE_IS_FENCED flag in the node state. If the node ever</a>
+<a name="ln218">     * needs to be fenced, this flag will allow various actions to determine</a>
+<a name="ln219">     * whether the fencing has happened yet.</a>
+<a name="ln220">     */</a>
+<a name="ln221">    crm_xml_add(state, XML_NODE_IS_FENCED, &quot;0&quot;);</a>
+<a name="ln222"> </a>
+<a name="ln223">    /* TODO: If the remote connection drops, and this (async) CIB update either</a>
+<a name="ln224">     * failed or has not yet completed, later actions could mistakenly think the</a>
+<a name="ln225">     * node has already been fenced (if the XML_NODE_IS_FENCED attribute was</a>
+<a name="ln226">     * previously set, because it won't have been cleared). This could prevent</a>
+<a name="ln227">     * actual fencing or allow recurring monitor failures to be cleared too</a>
+<a name="ln228">     * soon. Ideally, we wouldn't rely on the CIB for the fenced status.</a>
+<a name="ln229">     */</a>
+<a name="ln230">    fsa_cib_update(XML_CIB_TAG_STATUS, update, call_opt, call_id, NULL);</a>
+<a name="ln231">    if (call_id &lt; 0) {</a>
+<a name="ln232">        crm_perror(LOG_WARNING, &quot;%s CIB node state setup&quot;, node_name);</a>
+<a name="ln233">    }</a>
+<a name="ln234">    free_xml(update);</a>
+<a name="ln235">}</a>
+<a name="ln236"> </a>
+<a name="ln237">enum down_opts {</a>
+<a name="ln238">    DOWN_KEEP_LRM,</a>
+<a name="ln239">    DOWN_ERASE_LRM</a>
+<a name="ln240">};</a>
+<a name="ln241"> </a>
+<a name="ln242">/*!</a>
+<a name="ln243"> * \internal</a>
+<a name="ln244"> * \brief Handle cluster communication related to pacemaker_remote node leaving</a>
+<a name="ln245"> *</a>
+<a name="ln246"> * \param[in] node_name  Name of lost node</a>
+<a name="ln247"> * \param[in] opts       Whether to keep or erase LRM history</a>
+<a name="ln248"> */</a>
+<a name="ln249">static void</a>
+<a name="ln250">remote_node_down(const char *node_name, const enum down_opts opts)</a>
+<a name="ln251">{</a>
+<a name="ln252">    xmlNode *update;</a>
+<a name="ln253">    int call_id = 0;</a>
+<a name="ln254">    int call_opt = crmd_cib_smart_opt();</a>
+<a name="ln255">    crm_node_t *node;</a>
+<a name="ln256"> </a>
+<a name="ln257">    /* Purge node from attrd's memory */</a>
+<a name="ln258">    update_attrd_remote_node_removed(node_name, NULL);</a>
+<a name="ln259"> </a>
+<a name="ln260">    /* Purge node's transient attributes */</a>
+<a name="ln261">    erase_status_tag(node_name, XML_TAG_TRANSIENT_NODEATTRS, call_opt);</a>
+<a name="ln262"> </a>
+<a name="ln263">    /* Normally, the LRM operation history should be kept until the node comes</a>
+<a name="ln264">     * back up. However, after a successful fence, we want to clear it, so we</a>
+<a name="ln265">     * don't think resources are still running on the node.</a>
+<a name="ln266">     */</a>
+<a name="ln267">    if (opts == DOWN_ERASE_LRM) {</a>
+<a name="ln268">        erase_status_tag(node_name, XML_CIB_TAG_LRM, call_opt);</a>
+<a name="ln269">    }</a>
+<a name="ln270"> </a>
+<a name="ln271">    /* Ensure node is in the remote peer cache with lost state */</a>
+<a name="ln272">    node = crm_remote_peer_get(node_name);</a>
+<a name="ln273">    CRM_CHECK(node != NULL, return);</a>
+<a name="ln274">    crm_update_peer_state(__FUNCTION__, node, CRM_NODE_LOST, 0);</a>
+<a name="ln275"> </a>
+<a name="ln276">    /* Notify DC */</a>
+<a name="ln277">    send_remote_state_message(node_name, FALSE);</a>
+<a name="ln278"> </a>
+<a name="ln279">    /* Update CIB node state */</a>
+<a name="ln280">    update = create_xml_node(NULL, XML_CIB_TAG_STATUS);</a>
+<a name="ln281">    create_node_state_update(node, node_update_cluster, update, __FUNCTION__);</a>
+<a name="ln282">    fsa_cib_update(XML_CIB_TAG_STATUS, update, call_opt, call_id, NULL);</a>
+<a name="ln283">    if (call_id &lt; 0) {</a>
+<a name="ln284">        crm_perror(LOG_ERR, &quot;%s CIB node state update&quot;, node_name);</a>
+<a name="ln285">    }</a>
+<a name="ln286">    free_xml(update);</a>
+<a name="ln287">}</a>
+<a name="ln288"> </a>
+<a name="ln289">/*!</a>
+<a name="ln290"> * \internal</a>
+<a name="ln291"> * \brief Handle effects of a remote RA command on node state</a>
+<a name="ln292"> *</a>
+<a name="ln293"> * \param[in] cmd  Completed remote RA command</a>
+<a name="ln294"> */</a>
+<a name="ln295">static void</a>
+<a name="ln296">check_remote_node_state(remote_ra_cmd_t *cmd)</a>
+<a name="ln297">{</a>
+<a name="ln298">    /* Only successful actions can change node state */</a>
+<a name="ln299">    if (cmd-&gt;rc != PCMK_OCF_OK) {</a>
+<a name="ln300">        return;</a>
+<a name="ln301">    }</a>
+<a name="ln302"> </a>
+<a name="ln303">    if (safe_str_eq(cmd-&gt;action, &quot;start&quot;)) {</a>
+<a name="ln304">        remote_node_up(cmd-&gt;rsc_id);</a>
+<a name="ln305"> </a>
+<a name="ln306">    } else if (safe_str_eq(cmd-&gt;action, &quot;migrate_from&quot;)) {</a>
+<a name="ln307">        /* After a successful migration, we don't need to do remote_node_up()</a>
+<a name="ln308">         * because the DC already knows the node is up, and we don't want to</a>
+<a name="ln309">         * clear LRM history etc. We do need to add the remote node to this</a>
+<a name="ln310">         * host's remote peer cache, because (unless it happens to be DC)</a>
+<a name="ln311">         * it hasn't been tracking the remote node, and other code relies on</a>
+<a name="ln312">         * the cache to distinguish remote nodes from unseen cluster nodes.</a>
+<a name="ln313">         */</a>
+<a name="ln314">        crm_node_t *node = crm_remote_peer_get(cmd-&gt;rsc_id);</a>
+<a name="ln315"> </a>
+<a name="ln316">        CRM_CHECK(node != NULL, return);</a>
+<a name="ln317">        crm_update_peer_state(__FUNCTION__, node, CRM_NODE_MEMBER, 0);</a>
+<a name="ln318"> </a>
+<a name="ln319">    } else if (safe_str_eq(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln320">        lrm_state_t *lrm_state = lrm_state_find(cmd-&gt;rsc_id);</a>
+<a name="ln321">        remote_ra_data_t *ra_data = lrm_state? lrm_state-&gt;remote_ra_data : NULL;</a>
+<a name="ln322"> </a>
+<a name="ln323">        if (ra_data) {</a>
+<a name="ln324">            if (ra_data-&gt;migrate_status != takeover_complete) {</a>
+<a name="ln325">                /* Stop means down if we didn't successfully migrate elsewhere */</a>
+<a name="ln326">                remote_node_down(cmd-&gt;rsc_id, DOWN_KEEP_LRM);</a>
+<a name="ln327">            } else if (AM_I_DC == FALSE) {</a>
+<a name="ln328">                /* Only the connection host and DC track node state,</a>
+<a name="ln329">                 * so if the connection migrated elsewhere and we aren't DC,</a>
+<a name="ln330">                 * un-cache the node, so we don't have stale info</a>
+<a name="ln331">                 */</a>
+<a name="ln332">                crm_remote_peer_cache_remove(cmd-&gt;rsc_id);</a>
+<a name="ln333">            }</a>
+<a name="ln334">        }</a>
+<a name="ln335">    }</a>
+<a name="ln336"> </a>
+<a name="ln337">    /* We don't do anything for successful monitors, which is correct for</a>
+<a name="ln338">     * routine recurring monitors, and for monitors on nodes where the</a>
+<a name="ln339">     * connection isn't supposed to be (the cluster will stop the connection in</a>
+<a name="ln340">     * that case). However, if the initial probe finds the connection already</a>
+<a name="ln341">     * active on the node where we want it, we probably should do</a>
+<a name="ln342">     * remote_node_up(). Unfortunately, we can't distinguish that case here.</a>
+<a name="ln343">     * Given that connections have to be initiated by the cluster, the chance of</a>
+<a name="ln344">     * that should be close to zero.</a>
+<a name="ln345">     */</a>
+<a name="ln346">}</a>
+<a name="ln347"> </a>
+<a name="ln348">static void</a>
+<a name="ln349">report_remote_ra_result(remote_ra_cmd_t * cmd)</a>
+<a name="ln350">{</a>
+<a name="ln351">    lrmd_event_data_t op = { 0, };</a>
+<a name="ln352"> </a>
+<a name="ln353">    check_remote_node_state(cmd);</a>
+<a name="ln354"> </a>
+<a name="ln355">    op.type = lrmd_event_exec_complete;</a>
+<a name="ln356">    op.rsc_id = cmd-&gt;rsc_id;</a>
+<a name="ln357">    op.op_type = cmd-&gt;action;</a>
+<a name="ln358">    op.user_data = cmd-&gt;userdata;</a>
+<a name="ln359">    op.timeout = cmd-&gt;timeout;</a>
+<a name="ln360">    op.interval = cmd-&gt;interval;</a>
+<a name="ln361">    op.rc = cmd-&gt;rc;</a>
+<a name="ln362">    op.op_status = cmd-&gt;op_status;</a>
+<a name="ln363">    op.t_run = cmd-&gt;start_time;</a>
+<a name="ln364">    op.t_rcchange = cmd-&gt;start_time;</a>
+<a name="ln365">    if (cmd-&gt;reported_success &amp;&amp; cmd-&gt;rc != PCMK_OCF_OK) {</a>
+<a name="ln366">        op.t_rcchange = time(NULL);</a>
+<a name="ln367">        /* This edge case will likely never ever occur, but if it does the</a>
+<a name="ln368">         * result is that a failure will not be processed correctly. This is only</a>
+<a name="ln369">         * remotely possible because we are able to detect a connection resource's tcp</a>
+<a name="ln370">         * connection has failed at any moment after start has completed. The actual</a>
+<a name="ln371">         * recurring operation is just a connectivity ping.</a>
+<a name="ln372">         *</a>
+<a name="ln373">         * basically, we are not guaranteed that the first successful monitor op and</a>
+<a name="ln374">         * a subsequent failed monitor op will not occur in the same timestamp. We have to</a>
+<a name="ln375">         * make it look like the operations occurred at separate times though. */</a>
+<a name="ln376">        if (op.t_rcchange == op.t_run) {</a>
+<a name="ln377">            op.t_rcchange++;</a>
+<a name="ln378">        }</a>
+<a name="ln379">    }</a>
+<a name="ln380"> </a>
+<a name="ln381">    if (cmd-&gt;params) {</a>
+<a name="ln382">        lrmd_key_value_t *tmp;</a>
+<a name="ln383"> </a>
+<a name="ln384">        op.params = g_hash_table_new_full(crm_str_hash,</a>
+<a name="ln385">                                          g_str_equal, g_hash_destroy_str, g_hash_destroy_str);</a>
+<a name="ln386">        for (tmp = cmd-&gt;params; tmp; tmp = tmp-&gt;next) {</a>
+<a name="ln387">            g_hash_table_insert(op.params, strdup(tmp-&gt;key), strdup(tmp-&gt;value));</a>
+<a name="ln388">        }</a>
+<a name="ln389"> </a>
+<a name="ln390">    }</a>
+<a name="ln391">    op.call_id = cmd-&gt;call_id;</a>
+<a name="ln392">    op.remote_nodename = cmd-&gt;owner;</a>
+<a name="ln393"> </a>
+<a name="ln394">    lrm_op_callback(&amp;op);</a>
+<a name="ln395"> </a>
+<a name="ln396">    if (op.params) {</a>
+<a name="ln397">        g_hash_table_destroy(op.params);</a>
+<a name="ln398">    }</a>
+<a name="ln399">}</a>
+<a name="ln400"> </a>
+<a name="ln401">static void</a>
+<a name="ln402">update_remaining_timeout(remote_ra_cmd_t * cmd)</a>
+<a name="ln403">{</a>
+<a name="ln404">    cmd-&gt;remaining_timeout = ((cmd-&gt;timeout / 1000) - (time(NULL) - cmd-&gt;start_time)) * 1000;</a>
+<a name="ln405">}</a>
+<a name="ln406"> </a>
+<a name="ln407">static gboolean</a>
+<a name="ln408">retry_start_cmd_cb(gpointer data)</a>
+<a name="ln409">{</a>
+<a name="ln410">    lrm_state_t *lrm_state = data;</a>
+<a name="ln411">    remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln412">    remote_ra_cmd_t *cmd = NULL;</a>
+<a name="ln413">    int rc = -1;</a>
+<a name="ln414"> </a>
+<a name="ln415">    if (!ra_data || !ra_data-&gt;cur_cmd) {</a>
+<a name="ln416">        return FALSE;</a>
+<a name="ln417">    }</a>
+<a name="ln418">    cmd = ra_data-&gt;cur_cmd;</a>
+<a name="ln419">    if (safe_str_neq(cmd-&gt;action, &quot;start&quot;) &amp;&amp; safe_str_neq(cmd-&gt;action, &quot;migrate_from&quot;)) {</a>
+<a name="ln420">        return FALSE;</a>
+<a name="ln421">    }</a>
+<a name="ln422">    update_remaining_timeout(cmd);</a>
+<a name="ln423"> </a>
+<a name="ln424">    if (cmd-&gt;remaining_timeout &gt; 0) {</a>
+<a name="ln425">        rc = handle_remote_ra_start(lrm_state, cmd, cmd-&gt;remaining_timeout);</a>
+<a name="ln426">    }</a>
+<a name="ln427"> </a>
+<a name="ln428">    if (rc != 0) {</a>
+<a name="ln429">        cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln430">        cmd-&gt;op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln431">        report_remote_ra_result(cmd);</a>
+<a name="ln432"> </a>
+<a name="ln433">        if (ra_data-&gt;cmds) {</a>
+<a name="ln434">            mainloop_set_trigger(ra_data-&gt;work);</a>
+<a name="ln435">        }</a>
+<a name="ln436">        ra_data-&gt;cur_cmd = NULL;</a>
+<a name="ln437">        free_cmd(cmd);</a>
+<a name="ln438">    } else {</a>
+<a name="ln439">        /* wait for connection event */</a>
+<a name="ln440">    }</a>
+<a name="ln441"> </a>
+<a name="ln442">    return FALSE;</a>
+<a name="ln443">}</a>
+<a name="ln444"> </a>
+<a name="ln445"> </a>
+<a name="ln446">static gboolean</a>
+<a name="ln447">connection_takeover_timeout_cb(gpointer data)</a>
+<a name="ln448">{</a>
+<a name="ln449">    lrm_state_t *lrm_state = NULL;</a>
+<a name="ln450">    remote_ra_cmd_t *cmd = data;</a>
+<a name="ln451"> </a>
+<a name="ln452">    crm_info(&quot;takeover event timed out for node %s&quot;, cmd-&gt;rsc_id);</a>
+<a name="ln453">    cmd-&gt;takeover_timeout_id = 0;</a>
+<a name="ln454"> </a>
+<a name="ln455">    lrm_state = lrm_state_find(cmd-&gt;rsc_id);</a>
+<a name="ln456"> </a>
+<a name="ln457">    handle_remote_ra_stop(lrm_state, cmd);</a>
+<a name="ln458">    free_cmd(cmd);</a>
+<a name="ln459"> </a>
+<a name="ln460">    return FALSE;</a>
+<a name="ln461">}</a>
+<a name="ln462"> </a>
+<a name="ln463">static gboolean</a>
+<a name="ln464">monitor_timeout_cb(gpointer data)</a>
+<a name="ln465">{</a>
+<a name="ln466">    lrm_state_t *lrm_state = NULL;</a>
+<a name="ln467">    remote_ra_cmd_t *cmd = data;</a>
+<a name="ln468"> </a>
+<a name="ln469">    lrm_state = lrm_state_find(cmd-&gt;rsc_id);</a>
+<a name="ln470"> </a>
+<a name="ln471">    crm_info(&quot;Poke async response timed out for node %s (%p)&quot;, cmd-&gt;rsc_id, lrm_state);</a>
+<a name="ln472">    cmd-&gt;monitor_timeout_id = 0;</a>
+<a name="ln473">    cmd-&gt;op_status = PCMK_LRM_OP_TIMEOUT;</a>
+<a name="ln474">    cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln475"> </a>
+<a name="ln476">    if (lrm_state &amp;&amp; lrm_state-&gt;remote_ra_data) {</a>
+<a name="ln477">        remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln478"> </a>
+<a name="ln479">        if (ra_data-&gt;cur_cmd == cmd) {</a>
+<a name="ln480">            ra_data-&gt;cur_cmd = NULL;</a>
+<a name="ln481">        }</a>
+<a name="ln482">        if (ra_data-&gt;cmds) {</a>
+<a name="ln483">            mainloop_set_trigger(ra_data-&gt;work);</a>
+<a name="ln484">        }</a>
+<a name="ln485">    }</a>
+<a name="ln486"> </a>
+<a name="ln487">    report_remote_ra_result(cmd);</a>
+<a name="ln488">    free_cmd(cmd);</a>
+<a name="ln489"> </a>
+<a name="ln490">    if(lrm_state) {</a>
+<a name="ln491">        lrm_state_disconnect(lrm_state);</a>
+<a name="ln492">    }</a>
+<a name="ln493">    return FALSE;</a>
+<a name="ln494">}</a>
+<a name="ln495"> </a>
+<a name="ln496">static void</a>
+<a name="ln497">synthesize_lrmd_success(lrm_state_t *lrm_state, const char *rsc_id, const char *op_type)</a>
+<a name="ln498">{</a>
+<a name="ln499">    lrmd_event_data_t op = { 0, };</a>
+<a name="ln500"> </a>
+<a name="ln501">    if (lrm_state == NULL) {</a>
+<a name="ln502">        /* if lrm_state not given assume local */</a>
+<a name="ln503">        lrm_state = lrm_state_find(fsa_our_uname);</a>
+<a name="ln504">    }</a>
+<a name="ln505">    CRM_ASSERT(lrm_state != NULL);</a>
+<a name="ln506"> </a>
+<a name="ln507">    op.type = lrmd_event_exec_complete;</a>
+<a name="ln508">    op.rsc_id = rsc_id;</a>
+<a name="ln509">    op.op_type = op_type;</a>
+<a name="ln510">    op.rc = PCMK_OCF_OK;</a>
+<a name="ln511">    op.op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln512">    op.t_run = time(NULL);</a>
+<a name="ln513">    op.t_rcchange = op.t_run;</a>
+<a name="ln514">    op.call_id = generate_callid();</a>
+<a name="ln515">    process_lrm_event(lrm_state, &amp;op, NULL);</a>
+<a name="ln516">}</a>
+<a name="ln517"> </a>
+<a name="ln518">void</a>
+<a name="ln519">remote_lrm_op_callback(lrmd_event_data_t * op)</a>
+<a name="ln520">{</a>
+<a name="ln521">    gboolean cmd_handled = FALSE;</a>
+<a name="ln522">    lrm_state_t *lrm_state = NULL;</a>
+<a name="ln523">    remote_ra_data_t *ra_data = NULL;</a>
+<a name="ln524">    remote_ra_cmd_t *cmd = NULL;</a>
+<a name="ln525"> </a>
+<a name="ln526">    crm_debug(&quot;remote connection event - event_type:%s node:%s action:%s rc:%s op_status:%s&quot;,</a>
+<a name="ln527">              lrmd_event_type2str(op-&gt;type),</a>
+<a name="ln528">              op-&gt;remote_nodename,</a>
+<a name="ln529">              op-&gt;op_type ? op-&gt;op_type : &quot;none&quot;,</a>
+<a name="ln530">              services_ocf_exitcode_str(op-&gt;rc), services_lrm_status_str(op-&gt;op_status));</a>
+<a name="ln531"> </a>
+<a name="ln532">    lrm_state = lrm_state_find(op-&gt;remote_nodename);</a>
+<a name="ln533">    if (!lrm_state || !lrm_state-&gt;remote_ra_data) {</a>
+<a name="ln534">        crm_debug(&quot;lrm_state info not found for remote lrmd connection event&quot;);</a>
+<a name="ln535">        return;</a>
+<a name="ln536">    }</a>
+<a name="ln537">    ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln538"> </a>
+<a name="ln539">    /* Another client has connected to the remote daemon,</a>
+<a name="ln540">     * determine if this is expected. */</a>
+<a name="ln541">    if (op-&gt;type == lrmd_event_new_client) {</a>
+<a name="ln542">        /* great, we new this was coming */</a>
+<a name="ln543">        if (ra_data-&gt;migrate_status == expect_takeover) {</a>
+<a name="ln544">            ra_data-&gt;migrate_status = takeover_complete;</a>
+<a name="ln545">        } else {</a>
+<a name="ln546">            crm_err(&quot;Unexpected pacemaker_remote client takeover for %s. Disconnecting&quot;, op-&gt;remote_nodename);</a>
+<a name="ln547">            /* In this case, lrmd_tls_connection_destroy() will be called under the control of mainloop. */</a>
+<a name="ln548">            /* Do not free lrm_state-&gt;conn yet. */</a>
+<a name="ln549">            /* It'll be freed in the following stop action. */</a>
+<a name="ln550">            lrm_state_disconnect_only(lrm_state);</a>
+<a name="ln551">        }</a>
+<a name="ln552">        return;</a>
+<a name="ln553">    }</a>
+<a name="ln554"> </a>
+<a name="ln555">    /* filter all EXEC events up */</a>
+<a name="ln556">    if (op-&gt;type == lrmd_event_exec_complete) {</a>
+<a name="ln557">        if (ra_data-&gt;migrate_status == takeover_complete) {</a>
+<a name="ln558">            crm_debug(&quot;ignoring event, this connection is taken over by another node&quot;);</a>
+<a name="ln559">        } else {</a>
+<a name="ln560">            lrm_op_callback(op);</a>
+<a name="ln561">        }</a>
+<a name="ln562">        return;</a>
+<a name="ln563">    }</a>
+<a name="ln564"> </a>
+<a name="ln565">    if ((op-&gt;type == lrmd_event_disconnect) &amp;&amp;</a>
+<a name="ln566">        (ra_data-&gt;cur_cmd == NULL) &amp;&amp;</a>
+<a name="ln567">        (ra_data-&gt;active == TRUE)) {</a>
+<a name="ln568"> </a>
+<a name="ln569">        if (!remote_ra_is_in_maintenance(lrm_state)) {</a>
+<a name="ln570">            crm_err(&quot;Unexpected disconnect on remote-node %s&quot;, lrm_state-&gt;node_name);</a>
+<a name="ln571">            ra_data-&gt;recurring_cmds = fail_all_monitor_cmds(ra_data-&gt;recurring_cmds);</a>
+<a name="ln572">            ra_data-&gt;cmds = fail_all_monitor_cmds(ra_data-&gt;cmds);</a>
+<a name="ln573">        } else {</a>
+<a name="ln574">            crm_notice(&quot;Disconnect on unmanaged remote-node %s&quot;, lrm_state-&gt;node_name);</a>
+<a name="ln575">            /* Do roughly what a 'stop' on the remote-resource would do */</a>
+<a name="ln576">            handle_remote_ra_stop(lrm_state, NULL);</a>
+<a name="ln577">            remote_node_down(lrm_state-&gt;node_name, DOWN_KEEP_LRM);</a>
+<a name="ln578">            /* now fake the reply of a successful 'stop' */</a>
+<a name="ln579">            synthesize_lrmd_success(NULL, lrm_state-&gt;node_name, &quot;stop&quot;);</a>
+<a name="ln580">        }</a>
+<a name="ln581">        return;</a>
+<a name="ln582">    }</a>
+<a name="ln583"> </a>
+<a name="ln584">    if (!ra_data-&gt;cur_cmd) {</a>
+<a name="ln585">        crm_debug(&quot;no event to match&quot;);</a>
+<a name="ln586">        return;</a>
+<a name="ln587">    }</a>
+<a name="ln588"> </a>
+<a name="ln589">    cmd = ra_data-&gt;cur_cmd;</a>
+<a name="ln590"> </a>
+<a name="ln591">    /* Start actions and migrate from actions complete after connection</a>
+<a name="ln592">     * comes back to us. */</a>
+<a name="ln593">    if (op-&gt;type == lrmd_event_connect &amp;&amp; (safe_str_eq(cmd-&gt;action, &quot;start&quot;) ||</a>
+<a name="ln594">                                           safe_str_eq(cmd-&gt;action, &quot;migrate_from&quot;))) {</a>
+<a name="ln595"> </a>
+<a name="ln596">        if (op-&gt;connection_rc &lt; 0) {</a>
+<a name="ln597">            update_remaining_timeout(cmd);</a>
+<a name="ln598">            /* There isn't much of a reason to reschedule if the timeout is too small */</a>
+<a name="ln599">            if (cmd-&gt;remaining_timeout &gt; 3000) {</a>
+<a name="ln600">                crm_trace(&quot;rescheduling start, remaining timeout %d&quot;, cmd-&gt;remaining_timeout);</a>
+<a name="ln601">                g_timeout_add(1000, retry_start_cmd_cb, lrm_state);</a>
+<a name="ln602">                return;</a>
+<a name="ln603">            } else {</a>
+<a name="ln604">                crm_trace(&quot;can't reschedule start, remaining timeout too small %d&quot;,</a>
+<a name="ln605">                          cmd-&gt;remaining_timeout);</a>
+<a name="ln606">            }</a>
+<a name="ln607">            cmd-&gt;op_status = PCMK_LRM_OP_TIMEOUT;</a>
+<a name="ln608">            cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln609"> </a>
+<a name="ln610">        } else {</a>
+<a name="ln611">            lrm_state_reset_tables(lrm_state, TRUE);</a>
+<a name="ln612">            cmd-&gt;rc = PCMK_OCF_OK;</a>
+<a name="ln613">            cmd-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln614">            ra_data-&gt;active = TRUE;</a>
+<a name="ln615">        }</a>
+<a name="ln616"> </a>
+<a name="ln617">        crm_debug(&quot;remote lrmd connect event matched %s action. &quot;, cmd-&gt;action);</a>
+<a name="ln618">        report_remote_ra_result(cmd);</a>
+<a name="ln619">        cmd_handled = TRUE;</a>
+<a name="ln620"> </a>
+<a name="ln621">    } else if (op-&gt;type == lrmd_event_poke &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln622"> </a>
+<a name="ln623">        if (cmd-&gt;monitor_timeout_id) {</a>
+<a name="ln624">            g_source_remove(cmd-&gt;monitor_timeout_id);</a>
+<a name="ln625">            cmd-&gt;monitor_timeout_id = 0;</a>
+<a name="ln626">        }</a>
+<a name="ln627"> </a>
+<a name="ln628">        /* Only report success the first time, after that only worry about failures.</a>
+<a name="ln629">         * For this function, if we get the poke pack, it is always a success. Pokes</a>
+<a name="ln630">         * only fail if the send fails, or the response times out. */</a>
+<a name="ln631">        if (!cmd-&gt;reported_success) {</a>
+<a name="ln632">            cmd-&gt;rc = PCMK_OCF_OK;</a>
+<a name="ln633">            cmd-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln634">            report_remote_ra_result(cmd);</a>
+<a name="ln635">            cmd-&gt;reported_success = 1;</a>
+<a name="ln636">        }</a>
+<a name="ln637"> </a>
+<a name="ln638">        crm_debug(&quot;remote lrmd poke event matched %s action. &quot;, cmd-&gt;action);</a>
+<a name="ln639"> </a>
+<a name="ln640">        /* success, keep rescheduling if interval is present. */</a>
+<a name="ln641">        if (cmd-&gt;interval &amp;&amp; (cmd-&gt;cancel == FALSE)) {</a>
+<a name="ln642">            ra_data-&gt;recurring_cmds = g_list_append(ra_data-&gt;recurring_cmds, cmd);</a>
+<a name="ln643">            cmd-&gt;interval_id = g_timeout_add(cmd-&gt;interval, recurring_helper, cmd);</a>
+<a name="ln644">            cmd = NULL;         /* prevent free */</a>
+<a name="ln645">        }</a>
+<a name="ln646">        cmd_handled = TRUE;</a>
+<a name="ln647"> </a>
+<a name="ln648">    } else if (op-&gt;type == lrmd_event_disconnect &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln649">        if (ra_data-&gt;active == TRUE &amp;&amp; (cmd-&gt;cancel == FALSE)) {</a>
+<a name="ln650">            cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln651">            cmd-&gt;op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln652">            report_remote_ra_result(cmd);</a>
+<a name="ln653">            crm_err(&quot;remote-node %s unexpectedly disconneced during monitor operation&quot;, lrm_state-&gt;node_name);</a>
+<a name="ln654">        }</a>
+<a name="ln655">        cmd_handled = TRUE;</a>
+<a name="ln656"> </a>
+<a name="ln657">    } else if (op-&gt;type == lrmd_event_new_client &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln658"> </a>
+<a name="ln659">        handle_remote_ra_stop(lrm_state, cmd);</a>
+<a name="ln660">        cmd_handled = TRUE;</a>
+<a name="ln661"> </a>
+<a name="ln662">    } else {</a>
+<a name="ln663">        crm_debug(&quot;Event did not match %s action&quot;, ra_data-&gt;cur_cmd-&gt;action);</a>
+<a name="ln664">    }</a>
+<a name="ln665"> </a>
+<a name="ln666">    if (cmd_handled) {</a>
+<a name="ln667">        ra_data-&gt;cur_cmd = NULL;</a>
+<a name="ln668">        if (ra_data-&gt;cmds) {</a>
+<a name="ln669">            mainloop_set_trigger(ra_data-&gt;work);</a>
+<a name="ln670">        }</a>
+<a name="ln671">        free_cmd(cmd);</a>
+<a name="ln672">    }</a>
+<a name="ln673">}</a>
+<a name="ln674"> </a>
+<a name="ln675">static void</a>
+<a name="ln676">handle_remote_ra_stop(lrm_state_t * lrm_state, remote_ra_cmd_t * cmd)</a>
+<a name="ln677">{</a>
+<a name="ln678">    remote_ra_data_t *ra_data = NULL;</a>
+<a name="ln679"> </a>
+<a name="ln680">    CRM_ASSERT(lrm_state);</a>
+<a name="ln681">    ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln682"> </a>
+<a name="ln683">    if (ra_data-&gt;migrate_status != takeover_complete) {</a>
+<a name="ln684">        /* delete pending ops when ever the remote connection is intentionally stopped */</a>
+<a name="ln685">        g_hash_table_remove_all(lrm_state-&gt;pending_ops);</a>
+<a name="ln686">    } else {</a>
+<a name="ln687">        /* we no longer hold the history if this connection has been migrated,</a>
+<a name="ln688">         * however, we keep metadata cache for future use */</a>
+<a name="ln689">        lrm_state_reset_tables(lrm_state, FALSE);</a>
+<a name="ln690">    }</a>
+<a name="ln691"> </a>
+<a name="ln692">    ra_data-&gt;active = FALSE;</a>
+<a name="ln693">    lrm_state_disconnect(lrm_state);</a>
+<a name="ln694"> </a>
+<a name="ln695">    if (ra_data-&gt;cmds) {</a>
+<a name="ln696">        g_list_free_full(ra_data-&gt;cmds, free_cmd);</a>
+<a name="ln697">    }</a>
+<a name="ln698">    if (ra_data-&gt;recurring_cmds) {</a>
+<a name="ln699">        g_list_free_full(ra_data-&gt;recurring_cmds, free_cmd);</a>
+<a name="ln700">    }</a>
+<a name="ln701">    ra_data-&gt;cmds = NULL;</a>
+<a name="ln702">    ra_data-&gt;recurring_cmds = NULL;</a>
+<a name="ln703">    ra_data-&gt;cur_cmd = NULL;</a>
+<a name="ln704"> </a>
+<a name="ln705">    if (cmd) {</a>
+<a name="ln706">        cmd-&gt;rc = PCMK_OCF_OK;</a>
+<a name="ln707">        cmd-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln708"> </a>
+<a name="ln709">        report_remote_ra_result(cmd);</a>
+<a name="ln710">    }</a>
+<a name="ln711">}</a>
+<a name="ln712"> </a>
+<a name="ln713">static int</a>
+<a name="ln714">handle_remote_ra_start(lrm_state_t * lrm_state, remote_ra_cmd_t * cmd, int timeout_ms)</a>
+<a name="ln715">{</a>
+<a name="ln716">    const char *server = NULL;</a>
+<a name="ln717">    lrmd_key_value_t *tmp = NULL;</a>
+<a name="ln718">    int port = 0;</a>
+<a name="ln719">    int timeout_used = timeout_ms &gt; MAX_START_TIMEOUT_MS ? MAX_START_TIMEOUT_MS : timeout_ms;</a>
+<a name="ln720"> </a>
+<a name="ln721">    for (tmp = cmd-&gt;params; tmp; tmp = tmp-&gt;next) {</a>
+<a name="ln722">        if (safe_str_eq(tmp-&gt;key, &quot;addr&quot;) || safe_str_eq(tmp-&gt;key, &quot;server&quot;)) {</a>
+<a name="ln723">            server = tmp-&gt;value;</a>
+<a name="ln724">        }</a>
+<a name="ln725">        if (safe_str_eq(tmp-&gt;key, &quot;port&quot;)) {</a>
+<a name="ln726">            port = atoi(tmp-&gt;value);</a>
+<a name="ln727">        }</a>
+<a name="ln728">    }</a>
+<a name="ln729"> </a>
+<a name="ln730">    return lrm_state_remote_connect_async(lrm_state, server, port, timeout_used);</a>
+<a name="ln731">}</a>
+<a name="ln732"> </a>
+<a name="ln733">static gboolean</a>
+<a name="ln734">handle_remote_ra_exec(gpointer user_data)</a>
+<a name="ln735">{</a>
+<a name="ln736">    int rc = 0;</a>
+<a name="ln737">    lrm_state_t *lrm_state = user_data;</a>
+<a name="ln738">    remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln739">    remote_ra_cmd_t *cmd;</a>
+<a name="ln740">    GList *first = NULL;</a>
+<a name="ln741"> </a>
+<a name="ln742">    if (ra_data-&gt;cur_cmd) {</a>
+<a name="ln743">        /* still waiting on previous cmd */</a>
+<a name="ln744">        return TRUE;</a>
+<a name="ln745">    }</a>
+<a name="ln746"> </a>
+<a name="ln747">    while (ra_data-&gt;cmds) {</a>
+<a name="ln748">        first = ra_data-&gt;cmds;</a>
+<a name="ln749">        cmd = first-&gt;data;</a>
+<a name="ln750">        if (cmd-&gt;delay_id) {</a>
+<a name="ln751">            /* still waiting for start delay timer to trip */</a>
+<a name="ln752">            return TRUE;</a>
+<a name="ln753">        }</a>
+<a name="ln754"> </a>
+<a name="ln755">        ra_data-&gt;cmds = g_list_remove_link(ra_data-&gt;cmds, first);</a>
+<a name="ln756">        g_list_free_1(first);</a>
+<a name="ln757"> </a>
+<a name="ln758">        if (!strcmp(cmd-&gt;action, &quot;start&quot;) || !strcmp(cmd-&gt;action, &quot;migrate_from&quot;)) {</a>
+<a name="ln759">            ra_data-&gt;migrate_status = 0;</a>
+<a name="ln760">            rc = handle_remote_ra_start(lrm_state, cmd, cmd-&gt;timeout);</a>
+<a name="ln761">            if (rc == 0) {</a>
+<a name="ln762">                /* take care of this later when we get async connection result */</a>
+<a name="ln763">                crm_debug(&quot;began remote lrmd connect, waiting for connect event.&quot;);</a>
+<a name="ln764">                ra_data-&gt;cur_cmd = cmd;</a>
+<a name="ln765">                return TRUE;</a>
+<a name="ln766">            } else {</a>
+<a name="ln767">                crm_debug(&quot;connect failed, not expecting to match any connection event later&quot;);</a>
+<a name="ln768">                cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln769">                cmd-&gt;op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln770">            }</a>
+<a name="ln771">            report_remote_ra_result(cmd);</a>
+<a name="ln772"> </a>
+<a name="ln773">        } else if (!strcmp(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln774"> </a>
+<a name="ln775">            if (lrm_state_is_connected(lrm_state) == TRUE) {</a>
+<a name="ln776">                rc = lrm_state_poke_connection(lrm_state);</a>
+<a name="ln777">                if (rc &lt; 0) {</a>
+<a name="ln778">                    cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln779">                    cmd-&gt;op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln780">                }</a>
+<a name="ln781">            } else {</a>
+<a name="ln782">                rc = -1;</a>
+<a name="ln783">                cmd-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln784">                cmd-&gt;rc = PCMK_OCF_NOT_RUNNING;</a>
+<a name="ln785">            }</a>
+<a name="ln786"> </a>
+<a name="ln787">            if (rc == 0) {</a>
+<a name="ln788">                crm_debug(&quot;poked remote lrmd at node %s, waiting for async response.&quot;, cmd-&gt;rsc_id);</a>
+<a name="ln789">                ra_data-&gt;cur_cmd = cmd;</a>
+<a name="ln790">                cmd-&gt;monitor_timeout_id = g_timeout_add(cmd-&gt;timeout, monitor_timeout_cb, cmd);</a>
+<a name="ln791">                return TRUE;</a>
+<a name="ln792">            }</a>
+<a name="ln793">            report_remote_ra_result(cmd);</a>
+<a name="ln794"> </a>
+<a name="ln795">        } else if (!strcmp(cmd-&gt;action, &quot;stop&quot;)) {</a>
+<a name="ln796"> </a>
+<a name="ln797">            if (ra_data-&gt;migrate_status == expect_takeover) {</a>
+<a name="ln798">                /* briefly wait on stop for the takeover event to occur. If the</a>
+<a name="ln799">                 * takeover event does not occur during the wait period, that's fine.</a>
+<a name="ln800">                 * It just means that the remote-node's lrm_status section is going to get</a>
+<a name="ln801">                 * cleared which will require all the resources running in the remote-node</a>
+<a name="ln802">                 * to be explicitly re-detected via probe actions.  If the takeover does occur</a>
+<a name="ln803">                 * successfully, then we can leave the status section intact. */</a>
+<a name="ln804">                cmd-&gt;takeover_timeout_id = g_timeout_add((cmd-&gt;timeout/2), connection_takeover_timeout_cb, cmd);</a>
+<a name="ln805">                ra_data-&gt;cur_cmd = cmd;</a>
+<a name="ln806">                return TRUE;</a>
+<a name="ln807">            }</a>
+<a name="ln808"> </a>
+<a name="ln809">            handle_remote_ra_stop(lrm_state, cmd);</a>
+<a name="ln810"> </a>
+<a name="ln811">        } else if (!strcmp(cmd-&gt;action, &quot;migrate_to&quot;)) {</a>
+<a name="ln812">            ra_data-&gt;migrate_status = expect_takeover;</a>
+<a name="ln813">            cmd-&gt;rc = PCMK_OCF_OK;</a>
+<a name="ln814">            cmd-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln815">            report_remote_ra_result(cmd);</a>
+<a name="ln816">        } else if (!strcmp(cmd-&gt;action, &quot;reload&quot;)) {</a>
+<a name="ln817">            /* reloads are a no-op right now, add logic here when they become important */</a>
+<a name="ln818">            cmd-&gt;rc = PCMK_OCF_OK;</a>
+<a name="ln819">            cmd-&gt;op_status = PCMK_LRM_OP_DONE;</a>
+<a name="ln820">            report_remote_ra_result(cmd);</a>
+<a name="ln821">        }</a>
+<a name="ln822"> </a>
+<a name="ln823">        free_cmd(cmd);</a>
+<a name="ln824">    }</a>
+<a name="ln825"> </a>
+<a name="ln826">    return TRUE;</a>
+<a name="ln827">}</a>
+<a name="ln828"> </a>
+<a name="ln829">static void</a>
+<a name="ln830">remote_ra_data_init(lrm_state_t * lrm_state)</a>
+<a name="ln831">{</a>
+<a name="ln832">    remote_ra_data_t *ra_data = NULL;</a>
+<a name="ln833"> </a>
+<a name="ln834">    if (lrm_state-&gt;remote_ra_data) {</a>
+<a name="ln835">        return;</a>
+<a name="ln836">    }</a>
+<a name="ln837"> </a>
+<a name="ln838">    ra_data = calloc(1, sizeof(remote_ra_data_t));</a>
+<a name="ln839">    ra_data-&gt;work = mainloop_add_trigger(G_PRIORITY_HIGH, handle_remote_ra_exec, lrm_state);</a>
+<a name="ln840">    lrm_state-&gt;remote_ra_data = ra_data;</a>
+<a name="ln841">}</a>
+<a name="ln842"> </a>
+<a name="ln843">void</a>
+<a name="ln844">remote_ra_cleanup(lrm_state_t * lrm_state)</a>
+<a name="ln845">{</a>
+<a name="ln846">    remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln847"> </a>
+<a name="ln848">    if (!ra_data) {</a>
+<a name="ln849">        return;</a>
+<a name="ln850">    }</a>
+<a name="ln851"> </a>
+<a name="ln852">    if (ra_data-&gt;cmds) {</a>
+<a name="ln853">        g_list_free_full(ra_data-&gt;cmds, free_cmd);</a>
+<a name="ln854">    }</a>
+<a name="ln855"> </a>
+<a name="ln856">    if (ra_data-&gt;recurring_cmds) {</a>
+<a name="ln857">        g_list_free_full(ra_data-&gt;recurring_cmds, free_cmd);</a>
+<a name="ln858">    }</a>
+<a name="ln859">    mainloop_destroy_trigger(ra_data-&gt;work);</a>
+<a name="ln860">    free(ra_data);</a>
+<a name="ln861">    lrm_state-&gt;remote_ra_data = NULL;</a>
+<a name="ln862">}</a>
+<a name="ln863"> </a>
+<a name="ln864">gboolean</a>
+<a name="ln865">is_remote_lrmd_ra(const char *agent, const char *provider, const char *id)</a>
+<a name="ln866">{</a>
+<a name="ln867">    if (agent &amp;&amp; provider &amp;&amp; !strcmp(agent, REMOTE_LRMD_RA) &amp;&amp; !strcmp(provider, &quot;pacemaker&quot;)) {</a>
+<a name="ln868">        return TRUE;</a>
+<a name="ln869">    }</a>
+<a name="ln870">    if (id &amp;&amp; lrm_state_find(id) &amp;&amp; safe_str_neq(id, fsa_our_uname)) {</a>
+<a name="ln871">        return TRUE;</a>
+<a name="ln872">    }</a>
+<a name="ln873"> </a>
+<a name="ln874">    return FALSE;</a>
+<a name="ln875">}</a>
+<a name="ln876"> </a>
+<a name="ln877">lrmd_rsc_info_t *</a>
+<a name="ln878">remote_ra_get_rsc_info(lrm_state_t * lrm_state, const char *rsc_id)</a>
+<a name="ln879">{</a>
+<a name="ln880">    lrmd_rsc_info_t *info = NULL;</a>
+<a name="ln881"> </a>
+<a name="ln882">    if ((lrm_state_find(rsc_id))) {</a>
+<a name="ln883">        info = calloc(1, sizeof(lrmd_rsc_info_t));</a>
+<a name="ln884"> </a>
+<a name="ln885">        info-&gt;id = strdup(rsc_id);</a>
+<a name="ln886">        info-&gt;type = strdup(REMOTE_LRMD_RA);</a>
+<a name="ln887">        info-&gt;class = strdup(PCMK_RESOURCE_CLASS_OCF);</a>
+<a name="ln888">        info-&gt;provider = strdup(&quot;pacemaker&quot;);</a>
+<a name="ln889">    }</a>
+<a name="ln890"> </a>
+<a name="ln891">    return info;</a>
+<a name="ln892">}</a>
+<a name="ln893"> </a>
+<a name="ln894">static gboolean</a>
+<a name="ln895">is_remote_ra_supported_action(const char *action)</a>
+<a name="ln896">{</a>
+<a name="ln897">    if (!action) {</a>
+<a name="ln898">        return FALSE;</a>
+<a name="ln899">    } else if (strcmp(action, &quot;start&quot;) &amp;&amp;</a>
+<a name="ln900">               strcmp(action, &quot;stop&quot;) &amp;&amp;</a>
+<a name="ln901">               strcmp(action, &quot;reload&quot;) &amp;&amp;</a>
+<a name="ln902">               strcmp(action, &quot;migrate_to&quot;) &amp;&amp;</a>
+<a name="ln903">               strcmp(action, &quot;migrate_from&quot;) &amp;&amp; strcmp(action, &quot;monitor&quot;)) {</a>
+<a name="ln904">        return FALSE;</a>
+<a name="ln905">    }</a>
+<a name="ln906"> </a>
+<a name="ln907">    return TRUE;</a>
+<a name="ln908">}</a>
+<a name="ln909"> </a>
+<a name="ln910">static GList *</a>
+<a name="ln911">fail_all_monitor_cmds(GList * list)</a>
+<a name="ln912">{</a>
+<a name="ln913">    GList *rm_list = NULL;</a>
+<a name="ln914">    remote_ra_cmd_t *cmd = NULL;</a>
+<a name="ln915">    GListPtr gIter = NULL;</a>
+<a name="ln916"> </a>
+<a name="ln917">    for (gIter = list; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln918">        cmd = gIter-&gt;data;</a>
+<a name="ln919">        if (cmd-&gt;interval &gt; 0 &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln920">            rm_list = g_list_append(rm_list, cmd);</a>
+<a name="ln921">        }</a>
+<a name="ln922">    }</a>
+<a name="ln923"> </a>
+<a name="ln924">    for (gIter = rm_list; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln925">        cmd = gIter-&gt;data;</a>
+<a name="ln926"> </a>
+<a name="ln927">        cmd-&gt;rc = PCMK_OCF_UNKNOWN_ERROR;</a>
+<a name="ln928">        cmd-&gt;op_status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln929">        crm_trace(&quot;Pre-emptively failing %s %s (interval=%d, %s)&quot;, cmd-&gt;action, cmd-&gt;rsc_id, cmd-&gt;interval, cmd-&gt;userdata);</a>
+<a name="ln930">        report_remote_ra_result(cmd);</a>
+<a name="ln931"> </a>
+<a name="ln932">        list = g_list_remove(list, cmd);</a>
+<a name="ln933">        free_cmd(cmd);</a>
+<a name="ln934">    }</a>
+<a name="ln935"> </a>
+<a name="ln936">    /* frees only the list data, not the cmds */</a>
+<a name="ln937">    g_list_free(rm_list);</a>
+<a name="ln938">    return list;</a>
+<a name="ln939">}</a>
+<a name="ln940"> </a>
+<a name="ln941">static GList *</a>
+<a name="ln942">remove_cmd(GList * list, const char *action, int interval)</a>
+<a name="ln943">{</a>
+<a name="ln944">    remote_ra_cmd_t *cmd = NULL;</a>
+<a name="ln945">    GListPtr gIter = NULL;</a>
+<a name="ln946"> </a>
+<a name="ln947">    for (gIter = list; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln948">        cmd = gIter-&gt;data;</a>
+<a name="ln949">        if (cmd-&gt;interval == interval &amp;&amp; safe_str_eq(cmd-&gt;action, action)) {</a>
+<a name="ln950">            break;</a>
+<a name="ln951">        }</a>
+<a name="ln952">        cmd = NULL;</a>
+<a name="ln953">    }</a>
+<a name="ln954">    if (cmd) {</a>
+<a name="ln955">        list = g_list_remove(list, cmd);</a>
+<a name="ln956">        free_cmd(cmd);</a>
+<a name="ln957">    }</a>
+<a name="ln958">    return list;</a>
+<a name="ln959">}</a>
+<a name="ln960"> </a>
+<a name="ln961">int</a>
+<a name="ln962">remote_ra_cancel(lrm_state_t * lrm_state, const char *rsc_id, const char *action, int interval)</a>
+<a name="ln963">{</a>
+<a name="ln964">    lrm_state_t *connection_rsc = NULL;</a>
+<a name="ln965">    remote_ra_data_t *ra_data = NULL;</a>
+<a name="ln966"> </a>
+<a name="ln967">    connection_rsc = lrm_state_find(rsc_id);</a>
+<a name="ln968">    if (!connection_rsc || !connection_rsc-&gt;remote_ra_data) {</a>
+<a name="ln969">        return -EINVAL;</a>
+<a name="ln970">    }</a>
+<a name="ln971"> </a>
+<a name="ln972">    ra_data = connection_rsc-&gt;remote_ra_data;</a>
+<a name="ln973">    ra_data-&gt;cmds = remove_cmd(ra_data-&gt;cmds, action, interval);</a>
+<a name="ln974">    ra_data-&gt;recurring_cmds = remove_cmd(ra_data-&gt;recurring_cmds, action, interval);</a>
+<a name="ln975">    if (ra_data-&gt;cur_cmd &amp;&amp;</a>
+<a name="ln976">        (ra_data-&gt;cur_cmd-&gt;interval == interval) &amp;&amp;</a>
+<a name="ln977">        (safe_str_eq(ra_data-&gt;cur_cmd-&gt;action, action))) {</a>
+<a name="ln978"> </a>
+<a name="ln979">        ra_data-&gt;cur_cmd-&gt;cancel = TRUE;</a>
+<a name="ln980">    }</a>
+<a name="ln981"> </a>
+<a name="ln982">    return 0;</a>
+<a name="ln983">}</a>
+<a name="ln984"> </a>
+<a name="ln985">static remote_ra_cmd_t *</a>
+<a name="ln986">handle_dup_monitor(remote_ra_data_t *ra_data, int interval, const char *userdata)</a>
+<a name="ln987">{</a>
+<a name="ln988">    GList *gIter = NULL;</a>
+<a name="ln989">    remote_ra_cmd_t *cmd = NULL;</a>
+<a name="ln990"> </a>
+<a name="ln991">    /* there are 3 places a potential duplicate monitor operation</a>
+<a name="ln992">     * could exist.</a>
+<a name="ln993">     * 1. recurring_cmds list. where the op is waiting for its next interval</a>
+<a name="ln994">     * 2. cmds list, where the op is queued to get executed immediately</a>
+<a name="ln995">     * 3. cur_cmd, which means the monitor op is in flight right now.</a>
+<a name="ln996">     */</a>
+<a name="ln997">    if (interval == 0) {</a>
+<a name="ln998">        return NULL;</a>
+<a name="ln999">    }</a>
+<a name="ln1000"> </a>
+<a name="ln1001">    if (ra_data-&gt;cur_cmd &amp;&amp;</a>
+<a name="ln1002">        ra_data-&gt;cur_cmd-&gt;cancel == FALSE &amp;&amp;</a>
+<a name="ln1003">        ra_data-&gt;cur_cmd-&gt;interval == interval &amp;&amp;</a>
+<a name="ln1004">        safe_str_eq(ra_data-&gt;cur_cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln1005"> </a>
+<a name="ln1006">        cmd = ra_data-&gt;cur_cmd;</a>
+<a name="ln1007">        goto handle_dup;</a>
+<a name="ln1008">    }</a>
+<a name="ln1009"> </a>
+<a name="ln1010">    for (gIter = ra_data-&gt;recurring_cmds; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1011">        cmd = gIter-&gt;data;</a>
+<a name="ln1012">        if (cmd-&gt;interval == interval &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln1013">            goto handle_dup;</a>
+<a name="ln1014">        }</a>
+<a name="ln1015">    }</a>
+<a name="ln1016"> </a>
+<a name="ln1017">    for (gIter = ra_data-&gt;cmds; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln1018">        cmd = gIter-&gt;data;</a>
+<a name="ln1019">        if (cmd-&gt;interval == interval &amp;&amp; safe_str_eq(cmd-&gt;action, &quot;monitor&quot;)) {</a>
+<a name="ln1020">            goto handle_dup;</a>
+<a name="ln1021">        }</a>
+<a name="ln1022">    }</a>
+<a name="ln1023"> </a>
+<a name="ln1024">    return NULL;</a>
+<a name="ln1025"> </a>
+<a name="ln1026">handle_dup:</a>
+<a name="ln1027"> </a>
+<a name="ln1028">    crm_trace(&quot;merging duplicate monitor cmd %s_monitor_%d&quot;, cmd-&gt;rsc_id, interval);</a>
+<a name="ln1029"> </a>
+<a name="ln1030">    /* update the userdata */</a>
+<a name="ln1031">    if (userdata) {</a>
+<a name="ln1032">       free(cmd-&gt;userdata);</a>
+<a name="ln1033">       cmd-&gt;userdata = strdup(userdata);</a>
+<a name="ln1034">    }</a>
+<a name="ln1035"> </a>
+<a name="ln1036">    /* if we've already reported success, generate a new call id */</a>
+<a name="ln1037">    if (cmd-&gt;reported_success) {</a>
+<a name="ln1038">        cmd-&gt;start_time = time(NULL);</a>
+<a name="ln1039">        cmd-&gt;call_id = generate_callid();</a>
+<a name="ln1040">        cmd-&gt;reported_success = 0;</a>
+<a name="ln1041">    }</a>
+<a name="ln1042"> </a>
+<a name="ln1043">    /* if we have an interval_id set, that means we are in the process of</a>
+<a name="ln1044">     * waiting for this cmd's next interval. instead of waiting, cancel</a>
+<a name="ln1045">     * the timer and execute the action immediately */</a>
+<a name="ln1046">    if (cmd-&gt;interval_id) {</a>
+<a name="ln1047">        g_source_remove(cmd-&gt;interval_id);</a>
+<a name="ln1048">        cmd-&gt;interval_id = 0;</a>
+<a name="ln1049">        recurring_helper(cmd);</a>
+<a name="ln1050">    }</a>
+<a name="ln1051"> </a>
+<a name="ln1052">    return cmd;  </a>
+<a name="ln1053">}</a>
+<a name="ln1054"> </a>
+<a name="ln1055">int</a>
+<a name="ln1056">remote_ra_exec(lrm_state_t * lrm_state, const char *rsc_id, const char *action, const char *userdata, int interval,     /* ms */</a>
+<a name="ln1057">               int timeout,     /* ms */</a>
+<a name="ln1058">               int start_delay, /* ms */</a>
+<a name="ln1059">               lrmd_key_value_t * params)</a>
+<a name="ln1060">{</a>
+<a name="ln1061">    int rc = 0;</a>
+<a name="ln1062">    lrm_state_t *connection_rsc = NULL;</a>
+<a name="ln1063">    remote_ra_cmd_t *cmd = NULL;</a>
+<a name="ln1064">    remote_ra_data_t *ra_data = NULL;</a>
+<a name="ln1065"> </a>
+<a name="ln1066">    if (is_remote_ra_supported_action(action) == FALSE) {</a>
+<a name="ln1067">        rc = -EINVAL;</a>
+<a name="ln1068">        goto exec_done;</a>
+<a name="ln1069">    }</a>
+<a name="ln1070"> </a>
+<a name="ln1071">    connection_rsc = lrm_state_find(rsc_id);</a>
+<a name="ln1072">    if (!connection_rsc) {</a>
+<a name="ln1073">        rc = -EINVAL;</a>
+<a name="ln1074">        goto exec_done;</a>
+<a name="ln1075">    }</a>
+<a name="ln1076"> </a>
+<a name="ln1077">    remote_ra_data_init(connection_rsc);</a>
+<a name="ln1078">    ra_data = connection_rsc-&gt;remote_ra_data;</a>
+<a name="ln1079"> </a>
+<a name="ln1080">    cmd = handle_dup_monitor(ra_data, interval, userdata);</a>
+<a name="ln1081">    if (cmd) {</a>
+<a name="ln1082">       return cmd-&gt;call_id;</a>
+<a name="ln1083">    }</a>
+<a name="ln1084"> </a>
+<a name="ln1085">    cmd = calloc(1, sizeof(remote_ra_cmd_t));</a>
+<a name="ln1086">    cmd-&gt;owner = strdup(lrm_state-&gt;node_name);</a>
+<a name="ln1087">    cmd-&gt;rsc_id = strdup(rsc_id);</a>
+<a name="ln1088">    cmd-&gt;action = strdup(action);</a>
+<a name="ln1089">    cmd-&gt;userdata = strdup(userdata);</a>
+<a name="ln1090">    cmd-&gt;interval = interval;</a>
+<a name="ln1091">    cmd-&gt;timeout = timeout;</a>
+<a name="ln1092">    cmd-&gt;start_delay = start_delay;</a>
+<a name="ln1093">    cmd-&gt;params = params;</a>
+<a name="ln1094">    cmd-&gt;start_time = time(NULL);</a>
+<a name="ln1095"> </a>
+<a name="ln1096">    cmd-&gt;call_id = generate_callid();</a>
+<a name="ln1097"> </a>
+<a name="ln1098">    if (cmd-&gt;start_delay) {</a>
+<a name="ln1099">        cmd-&gt;delay_id = g_timeout_add(cmd-&gt;start_delay, start_delay_helper, cmd);</a>
+<a name="ln1100">    }</a>
+<a name="ln1101"> </a>
+<a name="ln1102">    ra_data-&gt;cmds = g_list_append(ra_data-&gt;cmds, cmd);</a>
+<a name="ln1103">    mainloop_set_trigger(ra_data-&gt;work);</a>
+<a name="ln1104"> </a>
+<a name="ln1105">    return cmd-&gt;call_id;</a>
+<a name="ln1106">  exec_done:</a>
+<a name="ln1107"> </a>
+<a name="ln1108">    lrmd_key_value_freeall(params);</a>
+<a name="ln1109">    return rc;</a>
+<a name="ln1110">}</a>
+<a name="ln1111"> </a>
+<a name="ln1112">/*!</a>
+<a name="ln1113"> * \internal</a>
+<a name="ln1114"> * \brief Immediately fail all monitors of a remote node, if proxied here</a>
+<a name="ln1115"> *</a>
+<a name="ln1116"> * \param[in] node_name  Name of pacemaker_remote node</a>
+<a name="ln1117"> */</a>
+<a name="ln1118">void</a>
+<a name="ln1119">remote_ra_fail(const char *node_name)</a>
+<a name="ln1120">{</a>
+<a name="ln1121">    lrm_state_t *lrm_state = lrm_state_find(node_name);</a>
+<a name="ln1122"> </a>
+<a name="ln1123">    if (lrm_state &amp;&amp; lrm_state_is_connected(lrm_state)) {</a>
+<a name="ln1124">        remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln1125"> </a>
+<a name="ln1126">        crm_info(&quot;Failing monitors on pacemaker_remote node %s&quot;, node_name);</a>
+<a name="ln1127">        ra_data-&gt;recurring_cmds = fail_all_monitor_cmds(ra_data-&gt;recurring_cmds);</a>
+<a name="ln1128">        ra_data-&gt;cmds = fail_all_monitor_cmds(ra_data-&gt;cmds);</a>
+<a name="ln1129">    }</a>
+<a name="ln1130">}</a>
+<a name="ln1131"> </a>
+<a name="ln1132">/* A guest node fencing implied by host fencing looks like:</a>
+<a name="ln1133"> *</a>
+<a name="ln1134"> *  &lt;pseudo_event id=&quot;103&quot; operation=&quot;stonith&quot; operation_key=&quot;stonith-lxc1-off&quot;</a>
+<a name="ln1135"> *                on_node=&quot;lxc1&quot; on_node_uuid=&quot;lxc1&quot;&gt;</a>
+<a name="ln1136"> *     &lt;attributes CRM_meta_master_lxc_ms=&quot;10&quot; CRM_meta_on_node=&quot;lxc1&quot;</a>
+<a name="ln1137"> *                 CRM_meta_on_node_uuid=&quot;lxc1&quot; CRM_meta_stonith_action=&quot;off&quot;</a>
+<a name="ln1138"> *                 crm_feature_set=&quot;3.0.12&quot;/&gt;</a>
+<a name="ln1139"> *     &lt;downed&gt;</a>
+<a name="ln1140"> *       &lt;node id=&quot;lxc1&quot;/&gt;</a>
+<a name="ln1141"> *     &lt;/downed&gt;</a>
+<a name="ln1142"> *  &lt;/pseudo_event&gt;</a>
+<a name="ln1143"> */</a>
+<a name="ln1144">#define XPATH_PSEUDO_FENCE &quot;//&quot; XML_GRAPH_TAG_PSEUDO_EVENT \</a>
+<a name="ln1145">    &quot;[@&quot; XML_LRM_ATTR_TASK &quot;='stonith']/&quot; XML_GRAPH_TAG_DOWNED \</a>
+<a name="ln1146">    &quot;/&quot; XML_CIB_TAG_NODE</a>
+<a name="ln1147"> </a>
+<a name="ln1148">/*!</a>
+<a name="ln1149"> * \internal</a>
+<a name="ln1150"> * \brief Check a pseudo-action for Pacemaker Remote node side effects</a>
+<a name="ln1151"> *</a>
+<a name="ln1152"> * \param[in] xml  XML of pseudo-action to check</a>
+<a name="ln1153"> */</a>
+<a name="ln1154">void</a>
+<a name="ln1155">remote_ra_process_pseudo(xmlNode *xml)</a>
+<a name="ln1156">{</a>
+<a name="ln1157">    xmlXPathObjectPtr search = xpath_search(xml, XPATH_PSEUDO_FENCE);</a>
+<a name="ln1158"> </a>
+<a name="ln1159">    if (numXpathResults(search) == 1) {</a>
+<a name="ln1160">        xmlNode *result = getXpathResult(search, 0);</a>
+<a name="ln1161"> </a>
+<a name="ln1162">        /* Normally, we handle the necessary side effects of a guest node stop</a>
+<a name="ln1163">         * action when reporting the remote agent's result. However, if the stop</a>
+<a name="ln1164">         * is implied due to fencing, it will be a fencing pseudo-event, and</a>
+<a name="ln1165">         * there won't be a result to report. Handle that case here.</a>
+<a name="ln1166">         *</a>
+<a name="ln1167">         * This will result in a duplicate call to remote_node_down() if the</a>
+<a name="ln1168">         * guest stop was real instead of implied, but that shouldn't hurt.</a>
+<a name="ln1169">         *</a>
+<a name="ln1170">         * There is still one corner case that isn't handled: if a guest node</a>
+<a name="ln1171">         * isn't running any resources when its host is fenced, it will appear</a>
+<a name="ln1172">         * to be cleanly stopped, so there will be no pseudo-fence, and our</a>
+<a name="ln1173">         * peer cache state will be incorrect unless and until the guest is</a>
+<a name="ln1174">         * recovered.</a>
+<a name="ln1175">         */</a>
+<a name="ln1176">        if (result) {</a>
+<a name="ln1177">            const char *remote = ID(result);</a>
+<a name="ln1178"> </a>
+<a name="ln1179">            if (remote) {</a>
+<a name="ln1180">                remote_node_down(remote, DOWN_ERASE_LRM);</a>
+<a name="ln1181">            }</a>
+<a name="ln1182">        }</a>
+<a name="ln1183">    }</a>
+<a name="ln1184">    freeXpathObject(search);</a>
+<a name="ln1185">}</a>
+<a name="ln1186"> </a>
+<a name="ln1187">static void</a>
+<a name="ln1188">remote_ra_maintenance(lrm_state_t * lrm_state, gboolean maintenance)</a>
+<a name="ln1189">{</a>
+<a name="ln1190">    remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln1191">    xmlNode *update, *state;</a>
+<a name="ln1192">    int call_opt, call_id = 0;</a>
+<a name="ln1193">    crm_node_t *node;</a>
+<a name="ln1194"> </a>
+<a name="ln1195">    call_opt = crmd_cib_smart_opt();</a>
+<a name="ln1196">    node = crm_remote_peer_get(lrm_state-&gt;node_name);</a>
+<a name="ln1197">    CRM_CHECK(node != NULL, return);</a>
+<a name="ln1198">    update = create_xml_node(NULL, XML_CIB_TAG_STATUS);</a>
+<a name="ln1199">    state = create_node_state_update(node, node_update_none, update,</a>
+<a name="ln1200">                                     __FUNCTION__);</a>
+<a name="ln1201">    crm_xml_add(state, XML_NODE_IS_MAINTENANCE, maintenance?&quot;1&quot;:&quot;0&quot;);</a>
+<a name="ln1202">    fsa_cib_update(XML_CIB_TAG_STATUS, update, call_opt, call_id, NULL);</a>
+<a name="ln1203">    if (call_id &lt; 0) {</a>
+<a name="ln1204">        crm_perror(LOG_WARNING, &quot;%s CIB node state update failed&quot;, lrm_state-&gt;node_name);</a>
+<a name="ln1205">    } else {</a>
+<a name="ln1206">        /* TODO: still not 100% sure that async update will succeed ... */</a>
+<a name="ln1207">        ra_data-&gt;is_maintenance = maintenance;</a>
+<a name="ln1208">    }</a>
+<a name="ln1209">    free_xml(update);</a>
+<a name="ln1210">}</a>
+<a name="ln1211"> </a>
+<a name="ln1212">#define XPATH_PSEUDO_MAINTENANCE &quot;//&quot; XML_GRAPH_TAG_PSEUDO_EVENT \</a>
+<a name="ln1213">    &quot;[@&quot; XML_LRM_ATTR_TASK &quot;='&quot; CRM_OP_MAINTENANCE_NODES &quot;']/&quot; \</a>
+<a name="ln1214">    XML_GRAPH_TAG_MAINTENANCE</a>
+<a name="ln1215"> </a>
+<a name="ln1216">/*!</a>
+<a name="ln1217"> * \internal</a>
+<a name="ln1218"> * \brief Check a pseudo-action holding updates for maintenance state</a>
+<a name="ln1219"> *</a>
+<a name="ln1220"> * \param[in] xml  XML of pseudo-action to check</a>
+<a name="ln1221"> */</a>
+<a name="ln1222"> </a>
+<a name="ln1223">void</a>
+<a name="ln1224">remote_ra_process_maintenance_nodes(xmlNode *xml)</a>
+<a name="ln1225">{</a>
+<a name="ln1226">    xmlXPathObjectPtr search = xpath_search(xml, XPATH_PSEUDO_MAINTENANCE);</a>
+<a name="ln1227"> </a>
+<a name="ln1228">    if (numXpathResults(search) == 1) {</a>
+<a name="ln1229">        xmlNode *node;</a>
+<a name="ln1230">        int cnt = 0, cnt_remote = 0;</a>
+<a name="ln1231"> </a>
+<a name="ln1232">        for (node =</a>
+<a name="ln1233">                first_named_child(getXpathResult(search, 0), XML_CIB_TAG_NODE);</a>
+<a name="ln1234">            node; node = __xml_next(node)) {</a>
+<a name="ln1235">            lrm_state_t *lrm_state = lrm_state_find(ID(node));</a>
+<a name="ln1236"> </a>
+<a name="ln1237">            cnt++;</a>
+<a name="ln1238">            if (lrm_state &amp;&amp; lrm_state-&gt;remote_ra_data &amp;&amp;</a>
+<a name="ln1239">                ((remote_ra_data_t *) lrm_state-&gt;remote_ra_data)-&gt;active) {</a>
+<a name="ln1240">                cnt_remote++;</a>
+<a name="ln1241">                remote_ra_maintenance(lrm_state,</a>
+<a name="ln1242">                                        crm_atoi(crm_element_value(node,</a>
+<a name="ln1243">                                            XML_NODE_IS_MAINTENANCE), &quot;0&quot;));</a>
+<a name="ln1244"> </a>
+<a name="ln1245">            }</a>
+<a name="ln1246">        }</a>
+<a name="ln1247">        crm_trace(&quot;Action holds %d nodes (%d remotes found) &quot;</a>
+<a name="ln1248">                    &quot;adjusting maintenance-mode&quot;, cnt, cnt_remote);</a>
+<a name="ln1249">    }</a>
+<a name="ln1250">    freeXpathObject(search);</a>
+<a name="ln1251">}</a>
+<a name="ln1252"> </a>
+<a name="ln1253">gboolean</a>
+<a name="ln1254">remote_ra_is_in_maintenance(lrm_state_t * lrm_state)</a>
+<a name="ln1255">{</a>
+<a name="ln1256">    remote_ra_data_t *ra_data = lrm_state-&gt;remote_ra_data;</a>
+<a name="ln1257"> </a>
+<a name="ln1258">    return ra_data-&gt;is_maintenance;</a>
+<a name="ln1259">}</a>
+
+</code></pre>
+<div class="balloon" rel="387"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'g_hash_table_insert' function. Inspect the second argument. Check lines: 387, 387.</p></div>
+<div class="balloon" rel="839"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'ra_data'. Check lines: 839, 838.</p></div>
+<div class="balloon" rel="885"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'info'. Check lines: 885, 883.</p></div>
+<div class="balloon" rel="1086"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'cmd'. Check lines: 1086, 1085.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>

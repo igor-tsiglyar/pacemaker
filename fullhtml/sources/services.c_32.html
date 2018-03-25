@@ -1,0 +1,997 @@
+
+<html>
+<head>
+  <link rel="stylesheet" href="../style.css"/>
+  <script src="../jquery-3.2.1.min.js"></script>
+</head>
+<body>
+<pre><code class="cpp">
+<a name="ln1"> </a>
+<a name="ln2">// This is an open source non-commercial project. Dear PVS-Studio, please check it.</a>
+<a name="ln3"> </a>
+<a name="ln4">// PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com</a>
+<a name="ln5">/*</a>
+<a name="ln6"> * Copyright (C) 2010-2016 Andrew Beekhof &lt;andrew@beekhof.net&gt;</a>
+<a name="ln7"> *</a>
+<a name="ln8"> * This source code is licensed under the GNU Lesser General Public License</a>
+<a name="ln9"> * version 2.1 or later (LGPLv2.1+) WITHOUT ANY WARRANTY.</a>
+<a name="ln10"> */</a>
+<a name="ln11"> </a>
+<a name="ln12">#include &lt;crm_internal.h&gt;</a>
+<a name="ln13"> </a>
+<a name="ln14">#ifndef _GNU_SOURCE</a>
+<a name="ln15">#  define _GNU_SOURCE</a>
+<a name="ln16">#endif</a>
+<a name="ln17"> </a>
+<a name="ln18">#include &lt;sys/types.h&gt;</a>
+<a name="ln19">#include &lt;sys/stat.h&gt;</a>
+<a name="ln20">#include &lt;stdio.h&gt;</a>
+<a name="ln21"> </a>
+<a name="ln22">#include &lt;errno.h&gt;</a>
+<a name="ln23">#include &lt;unistd.h&gt;</a>
+<a name="ln24">#include &lt;dirent.h&gt;</a>
+<a name="ln25">#include &lt;fcntl.h&gt;</a>
+<a name="ln26"> </a>
+<a name="ln27">#include &lt;crm/crm.h&gt;</a>
+<a name="ln28">#include &lt;crm/common/mainloop.h&gt;</a>
+<a name="ln29">#include &lt;crm/services.h&gt;</a>
+<a name="ln30">#include &lt;crm/msg_xml.h&gt;</a>
+<a name="ln31">#include &quot;services_private.h&quot;</a>
+<a name="ln32"> </a>
+<a name="ln33">#if SUPPORT_UPSTART</a>
+<a name="ln34">#  include &lt;upstart.h&gt;</a>
+<a name="ln35">#endif</a>
+<a name="ln36"> </a>
+<a name="ln37">#if SUPPORT_SYSTEMD</a>
+<a name="ln38">#  include &lt;systemd.h&gt;</a>
+<a name="ln39">#endif</a>
+<a name="ln40"> </a>
+<a name="ln41">/* TODO: Develop a rollover strategy */</a>
+<a name="ln42"> </a>
+<a name="ln43">static int operations = 0;</a>
+<a name="ln44">static GHashTable *recurring_actions = NULL;</a>
+<a name="ln45"> </a>
+<a name="ln46">/* ops waiting to run async because of conflicting active</a>
+<a name="ln47"> * pending ops */</a>
+<a name="ln48">static GList *blocked_ops = NULL;</a>
+<a name="ln49"> </a>
+<a name="ln50">/* ops currently active (in-flight) */</a>
+<a name="ln51">static GList *inflight_ops = NULL;</a>
+<a name="ln52"> </a>
+<a name="ln53">static void handle_blocked_ops(void);</a>
+<a name="ln54"> </a>
+<a name="ln55">svc_action_t *</a>
+<a name="ln56">services_action_create(const char *name, const char *action, int interval, int timeout)</a>
+<a name="ln57">{</a>
+<a name="ln58">    return resources_action_create(name, PCMK_RESOURCE_CLASS_LSB, NULL, name,</a>
+<a name="ln59">                                   action, interval, timeout, NULL, 0);</a>
+<a name="ln60">}</a>
+<a name="ln61"> </a>
+<a name="ln62">const char *</a>
+<a name="ln63">resources_find_service_class(const char *agent)</a>
+<a name="ln64">{</a>
+<a name="ln65">    /* Priority is:</a>
+<a name="ln66">     * - lsb</a>
+<a name="ln67">     * - systemd</a>
+<a name="ln68">     * - upstart</a>
+<a name="ln69">     */</a>
+<a name="ln70">    int rc = 0;</a>
+<a name="ln71">    struct stat st;</a>
+<a name="ln72">    char *path = NULL;</a>
+<a name="ln73"> </a>
+<a name="ln74">#ifdef LSB_ROOT_DIR</a>
+<a name="ln75">    rc = asprintf(&amp;path, &quot;%s/%s&quot;, LSB_ROOT_DIR, agent);</a>
+<a name="ln76">    if (rc &gt; 0 &amp;&amp; stat(path, &amp;st) == 0) {</a>
+<a name="ln77">        free(path);</a>
+<a name="ln78">        return PCMK_RESOURCE_CLASS_LSB;</a>
+<a name="ln79">    }</a>
+<a name="ln80">    free(path);</a>
+<a name="ln81">#endif</a>
+<a name="ln82"> </a>
+<a name="ln83">#if SUPPORT_SYSTEMD</a>
+<a name="ln84">    if (systemd_unit_exists(agent)) {</a>
+<a name="ln85">        return PCMK_RESOURCE_CLASS_SYSTEMD;</a>
+<a name="ln86">    }</a>
+<a name="ln87">#endif</a>
+<a name="ln88"> </a>
+<a name="ln89">#if SUPPORT_UPSTART</a>
+<a name="ln90">    if (upstart_job_exists(agent)) {</a>
+<a name="ln91">        return PCMK_RESOURCE_CLASS_UPSTART;</a>
+<a name="ln92">    }</a>
+<a name="ln93">#endif</a>
+<a name="ln94">    return NULL;</a>
+<a name="ln95">}</a>
+<a name="ln96"> </a>
+<a name="ln97">static inline void</a>
+<a name="ln98">init_recurring_actions(void)</a>
+<a name="ln99">{</a>
+<a name="ln100">    if (recurring_actions == NULL) {</a>
+<a name="ln101">        recurring_actions = g_hash_table_new_full(g_str_hash, g_str_equal, NULL,</a>
+<a name="ln102">                                                  NULL);</a>
+<a name="ln103">    }</a>
+<a name="ln104">}</a>
+<a name="ln105"> </a>
+<a name="ln106">/*!</a>
+<a name="ln107"> * \internal</a>
+<a name="ln108"> * \brief Check whether op is in-flight systemd or upstart op</a>
+<a name="ln109"> *</a>
+<a name="ln110"> * \param[in] op  Operation to check</a>
+<a name="ln111"> *</a>
+<a name="ln112"> * \return TRUE if op is in-flight systemd or upstart op</a>
+<a name="ln113"> */</a>
+<a name="ln114">static inline gboolean</a>
+<a name="ln115">inflight_systemd_or_upstart(svc_action_t *op)</a>
+<a name="ln116">{</a>
+<a name="ln117">    return (safe_str_eq(op-&gt;standard, PCMK_RESOURCE_CLASS_SYSTEMD)</a>
+<a name="ln118">            || safe_str_eq(op-&gt;standard, PCMK_RESOURCE_CLASS_UPSTART))</a>
+<a name="ln119">            &amp;&amp; (g_list_find(inflight_ops, op) != NULL);</a>
+<a name="ln120">}</a>
+<a name="ln121"> </a>
+<a name="ln122">/*!</a>
+<a name="ln123"> * \internal</a>
+<a name="ln124"> * \brief Expand &quot;service&quot; alias to an actual resource class</a>
+<a name="ln125"> *</a>
+<a name="ln126"> * \param[in] rsc       Resource name (for logging only)</a>
+<a name="ln127"> * \param[in] standard  Resource class as configured</a>
+<a name="ln128"> * \param[in] agent     Agent name to look for</a>
+<a name="ln129"> *</a>
+<a name="ln130"> * \return Newly allocated string with actual resource class</a>
+<a name="ln131"> *</a>
+<a name="ln132"> * \note The caller is responsible for calling free() on the result.</a>
+<a name="ln133"> */</a>
+<a name="ln134">static char *</a>
+<a name="ln135">expand_resource_class(const char *rsc, const char *standard, const char *agent)</a>
+<a name="ln136">{</a>
+<a name="ln137">    char *expanded_class = NULL;</a>
+<a name="ln138"> </a>
+<a name="ln139">    if (strcasecmp(standard, PCMK_RESOURCE_CLASS_SERVICE) == 0) {</a>
+<a name="ln140">        const char *found_class = resources_find_service_class(agent);</a>
+<a name="ln141"> </a>
+<a name="ln142">        if (found_class) {</a>
+<a name="ln143">            crm_debug(&quot;Found %s agent %s for %s&quot;, found_class, agent, rsc);</a>
+<a name="ln144">            expanded_class = strdup(found_class);</a>
+<a name="ln145">        } else {</a>
+<a name="ln146">            crm_info(&quot;Assuming resource class lsb for agent %s for %s&quot;,</a>
+<a name="ln147">                     agent, rsc);</a>
+<a name="ln148">            expanded_class = strdup(PCMK_RESOURCE_CLASS_LSB);</a>
+<a name="ln149">        }</a>
+<a name="ln150">    } else {</a>
+<a name="ln151">        expanded_class = strdup(standard);</a>
+<a name="ln152">    }</a>
+<a name="ln153">    CRM_ASSERT(expanded_class);</a>
+<a name="ln154">    return expanded_class;</a>
+<a name="ln155">}</a>
+<a name="ln156"> </a>
+<a name="ln157">svc_action_t *</a>
+<a name="ln158">resources_action_create(const char *name, const char *standard, const char *provider,</a>
+<a name="ln159">                        const char *agent, const char *action, int interval, int timeout,</a>
+<a name="ln160">                        GHashTable * params, enum svc_action_flags flags)</a>
+<a name="ln161">{</a>
+<a name="ln162">    svc_action_t *op = NULL;</a>
+<a name="ln163"> </a>
+<a name="ln164">    /*</a>
+<a name="ln165">     * Do some up front sanity checks before we go off and</a>
+<a name="ln166">     * build the svc_action_t instance.</a>
+<a name="ln167">     */</a>
+<a name="ln168"> </a>
+<a name="ln169">    if (crm_strlen_zero(name)) {</a>
+<a name="ln170">        crm_err(&quot;Cannot create operation without resource name&quot;);</a>
+<a name="ln171">        goto return_error;</a>
+<a name="ln172">    }</a>
+<a name="ln173"> </a>
+<a name="ln174">    if (crm_strlen_zero(standard)) {</a>
+<a name="ln175">        crm_err(&quot;Cannot create operation for %s without resource class&quot;, name);</a>
+<a name="ln176">        goto return_error;</a>
+<a name="ln177">    }</a>
+<a name="ln178"> </a>
+<a name="ln179">    if (!strcasecmp(standard, PCMK_RESOURCE_CLASS_OCF)</a>
+<a name="ln180">        &amp;&amp; crm_strlen_zero(provider)) {</a>
+<a name="ln181">        crm_err(&quot;Cannot create OCF operation for %s without provider&quot;, name);</a>
+<a name="ln182">        goto return_error;</a>
+<a name="ln183">    }</a>
+<a name="ln184"> </a>
+<a name="ln185">    if (crm_strlen_zero(agent)) {</a>
+<a name="ln186">        crm_err(&quot;Cannot create operation for %s without agent name&quot;, name);</a>
+<a name="ln187">        goto return_error;</a>
+<a name="ln188">    }</a>
+<a name="ln189"> </a>
+<a name="ln190">    if (crm_strlen_zero(action)) {</a>
+<a name="ln191">        crm_err(&quot;Cannot create operation for %s without operation name&quot;, name);</a>
+<a name="ln192">        goto return_error;</a>
+<a name="ln193">    }</a>
+<a name="ln194"> </a>
+<a name="ln195">    /*</a>
+<a name="ln196">     * Sanity checks passed, proceed!</a>
+<a name="ln197">     */</a>
+<a name="ln198"> </a>
+<a name="ln199">    op = calloc(1, sizeof(svc_action_t));</a>
+<a name="ln200">    op-&gt;opaque = calloc(1, sizeof(svc_action_private_t));</a>
+<a name="ln201">    op-&gt;rsc = strdup(name);</a>
+<a name="ln202">    op-&gt;interval = interval;</a>
+<a name="ln203">    op-&gt;timeout = timeout;</a>
+<a name="ln204">    op-&gt;standard = expand_resource_class(name, standard, agent);</a>
+<a name="ln205">    op-&gt;agent = strdup(agent);</a>
+<a name="ln206">    op-&gt;sequence = ++operations;</a>
+<a name="ln207">    op-&gt;flags = flags;</a>
+<a name="ln208">    op-&gt;id = generate_op_key(name, action, interval);</a>
+<a name="ln209"> </a>
+<a name="ln210">    if (safe_str_eq(action, &quot;monitor&quot;) &amp;&amp; (</a>
+<a name="ln211">#if SUPPORT_HEARTBEAT</a>
+<a name="ln212">        safe_str_eq(op-&gt;standard, PCMK_RESOURCE_CLASS_HB) ||</a>
+<a name="ln213">#endif</a>
+<a name="ln214">        safe_str_eq(op-&gt;standard, PCMK_RESOURCE_CLASS_LSB))) {</a>
+<a name="ln215">        action = &quot;status&quot;;</a>
+<a name="ln216">    }</a>
+<a name="ln217">    op-&gt;action = strdup(action);</a>
+<a name="ln218"> </a>
+<a name="ln219">    if (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_OCF) == 0) {</a>
+<a name="ln220">        op-&gt;provider = strdup(provider);</a>
+<a name="ln221">        op-&gt;params = params;</a>
+<a name="ln222">        params = NULL;</a>
+<a name="ln223"> </a>
+<a name="ln224">        if (asprintf(&amp;op-&gt;opaque-&gt;exec, &quot;%s/resource.d/%s/%s&quot;, OCF_ROOT_DIR, provider, agent) == -1) {</a>
+<a name="ln225">            crm_err(&quot;Internal error: cannot create agent path&quot;);</a>
+<a name="ln226">            goto return_error;</a>
+<a name="ln227">        }</a>
+<a name="ln228">        op-&gt;opaque-&gt;args[0] = strdup(op-&gt;opaque-&gt;exec);</a>
+<a name="ln229">        op-&gt;opaque-&gt;args[1] = strdup(action);</a>
+<a name="ln230"> </a>
+<a name="ln231">    } else if (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_LSB) == 0) {</a>
+<a name="ln232">        if (op-&gt;agent[0] == '/') {</a>
+<a name="ln233">            /* if given an absolute path, use that instead</a>
+<a name="ln234">             * of tacking on the LSB_ROOT_DIR path to the front */</a>
+<a name="ln235">            op-&gt;opaque-&gt;exec = strdup(op-&gt;agent);</a>
+<a name="ln236">        } else if (asprintf(&amp;op-&gt;opaque-&gt;exec, &quot;%s/%s&quot;, LSB_ROOT_DIR, op-&gt;agent) == -1) {</a>
+<a name="ln237">            crm_err(&quot;Internal error: cannot create agent path&quot;);</a>
+<a name="ln238">            goto return_error;</a>
+<a name="ln239">        }</a>
+<a name="ln240">        op-&gt;opaque-&gt;args[0] = strdup(op-&gt;opaque-&gt;exec);</a>
+<a name="ln241">        op-&gt;opaque-&gt;args[1] = strdup(op-&gt;action);</a>
+<a name="ln242">        op-&gt;opaque-&gt;args[2] = NULL;</a>
+<a name="ln243">#if SUPPORT_HEARTBEAT</a>
+<a name="ln244">    } else if (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_HB) == 0) {</a>
+<a name="ln245">        int index;</a>
+<a name="ln246">        int param_num;</a>
+<a name="ln247">        char buf_tmp[20];</a>
+<a name="ln248">        void *value_tmp;</a>
+<a name="ln249"> </a>
+<a name="ln250">        if (op-&gt;agent[0] == '/') {</a>
+<a name="ln251">            /* if given an absolute path, use that instead</a>
+<a name="ln252">             * of tacking on the HB_RA_DIR path to the front */</a>
+<a name="ln253">            op-&gt;opaque-&gt;exec = strdup(op-&gt;agent);</a>
+<a name="ln254">        } else if (asprintf(&amp;op-&gt;opaque-&gt;exec, &quot;%s/%s&quot;, HB_RA_DIR, op-&gt;agent) == -1) {</a>
+<a name="ln255">            crm_err(&quot;Internal error: cannot create agent path&quot;);</a>
+<a name="ln256">            goto return_error;</a>
+<a name="ln257">        }</a>
+<a name="ln258">        op-&gt;opaque-&gt;args[0] = strdup(op-&gt;opaque-&gt;exec);</a>
+<a name="ln259"> </a>
+<a name="ln260">        /* The &quot;heartbeat&quot; agent class only has positional arguments,</a>
+<a name="ln261">         * which we keyed by their decimal position number. */</a>
+<a name="ln262">        param_num = 1;</a>
+<a name="ln263">        for (index = 1; index &lt;= MAX_ARGC - 3; index++ ) {</a>
+<a name="ln264">            snprintf(buf_tmp, sizeof(buf_tmp), &quot;%d&quot;, index);</a>
+<a name="ln265">            value_tmp = g_hash_table_lookup(params, buf_tmp);</a>
+<a name="ln266">            if (value_tmp == NULL) {</a>
+<a name="ln267">                /* maybe: strdup(&quot;&quot;) ??</a>
+<a name="ln268">                 * But the old lrmd did simply continue as well. */</a>
+<a name="ln269">                continue;</a>
+<a name="ln270">            }</a>
+<a name="ln271">            op-&gt;opaque-&gt;args[param_num++] = strdup(value_tmp);</a>
+<a name="ln272">        }</a>
+<a name="ln273"> </a>
+<a name="ln274">        /* Add operation code as the last argument, */</a>
+<a name="ln275">        /* and the teminating NULL pointer */</a>
+<a name="ln276">        op-&gt;opaque-&gt;args[param_num++] = strdup(op-&gt;action);</a>
+<a name="ln277">        op-&gt;opaque-&gt;args[param_num] = NULL;</a>
+<a name="ln278">#endif</a>
+<a name="ln279">#if SUPPORT_SYSTEMD</a>
+<a name="ln280">    } else if (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_SYSTEMD) == 0) {</a>
+<a name="ln281">        op-&gt;opaque-&gt;exec = strdup(&quot;systemd-dbus&quot;);</a>
+<a name="ln282">#endif</a>
+<a name="ln283">#if SUPPORT_UPSTART</a>
+<a name="ln284">    } else if (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_UPSTART) == 0) {</a>
+<a name="ln285">        op-&gt;opaque-&gt;exec = strdup(&quot;upstart-dbus&quot;);</a>
+<a name="ln286">#endif</a>
+<a name="ln287">#if SUPPORT_NAGIOS</a>
+<a name="ln288">    } else if (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_NAGIOS) == 0) {</a>
+<a name="ln289">        int index = 0;</a>
+<a name="ln290"> </a>
+<a name="ln291">        if (op-&gt;agent[0] == '/') {</a>
+<a name="ln292">            /* if given an absolute path, use that instead</a>
+<a name="ln293">             * of tacking on the NAGIOS_PLUGIN_DIR path to the front */</a>
+<a name="ln294">            op-&gt;opaque-&gt;exec = strdup(op-&gt;agent);</a>
+<a name="ln295"> </a>
+<a name="ln296">        } else if (asprintf(&amp;op-&gt;opaque-&gt;exec, &quot;%s/%s&quot;, NAGIOS_PLUGIN_DIR, op-&gt;agent) == -1) {</a>
+<a name="ln297">            crm_err(&quot;Internal error: cannot create agent path&quot;);</a>
+<a name="ln298">            goto return_error;</a>
+<a name="ln299">        }</a>
+<a name="ln300"> </a>
+<a name="ln301">        op-&gt;opaque-&gt;args[0] = strdup(op-&gt;opaque-&gt;exec);</a>
+<a name="ln302">        index = 1;</a>
+<a name="ln303"> </a>
+<a name="ln304">        if (safe_str_eq(op-&gt;action, &quot;monitor&quot;) &amp;&amp; op-&gt;interval == 0) {</a>
+<a name="ln305">            /* Invoke --version for a nagios probe */</a>
+<a name="ln306">            op-&gt;opaque-&gt;args[index] = strdup(&quot;--version&quot;);</a>
+<a name="ln307">            index++;</a>
+<a name="ln308"> </a>
+<a name="ln309">        } else if (params) {</a>
+<a name="ln310">            GHashTableIter iter;</a>
+<a name="ln311">            char *key = NULL;</a>
+<a name="ln312">            char *value = NULL;</a>
+<a name="ln313">            static int args_size = sizeof(op-&gt;opaque-&gt;args) / sizeof(char *);</a>
+<a name="ln314"> </a>
+<a name="ln315">            g_hash_table_iter_init(&amp;iter, params);</a>
+<a name="ln316"> </a>
+<a name="ln317">            while (g_hash_table_iter_next(&amp;iter, (gpointer *) &amp; key, (gpointer *) &amp; value) &amp;&amp;</a>
+<a name="ln318">                   index &lt;= args_size - 3) {</a>
+<a name="ln319">                int len = 3;</a>
+<a name="ln320">                char *long_opt = NULL;</a>
+<a name="ln321"> </a>
+<a name="ln322">                if (safe_str_eq(key, XML_ATTR_CRM_VERSION) || strstr(key, CRM_META &quot;_&quot;)) {</a>
+<a name="ln323">                    continue;</a>
+<a name="ln324">                }</a>
+<a name="ln325"> </a>
+<a name="ln326">                len += strlen(key);</a>
+<a name="ln327">                long_opt = calloc(1, len);</a>
+<a name="ln328">                sprintf(long_opt, &quot;--%s&quot;, key);</a>
+<a name="ln329">                long_opt[len - 1] = 0;</a>
+<a name="ln330"> </a>
+<a name="ln331">                op-&gt;opaque-&gt;args[index] = long_opt;</a>
+<a name="ln332">                op-&gt;opaque-&gt;args[index + 1] = strdup(value);</a>
+<a name="ln333">                index += 2;</a>
+<a name="ln334">            }</a>
+<a name="ln335">        }</a>
+<a name="ln336">        op-&gt;opaque-&gt;args[index] = NULL;</a>
+<a name="ln337">#endif</a>
+<a name="ln338">    } else {</a>
+<a name="ln339">        crm_err(&quot;Unknown resource standard: %s&quot;, op-&gt;standard);</a>
+<a name="ln340">        services_action_free(op);</a>
+<a name="ln341">        op = NULL;</a>
+<a name="ln342">    }</a>
+<a name="ln343"> </a>
+<a name="ln344">    if(params) {</a>
+<a name="ln345">        g_hash_table_destroy(params);</a>
+<a name="ln346">    }</a>
+<a name="ln347">    return op;</a>
+<a name="ln348"> </a>
+<a name="ln349">  return_error:</a>
+<a name="ln350">    if(params) {</a>
+<a name="ln351">        g_hash_table_destroy(params);</a>
+<a name="ln352">    }</a>
+<a name="ln353">    services_action_free(op);</a>
+<a name="ln354"> </a>
+<a name="ln355">    return NULL;</a>
+<a name="ln356">}</a>
+<a name="ln357"> </a>
+<a name="ln358">svc_action_t *</a>
+<a name="ln359">services_action_create_generic(const char *exec, const char *args[])</a>
+<a name="ln360">{</a>
+<a name="ln361">    svc_action_t *op;</a>
+<a name="ln362">    unsigned int cur_arg;</a>
+<a name="ln363"> </a>
+<a name="ln364">    op = calloc(1, sizeof(*op));</a>
+<a name="ln365">    op-&gt;opaque = calloc(1, sizeof(svc_action_private_t));</a>
+<a name="ln366"> </a>
+<a name="ln367">    op-&gt;opaque-&gt;exec = strdup(exec);</a>
+<a name="ln368">    op-&gt;opaque-&gt;args[0] = strdup(exec);</a>
+<a name="ln369"> </a>
+<a name="ln370">    for (cur_arg = 1; args &amp;&amp; args[cur_arg - 1]; cur_arg++) {</a>
+<a name="ln371">        op-&gt;opaque-&gt;args[cur_arg] = strdup(args[cur_arg - 1]);</a>
+<a name="ln372"> </a>
+<a name="ln373">        if (cur_arg == DIMOF(op-&gt;opaque-&gt;args) - 1) {</a>
+<a name="ln374">            crm_err(&quot;svc_action_t args list not long enough for '%s' execution request.&quot;, exec);</a>
+<a name="ln375">            break;</a>
+<a name="ln376">        }</a>
+<a name="ln377">    }</a>
+<a name="ln378"> </a>
+<a name="ln379">    return op;</a>
+<a name="ln380">}</a>
+<a name="ln381"> </a>
+<a name="ln382">#if SUPPORT_DBUS</a>
+<a name="ln383">/*!</a>
+<a name="ln384"> * \internal</a>
+<a name="ln385"> * \brief Update operation's pending DBus call, unreferencing old one if needed</a>
+<a name="ln386"> *</a>
+<a name="ln387"> * \param[in,out] op       Operation to modify</a>
+<a name="ln388"> * \param[in]     pending  Pending call to set</a>
+<a name="ln389"> */</a>
+<a name="ln390">void</a>
+<a name="ln391">services_set_op_pending(svc_action_t *op, DBusPendingCall *pending)</a>
+<a name="ln392">{</a>
+<a name="ln393">    if (op-&gt;opaque-&gt;pending &amp;&amp; (op-&gt;opaque-&gt;pending != pending)) {</a>
+<a name="ln394">        if (pending) {</a>
+<a name="ln395">            crm_info(&quot;Lost pending %s DBus call (%p)&quot;, op-&gt;id, op-&gt;opaque-&gt;pending);</a>
+<a name="ln396">        } else {</a>
+<a name="ln397">            crm_trace(&quot;Done with pending %s DBus call (%p)&quot;, op-&gt;id, op-&gt;opaque-&gt;pending);</a>
+<a name="ln398">        }</a>
+<a name="ln399">        dbus_pending_call_unref(op-&gt;opaque-&gt;pending);</a>
+<a name="ln400">    }</a>
+<a name="ln401">    op-&gt;opaque-&gt;pending = pending;</a>
+<a name="ln402">    if (pending) {</a>
+<a name="ln403">        crm_trace(&quot;Updated pending %s DBus call (%p)&quot;, op-&gt;id, pending);</a>
+<a name="ln404">    } else {</a>
+<a name="ln405">        crm_trace(&quot;Cleared pending %s DBus call&quot;, op-&gt;id);</a>
+<a name="ln406">    }</a>
+<a name="ln407">}</a>
+<a name="ln408">#endif</a>
+<a name="ln409"> </a>
+<a name="ln410">void</a>
+<a name="ln411">services_action_cleanup(svc_action_t * op)</a>
+<a name="ln412">{</a>
+<a name="ln413">    if(op-&gt;opaque == NULL) {</a>
+<a name="ln414">        return;</a>
+<a name="ln415">    }</a>
+<a name="ln416"> </a>
+<a name="ln417">#if SUPPORT_DBUS</a>
+<a name="ln418">    if(op-&gt;opaque-&gt;timerid != 0) {</a>
+<a name="ln419">        crm_trace(&quot;Removing timer for call %s to %s&quot;, op-&gt;action, op-&gt;rsc);</a>
+<a name="ln420">        g_source_remove(op-&gt;opaque-&gt;timerid);</a>
+<a name="ln421">        op-&gt;opaque-&gt;timerid = 0;</a>
+<a name="ln422">    }</a>
+<a name="ln423"> </a>
+<a name="ln424">    if(op-&gt;opaque-&gt;pending) {</a>
+<a name="ln425">        crm_trace(&quot;Cleaning up pending dbus call %p %s for %s&quot;, op-&gt;opaque-&gt;pending, op-&gt;action, op-&gt;rsc);</a>
+<a name="ln426">        if(dbus_pending_call_get_completed(op-&gt;opaque-&gt;pending)) {</a>
+<a name="ln427">            crm_warn(&quot;Pending dbus call %s for %s did not complete&quot;, op-&gt;action, op-&gt;rsc);</a>
+<a name="ln428">        }</a>
+<a name="ln429">        dbus_pending_call_cancel(op-&gt;opaque-&gt;pending);</a>
+<a name="ln430">        dbus_pending_call_unref(op-&gt;opaque-&gt;pending);</a>
+<a name="ln431">        op-&gt;opaque-&gt;pending = NULL;</a>
+<a name="ln432">    }</a>
+<a name="ln433">#endif</a>
+<a name="ln434"> </a>
+<a name="ln435">    if (op-&gt;opaque-&gt;stderr_gsource) {</a>
+<a name="ln436">        mainloop_del_fd(op-&gt;opaque-&gt;stderr_gsource);</a>
+<a name="ln437">        op-&gt;opaque-&gt;stderr_gsource = NULL;</a>
+<a name="ln438">    }</a>
+<a name="ln439"> </a>
+<a name="ln440">    if (op-&gt;opaque-&gt;stdout_gsource) {</a>
+<a name="ln441">        mainloop_del_fd(op-&gt;opaque-&gt;stdout_gsource);</a>
+<a name="ln442">        op-&gt;opaque-&gt;stdout_gsource = NULL;</a>
+<a name="ln443">    }</a>
+<a name="ln444">}</a>
+<a name="ln445"> </a>
+<a name="ln446">void</a>
+<a name="ln447">services_action_free(svc_action_t * op)</a>
+<a name="ln448">{</a>
+<a name="ln449">    unsigned int i;</a>
+<a name="ln450"> </a>
+<a name="ln451">    if (op == NULL) {</a>
+<a name="ln452">        return;</a>
+<a name="ln453">    }</a>
+<a name="ln454"> </a>
+<a name="ln455">    /* The operation should be removed from all tracking lists by this point.</a>
+<a name="ln456">     * If it's not, we have a bug somewhere, so bail. That may lead to a</a>
+<a name="ln457">     * memory leak, but it's better than a use-after-free segmentation fault.</a>
+<a name="ln458">     */</a>
+<a name="ln459">    CRM_CHECK(g_list_find(inflight_ops, op) == NULL, return);</a>
+<a name="ln460">    CRM_CHECK(g_list_find(blocked_ops, op) == NULL, return);</a>
+<a name="ln461">    CRM_CHECK((recurring_actions == NULL)</a>
+<a name="ln462">              || (g_hash_table_lookup(recurring_actions, op-&gt;id) == NULL),</a>
+<a name="ln463">              return);</a>
+<a name="ln464"> </a>
+<a name="ln465">    services_action_cleanup(op);</a>
+<a name="ln466"> </a>
+<a name="ln467">    if (op-&gt;opaque-&gt;repeat_timer) {</a>
+<a name="ln468">        g_source_remove(op-&gt;opaque-&gt;repeat_timer);</a>
+<a name="ln469">        op-&gt;opaque-&gt;repeat_timer = 0;</a>
+<a name="ln470">    }</a>
+<a name="ln471"> </a>
+<a name="ln472">    free(op-&gt;id);</a>
+<a name="ln473">    free(op-&gt;opaque-&gt;exec);</a>
+<a name="ln474"> </a>
+<a name="ln475">    for (i = 0; i &lt; DIMOF(op-&gt;opaque-&gt;args); i++) {</a>
+<a name="ln476">        free(op-&gt;opaque-&gt;args[i]);</a>
+<a name="ln477">    }</a>
+<a name="ln478"> </a>
+<a name="ln479">    free(op-&gt;opaque);</a>
+<a name="ln480">    free(op-&gt;rsc);</a>
+<a name="ln481">    free(op-&gt;action);</a>
+<a name="ln482"> </a>
+<a name="ln483">    free(op-&gt;standard);</a>
+<a name="ln484">    free(op-&gt;agent);</a>
+<a name="ln485">    free(op-&gt;provider);</a>
+<a name="ln486"> </a>
+<a name="ln487">    free(op-&gt;stdout_data);</a>
+<a name="ln488">    free(op-&gt;stderr_data);</a>
+<a name="ln489"> </a>
+<a name="ln490">    if (op-&gt;params) {</a>
+<a name="ln491">        g_hash_table_destroy(op-&gt;params);</a>
+<a name="ln492">        op-&gt;params = NULL;</a>
+<a name="ln493">    }</a>
+<a name="ln494"> </a>
+<a name="ln495">    free(op);</a>
+<a name="ln496">}</a>
+<a name="ln497"> </a>
+<a name="ln498">gboolean</a>
+<a name="ln499">cancel_recurring_action(svc_action_t * op)</a>
+<a name="ln500">{</a>
+<a name="ln501">    crm_info(&quot;Cancelling %s operation %s&quot;, op-&gt;standard, op-&gt;id);</a>
+<a name="ln502"> </a>
+<a name="ln503">    if (recurring_actions) {</a>
+<a name="ln504">        g_hash_table_remove(recurring_actions, op-&gt;id);</a>
+<a name="ln505">    }</a>
+<a name="ln506"> </a>
+<a name="ln507">    if (op-&gt;opaque-&gt;repeat_timer) {</a>
+<a name="ln508">        g_source_remove(op-&gt;opaque-&gt;repeat_timer);</a>
+<a name="ln509">        op-&gt;opaque-&gt;repeat_timer = 0;</a>
+<a name="ln510">    }</a>
+<a name="ln511"> </a>
+<a name="ln512">    return TRUE;</a>
+<a name="ln513">}</a>
+<a name="ln514"> </a>
+<a name="ln515">/*!</a>
+<a name="ln516"> * \brief Cancel a recurring action</a>
+<a name="ln517"> *</a>
+<a name="ln518"> * \param[in] name      Name of resource that operation is for</a>
+<a name="ln519"> * \param[in] action    Name of operation to cancel</a>
+<a name="ln520"> * \param[in] interval  Interval of operation to cancel</a>
+<a name="ln521"> *</a>
+<a name="ln522"> * \return TRUE if action was successfully cancelled, FALSE otherwise</a>
+<a name="ln523"> */</a>
+<a name="ln524">gboolean</a>
+<a name="ln525">services_action_cancel(const char *name, const char *action, int interval)</a>
+<a name="ln526">{</a>
+<a name="ln527">    gboolean cancelled = FALSE;</a>
+<a name="ln528">    char *id = generate_op_key(name, action, interval);</a>
+<a name="ln529">    svc_action_t *op = NULL;</a>
+<a name="ln530"> </a>
+<a name="ln531">    /* We can only cancel a recurring action */</a>
+<a name="ln532">    init_recurring_actions();</a>
+<a name="ln533">    op = g_hash_table_lookup(recurring_actions, id);</a>
+<a name="ln534">    if (op == NULL) {</a>
+<a name="ln535">        goto done;</a>
+<a name="ln536">    }</a>
+<a name="ln537"> </a>
+<a name="ln538">    /* Tell operation_finalize() not to reschedule the operation */</a>
+<a name="ln539">    op-&gt;cancel = TRUE;</a>
+<a name="ln540"> </a>
+<a name="ln541">    /* Stop tracking it as a recurring operation, and stop its timer */</a>
+<a name="ln542">    cancel_recurring_action(op);</a>
+<a name="ln543"> </a>
+<a name="ln544">    /* If the op has a PID, it's an in-flight child process, so kill it.</a>
+<a name="ln545">     *</a>
+<a name="ln546">     * Whether the kill succeeds or fails, the main loop will send the op to</a>
+<a name="ln547">     * operation_finished() (and thus operation_finalize()) when the process</a>
+<a name="ln548">     * goes away.</a>
+<a name="ln549">     */</a>
+<a name="ln550">    if (op-&gt;pid != 0) {</a>
+<a name="ln551">        crm_info(&quot;Terminating in-flight op %s (pid %d) early because it was cancelled&quot;,</a>
+<a name="ln552">                 id, op-&gt;pid);</a>
+<a name="ln553">        cancelled = mainloop_child_kill(op-&gt;pid);</a>
+<a name="ln554">        if (cancelled == FALSE) {</a>
+<a name="ln555">            crm_err(&quot;Termination of %s (pid %d) failed&quot;, id, op-&gt;pid);</a>
+<a name="ln556">        }</a>
+<a name="ln557">        goto done;</a>
+<a name="ln558">    }</a>
+<a name="ln559"> </a>
+<a name="ln560">    /* In-flight systemd and upstart ops don't have a pid. The relevant handlers</a>
+<a name="ln561">     * will call operation_finalize() when the operation completes.</a>
+<a name="ln562">     * @TODO: Can we request early termination, maybe using</a>
+<a name="ln563">     * dbus_pending_call_cancel()?</a>
+<a name="ln564">     */</a>
+<a name="ln565">    if (inflight_systemd_or_upstart(op)) {</a>
+<a name="ln566">        crm_info(&quot;Will cancel %s op %s when in-flight instance completes&quot;,</a>
+<a name="ln567">                 op-&gt;standard, op-&gt;id);</a>
+<a name="ln568">        cancelled = FALSE;</a>
+<a name="ln569">        goto done;</a>
+<a name="ln570">    }</a>
+<a name="ln571"> </a>
+<a name="ln572">    /* Otherwise, operation is not in-flight, just report as cancelled */</a>
+<a name="ln573">    op-&gt;status = PCMK_LRM_OP_CANCELLED;</a>
+<a name="ln574">    if (op-&gt;opaque-&gt;callback) {</a>
+<a name="ln575">        op-&gt;opaque-&gt;callback(op);</a>
+<a name="ln576">    }</a>
+<a name="ln577"> </a>
+<a name="ln578">    blocked_ops = g_list_remove(blocked_ops, op);</a>
+<a name="ln579">    services_action_free(op);</a>
+<a name="ln580">    cancelled = TRUE;</a>
+<a name="ln581"> </a>
+<a name="ln582">done:</a>
+<a name="ln583">    free(id);</a>
+<a name="ln584">    return cancelled;</a>
+<a name="ln585">}</a>
+<a name="ln586"> </a>
+<a name="ln587">gboolean</a>
+<a name="ln588">services_action_kick(const char *name, const char *action, int interval /* ms */)</a>
+<a name="ln589">{</a>
+<a name="ln590">    svc_action_t * op = NULL;</a>
+<a name="ln591">    char *id = generate_op_key(name, action, interval);</a>
+<a name="ln592"> </a>
+<a name="ln593">    init_recurring_actions();</a>
+<a name="ln594">    op = g_hash_table_lookup(recurring_actions, id);</a>
+<a name="ln595">    free(id);</a>
+<a name="ln596"> </a>
+<a name="ln597">    if (op == NULL) {</a>
+<a name="ln598">        return FALSE;</a>
+<a name="ln599">    }</a>
+<a name="ln600"> </a>
+<a name="ln601"> </a>
+<a name="ln602">    if (op-&gt;pid || inflight_systemd_or_upstart(op)) {</a>
+<a name="ln603">        return TRUE;</a>
+<a name="ln604">    } else {</a>
+<a name="ln605">        if (op-&gt;opaque-&gt;repeat_timer) {</a>
+<a name="ln606">            g_source_remove(op-&gt;opaque-&gt;repeat_timer);</a>
+<a name="ln607">            op-&gt;opaque-&gt;repeat_timer = 0;</a>
+<a name="ln608">        }</a>
+<a name="ln609">        recurring_action_timer(op);</a>
+<a name="ln610">        return TRUE;</a>
+<a name="ln611">    }</a>
+<a name="ln612"> </a>
+<a name="ln613">}</a>
+<a name="ln614"> </a>
+<a name="ln615">/*!</a>
+<a name="ln616"> * \internal</a>
+<a name="ln617"> * \brief Add a new recurring operation, checking for duplicates</a>
+<a name="ln618"> *</a>
+<a name="ln619"> * \param[in] op               Operation to add</a>
+<a name="ln620"> *</a>
+<a name="ln621"> * \return TRUE if duplicate found (and reschedule), FALSE otherwise</a>
+<a name="ln622"> */</a>
+<a name="ln623">static gboolean</a>
+<a name="ln624">handle_duplicate_recurring(svc_action_t * op)</a>
+<a name="ln625">{</a>
+<a name="ln626">    svc_action_t * dup = NULL;</a>
+<a name="ln627"> </a>
+<a name="ln628">    /* check for duplicates */</a>
+<a name="ln629">    dup = g_hash_table_lookup(recurring_actions, op-&gt;id);</a>
+<a name="ln630"> </a>
+<a name="ln631">    if (dup &amp;&amp; (dup != op)) {</a>
+<a name="ln632">        /* update user data */</a>
+<a name="ln633">        if (op-&gt;opaque-&gt;callback) {</a>
+<a name="ln634">            dup-&gt;opaque-&gt;callback = op-&gt;opaque-&gt;callback;</a>
+<a name="ln635">            dup-&gt;cb_data = op-&gt;cb_data;</a>
+<a name="ln636">            op-&gt;cb_data = NULL;</a>
+<a name="ln637">        }</a>
+<a name="ln638">        /* immediately execute the next interval */</a>
+<a name="ln639">        if (dup-&gt;pid != 0) {</a>
+<a name="ln640">            if (op-&gt;opaque-&gt;repeat_timer) {</a>
+<a name="ln641">                g_source_remove(op-&gt;opaque-&gt;repeat_timer);</a>
+<a name="ln642">                op-&gt;opaque-&gt;repeat_timer = 0;</a>
+<a name="ln643">            }</a>
+<a name="ln644">            recurring_action_timer(dup);</a>
+<a name="ln645">        }</a>
+<a name="ln646">        /* free the duplicate */</a>
+<a name="ln647">        services_action_free(op);</a>
+<a name="ln648">        return TRUE;</a>
+<a name="ln649">    }</a>
+<a name="ln650"> </a>
+<a name="ln651">    return FALSE;</a>
+<a name="ln652">}</a>
+<a name="ln653"> </a>
+<a name="ln654">inline static gboolean</a>
+<a name="ln655">action_exec_helper(svc_action_t * op)</a>
+<a name="ln656">{</a>
+<a name="ln657">    /* Whether a/synchronous must be decided (op-&gt;synchronous) beforehand. */</a>
+<a name="ln658">    if (op-&gt;standard</a>
+<a name="ln659">        &amp;&amp; (strcasecmp(op-&gt;standard, PCMK_RESOURCE_CLASS_UPSTART) == 0)) {</a>
+<a name="ln660">#if SUPPORT_UPSTART</a>
+<a name="ln661">        return upstart_job_exec(op);</a>
+<a name="ln662">#endif</a>
+<a name="ln663">    } else if (op-&gt;standard &amp;&amp; strcasecmp(op-&gt;standard,</a>
+<a name="ln664">                                          PCMK_RESOURCE_CLASS_SYSTEMD) == 0) {</a>
+<a name="ln665">#if SUPPORT_SYSTEMD</a>
+<a name="ln666">        return systemd_unit_exec(op);</a>
+<a name="ln667">#endif</a>
+<a name="ln668">    } else {</a>
+<a name="ln669">        return services_os_action_execute(op);</a>
+<a name="ln670">    }</a>
+<a name="ln671">    /* The 'op' has probably been freed if the execution functions return TRUE</a>
+<a name="ln672">       for the asynchronous 'op'. */</a>
+<a name="ln673">    /* Avoid using the 'op' in here. */</a>
+<a name="ln674"> </a>
+<a name="ln675">    return FALSE;</a>
+<a name="ln676">}</a>
+<a name="ln677"> </a>
+<a name="ln678">void</a>
+<a name="ln679">services_add_inflight_op(svc_action_t * op)</a>
+<a name="ln680">{</a>
+<a name="ln681">    if (op == NULL) {</a>
+<a name="ln682">        return;</a>
+<a name="ln683">    }</a>
+<a name="ln684"> </a>
+<a name="ln685">    CRM_ASSERT(op-&gt;synchronous == FALSE);</a>
+<a name="ln686"> </a>
+<a name="ln687">    /* keep track of ops that are in-flight to avoid collisions in the same namespace */</a>
+<a name="ln688">    if (op-&gt;rsc) {</a>
+<a name="ln689">        inflight_ops = g_list_append(inflight_ops, op);</a>
+<a name="ln690">    }</a>
+<a name="ln691">}</a>
+<a name="ln692"> </a>
+<a name="ln693">/*!</a>
+<a name="ln694"> * \internal</a>
+<a name="ln695"> * \brief Stop tracking an operation that completed</a>
+<a name="ln696"> *</a>
+<a name="ln697"> * \param[in] op  Operation to stop tracking</a>
+<a name="ln698"> */</a>
+<a name="ln699">void</a>
+<a name="ln700">services_untrack_op(svc_action_t *op)</a>
+<a name="ln701">{</a>
+<a name="ln702">    /* Op is no longer in-flight or blocked */</a>
+<a name="ln703">    inflight_ops = g_list_remove(inflight_ops, op);</a>
+<a name="ln704">    blocked_ops = g_list_remove(blocked_ops, op);</a>
+<a name="ln705"> </a>
+<a name="ln706">    /* Op is no longer blocking other ops, so check if any need to run */</a>
+<a name="ln707">    handle_blocked_ops();</a>
+<a name="ln708">}</a>
+<a name="ln709"> </a>
+<a name="ln710">gboolean</a>
+<a name="ln711">services_action_async(svc_action_t * op, void (*action_callback) (svc_action_t *))</a>
+<a name="ln712">{</a>
+<a name="ln713">    op-&gt;synchronous = false;</a>
+<a name="ln714">    if (action_callback) {</a>
+<a name="ln715">        op-&gt;opaque-&gt;callback = action_callback;</a>
+<a name="ln716">    }</a>
+<a name="ln717"> </a>
+<a name="ln718">    if (op-&gt;interval &gt; 0) {</a>
+<a name="ln719">        init_recurring_actions();</a>
+<a name="ln720">        if (handle_duplicate_recurring(op) == TRUE) {</a>
+<a name="ln721">            /* entry rescheduled, dup freed */</a>
+<a name="ln722">            /* exit early */</a>
+<a name="ln723">            return TRUE;</a>
+<a name="ln724">        }</a>
+<a name="ln725">        g_hash_table_replace(recurring_actions, op-&gt;id, op);</a>
+<a name="ln726">    }</a>
+<a name="ln727"> </a>
+<a name="ln728">    if (op-&gt;rsc &amp;&amp; is_op_blocked(op-&gt;rsc)) {</a>
+<a name="ln729">        blocked_ops = g_list_append(blocked_ops, op);</a>
+<a name="ln730">        return TRUE;</a>
+<a name="ln731">    }</a>
+<a name="ln732"> </a>
+<a name="ln733">    return action_exec_helper(op);</a>
+<a name="ln734">}</a>
+<a name="ln735"> </a>
+<a name="ln736"> </a>
+<a name="ln737">static gboolean processing_blocked_ops = FALSE;</a>
+<a name="ln738"> </a>
+<a name="ln739">gboolean</a>
+<a name="ln740">is_op_blocked(const char *rsc)</a>
+<a name="ln741">{</a>
+<a name="ln742">    GList *gIter = NULL;</a>
+<a name="ln743">    svc_action_t *op = NULL;</a>
+<a name="ln744"> </a>
+<a name="ln745">    for (gIter = inflight_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln746">        op = gIter-&gt;data;</a>
+<a name="ln747">        if (safe_str_eq(op-&gt;rsc, rsc)) {</a>
+<a name="ln748">            return TRUE;</a>
+<a name="ln749">        }</a>
+<a name="ln750">    }</a>
+<a name="ln751"> </a>
+<a name="ln752">    return FALSE;</a>
+<a name="ln753">}</a>
+<a name="ln754"> </a>
+<a name="ln755">static void</a>
+<a name="ln756">handle_blocked_ops(void)</a>
+<a name="ln757">{</a>
+<a name="ln758">    GList *executed_ops = NULL;</a>
+<a name="ln759">    GList *gIter = NULL;</a>
+<a name="ln760">    svc_action_t *op = NULL;</a>
+<a name="ln761">    gboolean res = FALSE;</a>
+<a name="ln762"> </a>
+<a name="ln763">    if (processing_blocked_ops) {</a>
+<a name="ln764">        /* avoid nested calling of this function */</a>
+<a name="ln765">        return;</a>
+<a name="ln766">    }</a>
+<a name="ln767"> </a>
+<a name="ln768">    processing_blocked_ops = TRUE;</a>
+<a name="ln769"> </a>
+<a name="ln770">    /* n^2 operation here, but blocked ops are incredibly rare. this list</a>
+<a name="ln771">     * will be empty 99% of the time. */</a>
+<a name="ln772">    for (gIter = blocked_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln773">        op = gIter-&gt;data;</a>
+<a name="ln774">        if (is_op_blocked(op-&gt;rsc)) {</a>
+<a name="ln775">            continue;</a>
+<a name="ln776">        }</a>
+<a name="ln777">        executed_ops = g_list_append(executed_ops, op);</a>
+<a name="ln778">        res = action_exec_helper(op);</a>
+<a name="ln779">        if (res == FALSE) {</a>
+<a name="ln780">            op-&gt;status = PCMK_LRM_OP_ERROR;</a>
+<a name="ln781">            /* this can cause this function to be called recursively</a>
+<a name="ln782">             * which is why we have processing_blocked_ops static variable */</a>
+<a name="ln783">            operation_finalize(op);</a>
+<a name="ln784">        }</a>
+<a name="ln785">    }</a>
+<a name="ln786"> </a>
+<a name="ln787">    for (gIter = executed_ops; gIter != NULL; gIter = gIter-&gt;next) {</a>
+<a name="ln788">        op = gIter-&gt;data;</a>
+<a name="ln789">        blocked_ops = g_list_remove(blocked_ops, op);</a>
+<a name="ln790">    }</a>
+<a name="ln791">    g_list_free(executed_ops);</a>
+<a name="ln792"> </a>
+<a name="ln793">    processing_blocked_ops = FALSE;</a>
+<a name="ln794">}</a>
+<a name="ln795"> </a>
+<a name="ln796">gboolean</a>
+<a name="ln797">services_action_sync(svc_action_t * op)</a>
+<a name="ln798">{</a>
+<a name="ln799">    gboolean rc = TRUE;</a>
+<a name="ln800"> </a>
+<a name="ln801">    if (op == NULL) {</a>
+<a name="ln802">        crm_trace(&quot;No operation to execute&quot;);</a>
+<a name="ln803">        return FALSE;</a>
+<a name="ln804">    }</a>
+<a name="ln805"> </a>
+<a name="ln806">    op-&gt;synchronous = true;</a>
+<a name="ln807">    rc = action_exec_helper(op);</a>
+<a name="ln808">    crm_trace(&quot; &gt; %s_%s_%d: %s = %d&quot;, op-&gt;rsc, op-&gt;action, op-&gt;interval, op-&gt;opaque-&gt;exec, op-&gt;rc);</a>
+<a name="ln809">    if (op-&gt;stdout_data) {</a>
+<a name="ln810">        crm_trace(&quot; &gt;  stdout: %s&quot;, op-&gt;stdout_data);</a>
+<a name="ln811">    }</a>
+<a name="ln812">    if (op-&gt;stderr_data) {</a>
+<a name="ln813">        crm_trace(&quot; &gt;  stderr: %s&quot;, op-&gt;stderr_data);</a>
+<a name="ln814">    }</a>
+<a name="ln815">    return rc;</a>
+<a name="ln816">}</a>
+<a name="ln817"> </a>
+<a name="ln818">GList *</a>
+<a name="ln819">get_directory_list(const char *root, gboolean files, gboolean executable)</a>
+<a name="ln820">{</a>
+<a name="ln821">    return services_os_get_directory_list(root, files, executable);</a>
+<a name="ln822">}</a>
+<a name="ln823"> </a>
+<a name="ln824">GList *</a>
+<a name="ln825">services_list(void)</a>
+<a name="ln826">{</a>
+<a name="ln827">    return resources_list_agents(PCMK_RESOURCE_CLASS_LSB, NULL);</a>
+<a name="ln828">}</a>
+<a name="ln829"> </a>
+<a name="ln830">#if SUPPORT_HEARTBEAT</a>
+<a name="ln831">static GList *</a>
+<a name="ln832">resources_os_list_hb_agents(void)</a>
+<a name="ln833">{</a>
+<a name="ln834">    return services_os_get_directory_list(HB_RA_DIR, TRUE, TRUE);</a>
+<a name="ln835">}</a>
+<a name="ln836">#endif</a>
+<a name="ln837"> </a>
+<a name="ln838">GList *</a>
+<a name="ln839">resources_list_standards(void)</a>
+<a name="ln840">{</a>
+<a name="ln841">    GList *standards = NULL;</a>
+<a name="ln842">    GList *agents = NULL;</a>
+<a name="ln843"> </a>
+<a name="ln844">    standards = g_list_append(standards, strdup(PCMK_RESOURCE_CLASS_OCF));</a>
+<a name="ln845">    standards = g_list_append(standards, strdup(PCMK_RESOURCE_CLASS_LSB));</a>
+<a name="ln846">    standards = g_list_append(standards, strdup(PCMK_RESOURCE_CLASS_SERVICE));</a>
+<a name="ln847"> </a>
+<a name="ln848">#if SUPPORT_SYSTEMD</a>
+<a name="ln849">    agents = systemd_unit_listall();</a>
+<a name="ln850">    if (agents) {</a>
+<a name="ln851">        standards = g_list_append(standards,</a>
+<a name="ln852">                                  strdup(PCMK_RESOURCE_CLASS_SYSTEMD));</a>
+<a name="ln853">        g_list_free_full(agents, free);</a>
+<a name="ln854">    }</a>
+<a name="ln855">#endif</a>
+<a name="ln856"> </a>
+<a name="ln857">#if SUPPORT_UPSTART</a>
+<a name="ln858">    agents = upstart_job_listall();</a>
+<a name="ln859">    if (agents) {</a>
+<a name="ln860">        standards = g_list_append(standards,</a>
+<a name="ln861">                                  strdup(PCMK_RESOURCE_CLASS_UPSTART));</a>
+<a name="ln862">        g_list_free_full(agents, free);</a>
+<a name="ln863">    }</a>
+<a name="ln864">#endif</a>
+<a name="ln865"> </a>
+<a name="ln866">#if SUPPORT_NAGIOS</a>
+<a name="ln867">    agents = resources_os_list_nagios_agents();</a>
+<a name="ln868">    if (agents) {</a>
+<a name="ln869">        standards = g_list_append(standards,</a>
+<a name="ln870">                                  strdup(PCMK_RESOURCE_CLASS_NAGIOS));</a>
+<a name="ln871">        g_list_free_full(agents, free);</a>
+<a name="ln872">    }</a>
+<a name="ln873">#endif</a>
+<a name="ln874"> </a>
+<a name="ln875">#if SUPPORT_HEARTBEAT</a>
+<a name="ln876">    standards = g_list_append(standards, strdup(PCMK_RESOURCE_CLASS_HB));</a>
+<a name="ln877">#endif</a>
+<a name="ln878"> </a>
+<a name="ln879">    return standards;</a>
+<a name="ln880">}</a>
+<a name="ln881"> </a>
+<a name="ln882">GList *</a>
+<a name="ln883">resources_list_providers(const char *standard)</a>
+<a name="ln884">{</a>
+<a name="ln885">    if (strcasecmp(standard, PCMK_RESOURCE_CLASS_OCF) == 0) {</a>
+<a name="ln886">        return resources_os_list_ocf_providers();</a>
+<a name="ln887">    }</a>
+<a name="ln888"> </a>
+<a name="ln889">    return NULL;</a>
+<a name="ln890">}</a>
+<a name="ln891"> </a>
+<a name="ln892">GList *</a>
+<a name="ln893">resources_list_agents(const char *standard, const char *provider)</a>
+<a name="ln894">{</a>
+<a name="ln895">    if ((standard == NULL)</a>
+<a name="ln896">        || (strcasecmp(standard, PCMK_RESOURCE_CLASS_SERVICE) == 0)) {</a>
+<a name="ln897"> </a>
+<a name="ln898">        GList *tmp1;</a>
+<a name="ln899">        GList *tmp2;</a>
+<a name="ln900">        GList *result = resources_os_list_lsb_agents();</a>
+<a name="ln901"> </a>
+<a name="ln902">        if (standard == NULL) {</a>
+<a name="ln903">            tmp1 = result;</a>
+<a name="ln904">            tmp2 = resources_os_list_ocf_agents(NULL);</a>
+<a name="ln905">            if (tmp2) {</a>
+<a name="ln906">                result = g_list_concat(tmp1, tmp2);</a>
+<a name="ln907">            }</a>
+<a name="ln908">        }</a>
+<a name="ln909">#if SUPPORT_SYSTEMD</a>
+<a name="ln910">        tmp1 = result;</a>
+<a name="ln911">        tmp2 = systemd_unit_listall();</a>
+<a name="ln912">        if (tmp2) {</a>
+<a name="ln913">            result = g_list_concat(tmp1, tmp2);</a>
+<a name="ln914">        }</a>
+<a name="ln915">#endif</a>
+<a name="ln916"> </a>
+<a name="ln917">#if SUPPORT_UPSTART</a>
+<a name="ln918">        tmp1 = result;</a>
+<a name="ln919">        tmp2 = upstart_job_listall();</a>
+<a name="ln920">        if (tmp2) {</a>
+<a name="ln921">            result = g_list_concat(tmp1, tmp2);</a>
+<a name="ln922">        }</a>
+<a name="ln923">#endif</a>
+<a name="ln924"> </a>
+<a name="ln925">        return result;</a>
+<a name="ln926"> </a>
+<a name="ln927">    } else if (strcasecmp(standard, PCMK_RESOURCE_CLASS_OCF) == 0) {</a>
+<a name="ln928">        return resources_os_list_ocf_agents(provider);</a>
+<a name="ln929">    } else if (strcasecmp(standard, PCMK_RESOURCE_CLASS_LSB) == 0) {</a>
+<a name="ln930">        return resources_os_list_lsb_agents();</a>
+<a name="ln931">#if SUPPORT_HEARTBEAT</a>
+<a name="ln932">    } else if (strcasecmp(standard, PCMK_RESOURCE_CLASS_HB) == 0) {</a>
+<a name="ln933">        return resources_os_list_hb_agents();</a>
+<a name="ln934">#endif</a>
+<a name="ln935">#if SUPPORT_SYSTEMD</a>
+<a name="ln936">    } else if (strcasecmp(standard, PCMK_RESOURCE_CLASS_SYSTEMD) == 0) {</a>
+<a name="ln937">        return systemd_unit_listall();</a>
+<a name="ln938">#endif</a>
+<a name="ln939">#if SUPPORT_UPSTART</a>
+<a name="ln940">    } else if (strcasecmp(standard, PCMK_RESOURCE_CLASS_UPSTART) == 0) {</a>
+<a name="ln941">        return upstart_job_listall();</a>
+<a name="ln942">#endif</a>
+<a name="ln943">#if SUPPORT_NAGIOS</a>
+<a name="ln944">    } else if (strcasecmp(standard, PCMK_RESOURCE_CLASS_NAGIOS) == 0) {</a>
+<a name="ln945">        return resources_os_list_nagios_agents();</a>
+<a name="ln946">#endif</a>
+<a name="ln947">    }</a>
+<a name="ln948"> </a>
+<a name="ln949">    return NULL;</a>
+<a name="ln950">}</a>
+
+</code></pre>
+<div class="balloon" rel="200"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op'. Check lines: 200, 199.</p></div>
+<div class="balloon" rel="224"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op->opaque'. Check lines: 224, 200.</p></div>
+<div class="balloon" rel="232"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op->agent'. Check lines: 232, 205.</p></div>
+<div class="balloon" rel="241"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'strdup' function. Inspect the first argument. Check lines: 241, 217.</p></div>
+<div class="balloon" rel="328"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V575/" target="_blank">V575</a> The potential null pointer is passed into 'sprintf' function. Inspect the first argument. Check lines: 328, 327.</p></div>
+<div class="balloon" rel="365"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op'. Check lines: 365, 364.</p></div>
+<div class="balloon" rel="367"><p><span style="font-size:18px">&uarr;</span> <a href="https://www.viva64.com/en/w/V522/" target="_blank">V522</a> There might be dereferencing of a potential null pointer 'op->opaque'. Check lines: 367, 365.</p></div>
+
+<link rel="stylesheet" href="highlight.css">
+<script src="highlight.pack.js"></script>
+<script src="highlightjs-line-numbers.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+<script>hljs.initLineNumbersOnLoad();</script>
+<script>
+  $(document).ready(function() {
+      $('.balloon').each(function () {
+          var bl = $(this);
+          var line = bl.attr('rel');
+          var text = $('a[name="ln'+line+'"').text();
+
+          var space_count = 0;
+          for(var i = 0; i<text.length; i++){
+              var char = text[i];
+              if((char !== ' ')&&(char !== '\t'))break;
+              if(char === '\t')space_count++;
+              space_count++;
+          }
+
+          bl.css('margin-left', space_count*8);
+          $('a[name="ln'+line+'"').after(bl);
+      });
+
+      window.location = window.location;
+  });
+</script>
+</body>
+</html>
